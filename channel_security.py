@@ -61,7 +61,7 @@ async def verify_channel_access(bot: Bot, telegram_user_id: int, raw_channel_tar
     # Only use channel_target as fallback if it's a human-readable @username, not raw numeric ID
     if raw_title:
         title = raw_title
-    elif channel_target and not str(channel_id).lstrip("-").isdigit():
+    elif channel_target and not channel_target.lstrip("@").lstrip("-").isdigit():
         title = channel_target
     else:
         title = ""  # let downstream enrich_display_label handle the "Канал без названия" fallback

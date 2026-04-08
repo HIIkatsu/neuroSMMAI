@@ -129,12 +129,11 @@ class TestChannelSecurityTitle(unittest.TestCase):
         # Simulate the new logic from channel_security.py
         chat_title = None
         channel_target = "-1001234567890"
-        channel_id = -1001234567890
 
         raw_title = (chat_title or "").strip()
         if raw_title:
             title = raw_title
-        elif channel_target and not str(channel_id).lstrip("-").isdigit():
+        elif channel_target and not channel_target.lstrip("@").lstrip("-").isdigit():
             title = channel_target
         else:
             title = ""
@@ -144,12 +143,11 @@ class TestChannelSecurityTitle(unittest.TestCase):
     def test_real_title_preserved(self):
         chat_title = "Мой канал"
         channel_target = "-1001234567890"
-        channel_id = -1001234567890
 
         raw_title = (chat_title or "").strip()
         if raw_title:
             title = raw_title
-        elif channel_target and not str(channel_id).lstrip("-").isdigit():
+        elif channel_target and not channel_target.lstrip("@").lstrip("-").isdigit():
             title = channel_target
         else:
             title = ""
@@ -244,10 +242,10 @@ class TestStructureCardinalityValidation(unittest.TestCase):
         body = "1. Zelda — великая игра."
         cta = "Какая из 3 игр вам нравится?"
         issues = self._validate(body, cta, "топ 3 игры")
-        # No numbered items detected (need >= 2), so count_list_items returns 0
-        # With actual=0, the validator should not flag (no items means not a list structure)
-        # This is fine — the issue is when a list IS present but wrong count
-        self.assertTrue(len(issues) == 0 or any("cardinality" in i[0] for i in issues))
+        # Single-item text is not detected as a list (need >= 2), so count_list_items=0
+        # With actual=0 the cardinality check does NOT fire (no list structure to validate)
+        # This is intentional: we only flag when a list IS present but with wrong count
+        self.assertEqual(len(issues), 0)
 
     def test_top_3_with_3_items_ok(self):
         body = "1. Zelda\n2. Mario\n3. Elden Ring"
