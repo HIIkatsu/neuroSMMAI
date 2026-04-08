@@ -1,0 +1,265 @@
+from __future__ import annotations
+
+import asyncio
+import base64
+import os
+import logging
+from typing import Optional
+
+import httpx
+from openai import AsyncOpenAI
+from openai import APITimeoutError, APIConnectionError, RateLimitError, APIError
+
+DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
+DEFAULT_IMAGE_SIZE = os.getenv("IMAGE_GENERATION_SIZE", "1024x1024")
+DEFAULT_CHAT_MAX_TOKENS = int(os.getenv("OPENROUTER_MAX_TOKENS", "700"))
+
+logger = logging.getLogger(__name__)
+
+# Module-level cache: (api_key, base_url) → AsyncOpenAI client
+# Each client owns a persistent httpx connection pool — avoids recreating
+# TCP connections on every AI call.
+_clients: dict[tuple[str, str], AsyncOpenAI] = {}
+_clients_lock = asyncio.Lock()
+
+
+def _resolve_base_url(base_url: Optional[str] = None) -> str:
+    return (base_url or os.getenv("OPENAI_BASE_URL") or DEFAULT_BASE_URL).strip()
+
+
+def _resolve_proxy() -> str | None:
+    for key in (
+        "OPENROUTER_PROXY_URL",
+        "LLM_PROXY_URL",
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "ALL_PROXY",
+    ):
+        value = (os.getenv(key) or "").strip()
+        if value:
+            return value
+    return None
+
+
+def _clamp_max_tokens(value: Optional[int]) -> int:
+    if value is None:
+        return DEFAULT_CHAT_MAX_TOKENS
+    try:
+        n = int(value)
+    except Exception:
+        return DEFAULT_CHAT_MAX_TOKENS
+    if n < 32:
+        return 32
+    if n > 1200:
+        return 1200
+    return n
+
+
+def _make_async_http_client(proxy: str | None = None) -> httpx.AsyncClient:
+    """Создаёт async httpx-клиент для OpenAI SDK."""
+    timeout = httpx.Timeout(connect=20.0, read=90.0, write=60.0, pool=60.0)
+    transport = httpx.AsyncHTTPTransport(retries=1)
+    kwargs: dict = dict(timeout=timeout, trust_env=False, transport=transport)
+    if proxy:
+        kwargs["proxy"] = proxy
+    return httpx.AsyncClient(**kwargs)
+
+
+def make_async_client(api_key: str, base_url: Optional[str] = None) -> AsyncOpenAI:
+    """Создаёт AsyncOpenAI клиент. Caller отвечает за aclose()."""
+    base_url = _resolve_base_url(base_url)
+    proxy = _resolve_proxy()
+    http_client = _make_async_http_client(proxy)
+    return AsyncOpenAI(
+        base_url=base_url,
+        api_key=api_key,
+        http_client=http_client,
+    )
+
+
+# Backward-compat alias (синхронный клиент больше не нужен нигде, но если
+# где-то остался импорт make_client — не падаем)
+def make_client(api_key: str, base_url: Optional[str] = None) -> AsyncOpenAI:  # type: ignore[return]
+    logger.warning("make_client() is deprecated; use make_async_client()")
+    return make_async_client(api_key, base_url=base_url)
+
+
+async def _get_shared_client(api_key: str, base_url: Optional[str] = None) -> AsyncOpenAI:
+    """Return a cached AsyncOpenAI client for the given (api_key, base_url) pair.
+
+    The client owns a persistent httpx connection pool that is reused across
+    calls, avoiding TCP handshake overhead on every AI request.
+    Caller must NOT call ``client.close()`` — the client is shared.
+    """
+    resolved_url = _resolve_base_url(base_url)
+    cache_key = (api_key, resolved_url)
+    async with _clients_lock:
+        if cache_key not in _clients:
+            http_client = _make_async_http_client(_resolve_proxy())
+            _clients[cache_key] = AsyncOpenAI(
+                base_url=resolved_url,
+                api_key=api_key,
+                http_client=http_client,
+            )
+        return _clients[cache_key]
+
+
+async def close_all_clients() -> None:
+    """Close all cached OpenAI clients. Call once on application shutdown."""
+    for client in list(_clients.values()):
+        try:
+            await client.close()
+        except Exception:
+            pass
+    _clients.clear()
+
+
+async def ai_chat(
+    api_key: str,
+    model: str,
+    messages: list[dict],
+    temperature: float = 0.7,
+    base_url: Optional[str] = None,
+    max_tokens: Optional[int] = None,
+) -> str:
+    """Асинхронный вызов chat/completions с retry и exponential backoff."""
+    safe_max_tokens = _clamp_max_tokens(max_tokens)
+    client = await _get_shared_client(api_key, base_url)
+
+    max_retries = 3
+    last_exc: Exception | None = None
+
+    for attempt in range(max_retries):
+        try:
+            r = await client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=safe_max_tokens,
+            )
+            return (r.choices[0].message.content or "").strip()
+        except (APITimeoutError, APIConnectionError) as exc:
+            last_exc = exc
+            delay = 2 ** attempt  # 1s, 2s, 4s
+            logger.warning(
+                "ai_chat transient error (attempt %d/%d) model=%s err=%s — retrying in %ds",
+                attempt + 1, max_retries, model, exc, delay,
+            )
+            await asyncio.sleep(delay)
+        except RateLimitError as exc:
+            last_exc = exc
+            delay = 2 ** attempt + 2  # 3s, 4s, 6s — longer for rate limits
+            logger.warning(
+                "ai_chat rate limit (attempt %d/%d) model=%s err=%s — retrying in %ds",
+                attempt + 1, max_retries, model, exc, delay,
+            )
+            await asyncio.sleep(delay)
+        except APIError as exc:
+            # Non-transient API errors (e.g. bad request) — don't retry
+            logger.warning("ai_chat api error model=%s err=%s", model, exc)
+            return ""
+        except Exception as exc:
+            logger.exception("ai_chat unexpected error model=%s err=%s", model, exc)
+            return ""
+
+    logger.warning("ai_chat exhausted %d retries model=%s last_err=%s", max_retries, model, last_exc)
+    return ""
+
+
+async def whisper_transcribe(
+    api_key: str,
+    audio_bytes: bytes,
+    filename: str = "voice.ogg",
+    *,
+    language: Optional[str] = "ru",
+) -> str:
+    """Transcribe audio bytes using OpenAI Whisper. Returns transcribed text or empty string on failure."""
+    if not api_key or not audio_bytes:
+        return ""
+    # Whisper is only available on OpenAI's API, not OpenRouter
+    openai_base = "https://api.openai.com/v1"
+    client = await _get_shared_client(api_key, openai_base)
+    try:
+        transcript = await client.audio.transcriptions.create(
+            model="whisper-1",
+            file=(filename, audio_bytes),
+            language=language,
+        )
+        return (transcript.text or "").strip()
+    except RateLimitError as exc:
+        logger.warning("whisper_transcribe rate limit err=%s", exc)
+        return ""
+    except APITimeoutError as exc:
+        logger.warning("whisper_transcribe timeout err=%s", exc)
+        return ""
+    except APIConnectionError as exc:
+        logger.warning("whisper_transcribe connection error err=%s", exc)
+        return ""
+    except APIError as exc:
+        logger.warning("whisper_transcribe api error err=%s", exc)
+        return ""
+    except Exception as exc:
+        logger.exception("whisper_transcribe unexpected error err=%s", exc)
+        return ""
+
+
+async def ai_image_generate(
+    api_key: str,
+    model: str,
+    prompt: str,
+    *,
+    base_url: Optional[str] = None,
+    size: str = DEFAULT_IMAGE_SIZE,
+    quality: Optional[str] = None,
+    background: Optional[str] = None,
+    extra_body: Optional[dict] = None,
+) -> bytes | None:
+    if not api_key or not model or not prompt:
+        return None
+
+    client = await _get_shared_client(api_key, base_url)
+    try:
+        kwargs: dict = {"model": model, "prompt": prompt, "size": size}
+        if quality:
+            kwargs["quality"] = quality
+        if background:
+            kwargs["background"] = background
+        if extra_body:
+            kwargs["extra_body"] = extra_body
+
+        result = await client.images.generate(**kwargs)
+        data = getattr(result, "data", None) or []
+        if not data:
+            return None
+
+        item = data[0]
+        b64 = getattr(item, "b64_json", None)
+        if b64:
+            return base64.b64decode(b64)
+
+        url = getattr(item, "url", None)
+        if not url:
+            return None
+
+        # Качаем изображение через отдельный async client
+        proxy = _resolve_proxy()
+        fetch_timeout = httpx.Timeout(connect=20.0, read=120.0, write=60.0, pool=60.0)
+        transport = httpx.AsyncHTTPTransport(retries=1)
+        fetch_kwargs: dict = dict(
+            timeout=fetch_timeout,
+            trust_env=False,
+            transport=transport,
+            follow_redirects=True,
+        )
+        if proxy:
+            fetch_kwargs["proxy"] = proxy
+        async with httpx.AsyncClient(**fetch_kwargs) as http_client:
+            resp = await http_client.get(url)
+            resp.raise_for_status()
+            return resp.content
+
+    except (APITimeoutError, RateLimitError, APIConnectionError, APIError):
+        return None
+    except Exception:
+        logger.exception("ai_image_generate unexpected error model=%s", model)
+        return None

@@ -1,0 +1,29 @@
+# /etc/systemd/system/neurosmm.service
+# Example systemd unit for running neuroSMM behind nginx.
+#
+# CRITICAL: --proxy-headers and --forwarded-allow-ips are required so that
+# request.client.host returns the real client IP (not 127.0.0.1 from nginx).
+# Without these flags, rate limiting and YooKassa webhook IP verification break.
+
+[Unit]
+Description=NeuroSMM Mini App (uvicorn)
+After=network.target
+
+[Service]
+Type=simple
+User=neurosmm
+Group=neurosmm
+WorkingDirectory=/opt/neurosmm
+EnvironmentFile=/opt/neurosmm/.env
+
+ExecStart=/opt/neurosmm/venv/bin/uvicorn miniapp_server:app \
+    --host 127.0.0.1 \
+    --port 8000 \
+    --proxy-headers \
+    --forwarded-allow-ips="127.0.0.1"
+
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

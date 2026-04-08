@@ -1,0 +1,9 @@
+.env
+bot.db
+bot.db-shm
+bot.db-wal
+venv/
+__pycache__/
+*.pyc
+uploads/
+generated_images/

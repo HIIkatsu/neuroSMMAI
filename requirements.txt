@@ -1,0 +1,14 @@
+aiogram==3.4.1
+httpx
+python-dotenv
+aiosqlite
+openai
+apscheduler
+trafilatura
+uvicorn[standard]
+fastapi
+
+aiohttp-socks
+
+python-multipart
+socksio
