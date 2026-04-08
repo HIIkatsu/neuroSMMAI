@@ -108,7 +108,7 @@ const _ACTION_ALLOWLIST = Object.freeze(new Set([
   // Source chips UI
   'addNewsSource', 'removeNewsSource',
   // Welcome screen
-  'welcomeSaveChannel',
+  'welcomeSaveChannel', 'welcomeGoToAddChannel',
 ]));
 document.addEventListener('click', function(e) {
   const btn = e.target.closest('[data-action]');
@@ -3026,7 +3026,6 @@ function _renderWelcomeScreen() {
       <div class="shell welcome-screen">
         <div class="welcome-wrap">
           <div class="welcome-hero welcome-hero-landing">
-            <div class="welcome-logo">N<span>SMM</span></div>
             <h1 class="welcome-title">NeuroSMM</h1>
             <p class="welcome-tagline">ИИ-менеджер вашего Telegram-канала</p>
             <div class="welcome-features">
@@ -5370,6 +5369,7 @@ window.clearEditorButtons = clearEditorButtons;
 window.undoEditorChange = undoEditorChange;
 window.redoEditorChange = redoEditorChange;
 window.welcomeSaveChannel = welcomeSaveChannel;
+window.welcomeGoToAddChannel = welcomeGoToAddChannel;
 
 
 
