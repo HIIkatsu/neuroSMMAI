@@ -128,6 +128,7 @@ _ALLOWED_TABLES = frozenset({
     "generation_history", "user_media_inbox", "news_logs", "channel_profiles",
     "dm_memory", "subscriptions", "feature_quotas", "payment_events",
     "user_subscriptions", "user_feature_quotas", "schema_versions",
+    "scheduler_dedup",
 })
 
 _ALLOWED_COLUMNS = frozenset({
@@ -628,6 +629,41 @@ async def _ensure_payment_events_schema(db: aiosqlite.Connection):
     )
 
 
+async def _ensure_scheduler_dedup_schema(db: aiosqlite.Connection):
+    """Durable dedup table for scheduler — survives process restarts.
+
+    Each row represents a scheduler event that was already processed.
+    The ``dedup_key`` is unique and prevents the same schedule slot,
+    plan item, or news item from being processed twice in the same
+    time window.
+
+    Rows older than 48 hours are garbage-collected on each startup so
+    the table stays small.
+    """
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS scheduler_dedup (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            dedup_key TEXT NOT NULL UNIQUE,
+            trigger_type TEXT NOT NULL DEFAULT '',
+            owner_id INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_scheduler_dedup_key "
+        "ON scheduler_dedup(dedup_key)"
+    )
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_scheduler_dedup_created "
+        "ON scheduler_dedup(created_at)"
+    )
+    # Garbage-collect entries older than 48 hours on schema init
+    cutoff = (datetime.utcnow() - timedelta(hours=48)).isoformat(timespec="seconds")
+    await db.execute("DELETE FROM scheduler_dedup WHERE created_at < ? AND created_at != ''", (cutoff,))
+
+
 # Keys that should live per-channel in channel_profiles rather than in the
 # global settings table.  Used by backfill migration and by get_channel_settings().
 _CHANNEL_SETTINGS_KEYS = (
@@ -738,6 +774,7 @@ async def init_db():
         await _ensure_subscriptions_schema(db)
         await _ensure_feature_quotas_schema(db)
         await _ensure_payment_events_schema(db)
+        await _ensure_scheduler_dedup_schema(db)
 
         for table in ("schedules", "plan_items", "post_logs", "draft_posts", "generation_history", "user_media_inbox", "news_logs", "channel_profiles"):
             await _ensure_user_binding_column(db, table)
@@ -2910,3 +2947,41 @@ async def is_payment_processed(payment_id: str) -> bool:
         )
         row = await cur.fetchone()
     return row is not None
+
+
+# ---------------------------------------------------------------------------
+# Durable scheduler dedup helpers
+# ---------------------------------------------------------------------------
+
+async def check_scheduler_dedup(dedup_key: str) -> bool:
+    """Return True if *dedup_key* has already been processed (should skip)."""
+    async with _db_ctx() as conn:
+        cur = await conn.execute(
+            "SELECT 1 FROM scheduler_dedup WHERE dedup_key=? LIMIT 1",
+            (dedup_key,),
+        )
+        return (await cur.fetchone()) is not None
+
+
+async def set_scheduler_dedup(dedup_key: str, trigger_type: str = "", owner_id: int = 0) -> bool:
+    """Mark *dedup_key* as processed.  Returns True on success, False if already exists."""
+    now = datetime.utcnow().isoformat(timespec="seconds")
+    try:
+        async with _db_ctx() as conn:
+            await conn.execute(
+                "INSERT OR IGNORE INTO scheduler_dedup(dedup_key, trigger_type, owner_id, created_at) VALUES(?,?,?,?)",
+                (dedup_key, trigger_type, int(owner_id), now),
+            )
+            await conn.commit()
+            return True
+    except Exception:
+        return False
+
+
+async def cleanup_scheduler_dedup(max_age_hours: int = 48) -> int:
+    """Remove dedup entries older than *max_age_hours*. Returns count deleted."""
+    cutoff = (datetime.utcnow() - timedelta(hours=max_age_hours)).isoformat(timespec="seconds")
+    async with _db_ctx() as conn:
+        cur = await conn.execute("DELETE FROM scheduler_dedup WHERE created_at < ? AND created_at != ''", (cutoff,))
+        await conn.commit()
+        return cur.rowcount or 0
