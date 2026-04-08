@@ -28,7 +28,7 @@ def enrich_display_label(channel: dict[str, Any] | None) -> dict[str, Any] | Non
     elif target and not re.match(r'^-?\d+$', target):
         label = target
     else:
-        label = title or "Канал без названия"
+        label = "Канал без названия"
     channel["display_label"] = label
     return channel
 

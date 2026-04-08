@@ -22,6 +22,7 @@ from miniapp_schemas import AIAnalyticsRequest, ChannelActivate, ChannelCreate, 
 from miniapp_settings_service import normalize_settings_update
 from miniapp_shared import cache_get, cache_invalidate, cache_set, clean_text, create_bot, current_user_id, drafts_limit_value, owner_settings, verify_channel_ownership
 from channel_profile_resolver import normalize_topic_to_family, resolve_channel_policy, build_family_rules_block
+from miniapp_bootstrap_service import enrich_display_label
 from runtime_trace import new_trace_id, trace_channel_label, debug_fields, is_debug_trace_enabled
 
 router = APIRouter(tags=["core"])
@@ -106,28 +107,6 @@ async def _require_feature_quota(owner_id: int, feature: str, label: str = "") -
 
 
 
-def _enrich_channel_display_label(channel: dict | None) -> dict | None:
-    """Add ``display_label`` to a channel dict, preferring title over raw target/id.
-
-    This is the canonical server-side resolution that prevents the frontend
-    from ever showing a raw numeric Telegram chat ID as the channel name.
-    """
-    if not channel:
-        return channel
-    title = str(channel.get("title") or "").strip()
-    target = str(channel.get("channel_target") or "").strip()
-    # Prefer human-readable title; fall back to @-prefixed target; never show bare numeric IDs
-    import re
-    if title and not re.match(r'^-?\d+$', title):
-        label = title
-    elif target and not re.match(r'^-?\d+$', target):
-        label = target
-    else:
-        label = title or "Канал без названия"
-    channel["display_label"] = label
-    return channel
-
-
 @router.get("/api/bootstrap/core")
 async def bootstrap_core(telegram_user_id: int = Depends(current_user_id)):
     cached = cache_get(telegram_user_id, 'core')
@@ -137,9 +116,9 @@ async def bootstrap_core(telegram_user_id: int = Depends(current_user_id)):
     payload = await bootstrap_core_payload(telegram_user_id)
     payload["user"] = {"id": telegram_user_id}
     # Enrich channel data with display_label for frontend
-    _enrich_channel_display_label(payload.get("active_channel"))
+    enrich_display_label(payload.get("active_channel"))
     for ch in (payload.get("channels") or []):
-        _enrich_channel_display_label(ch)
+        enrich_display_label(ch)
     # Trace channel label resolution
     _tid = new_trace_id()
     active = payload.get("active_channel") or {}
@@ -166,9 +145,9 @@ async def get_channels(telegram_user_id: int = Depends(current_user_id)):
     active = await db.get_active_channel_profile(owner_id=telegram_user_id)
     max_channels = await db.get_channel_limit(telegram_user_id)
     # Enrich all channels with display_label
-    _enrich_channel_display_label(active)
+    enrich_display_label(active)
     for ch in channels:
-        _enrich_channel_display_label(ch)
+        enrich_display_label(ch)
     # Trace channel label resolution
     _tid = new_trace_id()
     trace_channel_label(
