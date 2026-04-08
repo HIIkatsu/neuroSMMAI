@@ -661,6 +661,9 @@ def validate_structure_cardinality(
                 break
 
     return issues
+
+
+def strip_personal_anecdotes(text: str, spec: GenerationSpec) -> str:
     """Remove fabricated personal/service anecdotes from generated text.
 
     Only removes if input does NOT contain personal case signals.
