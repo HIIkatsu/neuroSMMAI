@@ -164,6 +164,14 @@ async def cb_admin_set_tier(callback: CallbackQuery, state: FSMContext):
         return
     try:
         await db.set_user_subscription(int(user_id), tier)
+        # Invalidate cached bootstrap so the Mini App picks up the new tier immediately
+        try:
+            from miniapp_shared import cache_invalidate
+            cache_invalidate(int(user_id))
+        except ImportError:
+            pass  # cache module may not be available in all contexts
+        except Exception:
+            logger.warning("admin: cache_invalidate failed for user %s", user_id, exc_info=True)
     except Exception as exc:
         logger.exception("admin set tier error")
         await callback.answer(f"Ошибка: {exc}", show_alert=True)

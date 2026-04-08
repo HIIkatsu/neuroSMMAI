@@ -73,7 +73,7 @@ PROVIDER_BONUS_CAP = 15        # Max points provider can add
 
 # Mode-specific thresholds
 AUTOPOST_MIN_SCORE = 25        # Strict: must have real confidence
-EDITOR_MIN_SCORE = 12          # Lenient: tolerable for user to pick from
+EDITOR_MIN_SCORE = 8           # Lenient: tolerable for user to pick from
 
 # Affirmation thresholds — at least one must be met
 AFFIRMATION_MIN_SUBJECT_HITS = 1
@@ -187,6 +187,27 @@ class ImagePipelineResult:
     @property
     def has_image(self) -> bool:
         return bool(self.image_url)
+
+    def trace_summary(self) -> dict:
+        """Compact runtime trace dict for logging/debugging image requests."""
+        intent = self.visual_intent
+        return {
+            "mode": self.mode,
+            "outcome": self.outcome,
+            "image_url": (self.image_url or "")[:80],
+            "score": self.score,
+            "source": self.source_provider,
+            "query": self.matched_query[:60] if self.matched_query else "",
+            "no_image_reason": self.no_image_reason,
+            "candidates_evaluated": self.candidates_evaluated,
+            "candidates_rejected": self.candidates_rejected,
+            "reject_reasons": self.reject_reasons[:5],
+            "visual_subject": (intent.main_subject if intent else "")[:40],
+            "visual_sense": (intent.sense if intent else "")[:30],
+            "visuality": intent.visuality if intent else "",
+            "search_queries": [q[:40] for q in (intent.search_queries if intent else [])[:3]],
+            "editor_candidates_count": len(self.editor_candidates),
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -755,6 +776,33 @@ async def run_image_pipeline(
             return result
 
     # --- No acceptable candidate found ---
+
+    # Editor mode fallback: if strict scoring rejected everyone but there are
+    # non-hard-rejected candidates, surface the best ones as tolerable options.
+    # This prevents the common "картинка не найдена" for typical queries.
+    if mode == MODE_EDITOR and candidates:
+        soft_rejected = [
+            c for c in candidates
+            if not c.hard_reject and c.final_score > 0
+        ]
+        soft_rejected.sort(key=lambda c: c.final_score, reverse=True)
+        if soft_rejected:
+            best_soft = soft_rejected[0]
+            result.image_url = best_soft.url
+            result.score = best_soft.final_score
+            result.source_provider = best_soft.source
+            result.matched_query = best_soft.query
+            result.outcome = OUTCOME_ACCEPT_FOR_EDITOR
+            result.editor_candidates = [
+                (c.url, c.final_score) for c in soft_rejected[:4]
+            ]
+            logger.info(
+                "IMAGE_PIPELINE_EDITOR_FALLBACK score=%d source=%s query=%r url=%r",
+                best_soft.final_score, best_soft.source,
+                best_soft.query[:40], best_soft.url[:80],
+            )
+            return result
+
     result.no_image_reason = _determine_no_image_reason(result, intent)
     result.outcome = _no_image_reason_to_outcome(result.no_image_reason)
     result.reject_reasons = list(set(result.reject_reasons))
