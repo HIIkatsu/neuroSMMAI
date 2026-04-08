@@ -1134,17 +1134,49 @@ async def find_image(
     *,
     topic: str = "",
     post_text: str = "",
+    title: str = "",
 ) -> str:
     """Find the best semantically relevant image for the given query.
 
-    Enforces minimum relevance threshold — returns empty string if no
-    candidate is good enough ("better no image than wrong image").
+    Uses the new POST-CENTRIC pipeline when post_text or title is available.
+    Falls back to the legacy query-based flow otherwise.
 
-    Systemic relevance gates applied:
-    1. _meta_score cross-family penalty catches any family mismatch
-    2. Positive affirmation requirement ensures candidate has real topic signal
-    3. Final meta-family coherence check on the winning candidate
+    New pipeline flow:
+    1. Extract visual intent from post text (title + body)
+    2. Word-sense disambiguation to avoid wrong-meaning images
+    3. Post-centric scoring: subject > sense > scene > generic stock penalty
+    4. Wrong-sense hard reject
+    5. Channel topic used ONLY as weak fallback
+
+    Legacy flow (backward-compatible):
+    Uses family detection from query + topic, build_best_visual_queries, _meta_score.
     """
+    # --- NEW: Post-centric pipeline ---
+    # When we have actual post content, use the new post-centric pipeline.
+    # This is the primary path for all new content generation.
+    actual_post_text = post_text or ""
+    actual_title = title or query or ""
+    if actual_post_text or actual_title:
+        from image_pipeline import run_image_pipeline
+        result = await run_image_pipeline(
+            title=actual_title,
+            body=actual_post_text,
+            channel_topic=topic,
+            used_refs=used_refs,
+        )
+        if result.has_image:
+            return result.image_url
+        if result.no_image_reason:
+            logger.info(
+                "IMAGE_POSTCENTRIC_NO_IMAGE reason=%s query=%r",
+                result.no_image_reason, query[:60],
+            )
+        # If post-centric pipeline found nothing, try legacy as last resort
+        # but only if there's query text distinct from post text
+        if not query or query == actual_title:
+            return ""
+
+    # --- LEGACY: Query-based flow (backward-compatible fallback) ---
     queries = build_best_visual_queries(query)
     if not queries:
         return ""
@@ -1270,12 +1302,18 @@ def validate_image_for_autopost(
     prompt: str = "",
     post_text: str = "",
     image_meta: str = "",
+    title: str = "",
 ) -> bool:
     """Final quality gate for autopost: decide if an image is safe to publish.
 
     Returns True if the image passes, False if it should be rejected.
 
-    Checks:
+    Uses the new post-centric validation when post_text/title available:
+    1. Wrong-sense hard reject via visual intent
+    2. Subject match validation
+    3. Generic stock detection
+
+    Legacy checks (always applied):
     1. URL-based signals (bad URL parts for the family)
     2. Meta-based cross-family coherence (if image_meta provided)
     """
@@ -1283,6 +1321,29 @@ def validate_image_for_autopost(
         return True  # no image or local media — nothing to reject
 
     url_lower = image_ref.lower()
+
+    # --- NEW: Post-centric validation ---
+    actual_post_text = post_text or ""
+    actual_title = title or prompt or ""
+    if (actual_post_text or actual_title) and image_meta:
+        from image_pipeline import validate_image_post_centric
+        from visual_intent import extract_visual_intent
+        intent = extract_visual_intent(
+            title=actual_title,
+            body=actual_post_text,
+            channel_topic=topic,
+        )
+        is_valid, reject_reason = validate_image_post_centric(
+            image_ref, intent=intent, image_meta=image_meta,
+        )
+        if not is_valid:
+            logger.warning(
+                "VALIDATE_POSTCENTRIC_REJECT reason=%s url=%r",
+                reject_reason, image_ref[:80],
+            )
+            return False
+
+    # --- LEGACY: Channel-based checks (always run for safety) ---
     family = detect_topic_family(topic + " " + prompt)
 
     # Check 1: URL-based off-topic signals
@@ -1297,8 +1358,6 @@ def validate_image_for_autopost(
                 return False
 
     # Check 2: Meta-based cross-family coherence
-    # If we have image metadata (description/tags), detect what family it belongs to.
-    # Reject if the image clearly belongs to a different family.
     if image_meta:
         meta_text = _clean_text(image_meta)
         meta_family = _detect_meta_family(meta_text)
@@ -1334,22 +1393,15 @@ def validate_image_for_autopost(
             return False
 
     # Check 4: URL-path keyword sanity for images WITHOUT metadata.
-    # When no metadata is available (common for stock APIs), check that the URL
-    # path at least contains something plausibly related to the topic/prompt,
-    # rather than accepting any random image URL.  This is a lightweight heuristic.
     if not image_meta and (topic or prompt):
         url_path = urlparse(image_ref).path.lower().replace("-", " ").replace("_", " ")
-        # Extract English keyword tokens from topic/prompt for URL matching
         _check_tokens = set()
         for src in (topic, prompt):
             for tok in re.findall(r"[a-z]{4,}", (src or "").lower()):
                 _check_tokens.add(tok)
-        # Extract English tokens from post_text (stock photo URLs typically use
-        # English slugs even for Russian-language posts, e.g. /photos/massage-back-pain)
         if post_text:
             for tok in re.findall(r"[a-z]{4,}", post_text.lower()):
                 _check_tokens.add(tok)
-        # Only apply check if we have enough tokens
         if len(_check_tokens) >= 2:
             url_hits = sum(1 for tok in _check_tokens if tok in url_path)
             if url_hits == 0 and family in STRICT_IMAGE_FAMILIES:
@@ -1357,7 +1409,7 @@ def validate_image_for_autopost(
                     "VALIDATE_REJECT_NO_META_URL family=%s url=%r topic=%r — no keyword match in URL for strict family",
                     family, image_ref[:80], topic[:40],
                 )
-                return False  # Reject: strict family + no metadata + no URL keyword match
+                return False
 
     logger.debug(
         "VALIDATE_ACCEPT family=%s url=%r meta=%r",
