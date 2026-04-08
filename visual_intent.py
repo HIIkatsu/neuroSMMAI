@@ -413,7 +413,8 @@ def _extract_subject(text: str) -> str:
                 break
 
     # Also grab any existing English words from the text
-    latin_words = re.findall(r"\b[a-z][a-z0-9+-]{3,}\b", src)
+    # Pattern: start with letter, then letters/digits/hyphens (for compound words like "no-code")
+    latin_words = re.findall(r"\b[a-z][a-z0-9-]{3,}\b", src)
     _stopwords = {
         "the", "and", "for", "with", "from", "that", "this", "into",
         "your", "about", "after", "before", "post", "telegram", "http",

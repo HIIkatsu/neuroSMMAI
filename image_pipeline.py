@@ -251,7 +251,17 @@ def score_candidate(
         reject_reason = "generic_stock"
 
     # --- 10. Positive affirmation requirement ---
-    has_affirmation = (subject_hits >= 1) or (allowed_hits >= 1) or (scene_hits >= 2)
+    # At least one real positive signal must be present to accept an image.
+    # Thresholds: ≥1 subject word, ≥1 allowed class, or ≥2 scene words
+    # (scene needs 2 because individual scene words like "setting" are too generic).
+    _MIN_SUBJECT_HITS = 1
+    _MIN_ALLOWED_HITS = 1
+    _MIN_SCENE_HITS = 2
+    has_affirmation = (
+        (subject_hits >= _MIN_SUBJECT_HITS)
+        or (allowed_hits >= _MIN_ALLOWED_HITS)
+        or (scene_hits >= _MIN_SCENE_HITS)
+    )
     if not has_affirmation and score > 0:
         score = min(score, 10)  # Cap score without affirmation
         if not reject_reason:
@@ -421,7 +431,13 @@ async def run_image_pipeline(
                 # Re-score with post-centric scoring
                 pc_score, pc_reason = score_candidate(meta, intent, q)
 
-                # Use the higher of provider score and post-centric score
+                # Use the higher of provider score and post-centric score.
+                # Rationale: the legacy provider scoring (_meta_score) is well-tested
+                # and tuned for family-based matching; the new post-centric scoring
+                # adds subject/sense/scene awareness. Taking max() ensures that a
+                # candidate accepted by either system proceeds, preventing regressions
+                # where the new scoring is stricter than the old one. Both systems
+                # share the same hard-reject gates (wrong-sense, blocked visuals).
                 effective_score = max(provider_score, pc_score)
 
                 if effective_score < min_score:
