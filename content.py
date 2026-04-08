@@ -2002,11 +2002,22 @@ def assess_text_quality(
 
     # --- 11. REQUEST_FIT: how well text matches the specific user request ---
     request_fit_score = 10
+
+    def _stem_match(word: str, text: str) -> bool:
+        """Check if any form of a Russian/English word appears in text using prefix matching."""
+        if word in text:
+            return True
+        # Try prefix matching (first N chars) for Russian word inflections
+        if len(word) >= 5:
+            prefix = word[:max(4, len(word) - 3)]
+            return prefix in text
+        return False
+
     if requested and requested.strip():
         req_lower = requested.strip().lower()
         req_words = [w for w in re.findall(r"[а-яёa-z]{3,}", req_lower) if len(w) >= 4]
         if req_words:
-            req_hits = sum(1 for rw in req_words if rw in lower_text)
+            req_hits = sum(1 for rw in req_words if _stem_match(rw, lower_text))
             req_ratio = req_hits / len(req_words)
             if req_ratio == 0:
                 request_fit_score = 1
@@ -2021,7 +2032,7 @@ def assess_text_quality(
             if generation_mode == "manual" and channel_topic and channel_topic.lower() != req_lower:
                 ch_words = [w for w in re.findall(r"[а-яёa-z]{3,}", channel_topic.lower()) if len(w) >= 4]
                 if ch_words:
-                    ch_hits = sum(1 for cw in ch_words if cw in lower_text)
+                    ch_hits = sum(1 for cw in ch_words if _stem_match(cw, lower_text))
                     ch_ratio = ch_hits / len(ch_words) if ch_words else 0
                     if ch_ratio > req_ratio + 0.3:
                         request_fit_score = min(request_fit_score, 3)

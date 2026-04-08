@@ -277,6 +277,25 @@ def build_generation_spec(
 # Planner validation
 # ---------------------------------------------------------------------------
 
+def _stem_prefix(word: str) -> str:
+    """Extract a stem-like prefix for Russian/English word matching."""
+    if len(word) >= 6:
+        return word[:max(4, len(word) - 3)]
+    elif len(word) >= 4:
+        return word[:max(3, len(word) - 2)]
+    return word
+
+
+def _stem_overlap(words_a: set[str], words_b: set[str]) -> float:
+    """Compute overlap between two word sets using stem-prefix matching."""
+    if not words_a or not words_b:
+        return 0.0
+    stems_a = {_stem_prefix(w) for w in words_a}
+    stems_b = {_stem_prefix(w) for w in words_b}
+    overlap = len(stems_a & stems_b)
+    return overlap / max(len(stems_a), 1)
+
+
 def validate_planner_output(plan: PlannerOutput, spec: GenerationSpec) -> list[str]:
     """Validate planner output against GenerationSpec.
 
@@ -299,11 +318,17 @@ def validate_planner_output(plan: PlannerOutput, spec: GenerationSpec) -> list[s
         channel_words = set(re.findall(r"[а-яёa-z]{3,}", channel_lower))
 
         if source_words and resolved_words:
-            source_overlap = len(source_words & resolved_words) / max(len(source_words), 1)
-            channel_overlap = len(channel_words & resolved_words) / max(len(channel_words), 1) if channel_words else 0
+            source_overlap = _stem_overlap(source_words, resolved_words)
+            channel_overlap = _stem_overlap(channel_words, resolved_words) if channel_words else 0
 
             # If resolved topic is closer to channel than to user request = topic hijack
-            if source_overlap < 0.2 and channel_overlap > 0.5:
+            if source_overlap < 0.3 and channel_overlap > 0.5:
+                errors.append(
+                    f"planner_validation: resolved_topic hijacked by channel topic "
+                    f"(request overlap={source_overlap:.0%}, channel overlap={channel_overlap:.0%})"
+                )
+            # Also flag when channel overlap is very high and dominates
+            elif channel_overlap > source_overlap and channel_overlap >= 0.8 and source_overlap < 0.6:
                 errors.append(
                     f"planner_validation: resolved_topic hijacked by channel topic "
                     f"(request overlap={source_overlap:.0%}, channel overlap={channel_overlap:.0%})"
@@ -312,11 +337,13 @@ def validate_planner_output(plan: PlannerOutput, spec: GenerationSpec) -> list[s
     # 2. Check if role turned into post subject
     role_desc_lower = spec.author_role_description.lower()
     if role_desc_lower and spec.generation_mode == "manual" and spec.source_prompt:
+        source_words_2 = set(re.findall(r"[а-яёa-z]{3,}", source_lower))
+        resolved_words_2 = set(re.findall(r"[а-яёa-z]{3,}", resolved_lower))
         role_words = set(re.findall(r"[а-яёa-z]{4,}", role_desc_lower))
-        if role_words and resolved_words:
-            role_overlap = len(role_words & resolved_words) / max(len(role_words), 1)
-            source_overlap_for_role = len(source_words & resolved_words) / max(len(source_words), 1) if source_words else 0
-            if role_overlap > 0.6 and source_overlap_for_role < 0.3:
+        if role_words and resolved_words_2:
+            role_overlap = _stem_overlap(role_words, resolved_words_2)
+            source_overlap_for_role = _stem_overlap(source_words_2, resolved_words_2) if source_words_2 else 0
+            if role_overlap > 0.5 and source_overlap_for_role < 0.3:
                 errors.append(
                     "planner_validation: resolved_topic looks like author role description, not user request"
                 )
