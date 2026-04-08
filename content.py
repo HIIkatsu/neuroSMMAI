@@ -54,8 +54,8 @@ _ERROR_PREFIXES = ("⚠️", "⏳", "🌐")
 # For photo posts: caption limit is 1024 chars.
 # For text-only posts: message limit is 4096 chars.
 # We use conservative values to account for signature/formatting overhead.
-AUTOPOST_CAPTION_BUDGET = 960   # for posts with media (under 1024 caption limit)
-AUTOPOST_TEXT_BUDGET = 3600     # for text-only posts (under 4096 message limit)
+AUTOPOST_CAPTION_BUDGET = 900   # for posts with media (under 1024 caption limit)
+AUTOPOST_TEXT_BUDGET = 2400     # for text-only posts — shorter, denser Telegram format
 
 
 def enforce_autopost_budget(
@@ -955,17 +955,17 @@ def _normalize_lengths(title: str, body: str, cta: str, short: str, button_text:
     body = _strip_ai_cliches(body)
     # Trim weak abstract endings — better to end strong than pad with generic moral
     body = _trim_weak_ending(body)
-    if len(body) > 650:
+    if len(body) > 450:
         parts = re.split(r"(?<=[.!?…])\s+", body)
         acc = []
         cur = 0
         for p in parts:
-            if cur + len(p) + (1 if acc else 0) > 620:
+            if cur + len(p) + (1 if acc else 0) > 420:
                 break
             acc.append(p)
             cur += len(p) + (1 if acc else 0)
-        body = " ".join(acc).strip() or body[:620].rstrip() + "…"
-    cta = clean_text(cta)[:150]
+        body = " ".join(acc).strip() or body[:420].rstrip() + "…"
+    cta = clean_text(cta)[:120]
     short = clean_text(short)[:120]
     button_text = clean_text(button_text)[:32] or "Подробнее"
     return {
@@ -2225,7 +2225,7 @@ def _build_generation_prompt(*, today: str, channel_topic: str, requested: str, 
 Требования:
 - title: 4-9 слов, конкретный и цепляющий. Заголовок обязан содержать конкретное утверждение, цифру или неожиданный угол зрения — не просто перефразировать тему. Запрещены: чистое переформулирование темы («О пользе грибов»), обобщённый совет без конкретики («Как улучшить свой канал»), пустой кликбейт без содержания («ШОК! Это изменит всё»). Заголовок должен говорить напрямую о ситуации или проблеме читателя и вызывать желание читать первое предложение.
 - Не используй в заголовке конструкции вроде «вся правда», «без иллюзий», «за 10 минут», «как не выбрасывать деньги», «как выбрать без сожалений», «что реально тянет», «как оживить».
-- body: 2-3 коротких абзаца, целевой объём 90-180 слов. Это Telegram — читают на ходу. Одна мысль на пост, без вступлений, без «раскачки». Каждое предложение обязано добавлять новую информацию. Если фразу можно удалить без потери смысла — удали. Никаких повторов одной и той же идеи разными словами.
+- body: 2-3 коротких абзаца, целевой объём 60-120 слов. Это Telegram — читают на ходу. Одна мысль на пост, без вступлений, без «раскачки». Каждое предложение обязано добавлять новую информацию. Если фразу можно удалить без потери смысла — удали. Никаких повторов одной и той же идеи разными словами. Максимум 2 абзаца основного текста — если получается больше, режь безжалостно.
 - ПРОСТОТА И ПОВЕРХНОСТЬ: Пиши на поверхности темы. Не уходи в чрезмерную экспертность, сложные термины и глубокую аналитику без явного запроса пользователя. Сначала ясно и прямо раскрой тему, потом максимум 1–2 полезных уточнения. Не превращай обычный пост в лекцию или научную статью. Telegram-стиль: просто, прямо, понятно обычному человеку. Если тема простая — текст должен быть простым.
 - АБСОЛЮТНЫЙ ЗАПРЕТ — нельзя начинать текст ни с одной из этих конструкций: «В современном мире», «Сегодня все знают», «Многие задаются вопросом», «Ни для кого не секрет», «В наше время», «Последнее время всё чаще», «Все мы знаем», «В этой статье», «В этом посте», «Давайте разберёмся», «Важно понимать», «Подводя итог», «Стоит отметить», «Каждый из нас», «Не будем лукавить». Если первое предложение начинается с любой из этих фраз — это провал, перепиши.
 - Начало должно цеплять и заметно отличаться от недавних постов.
@@ -2422,7 +2422,7 @@ async def _try_rewrite_pass(
             messages=[{"role": "user", "content": prompt}],
             temperature=0.7,  # Lower temp for focused rewrite
             base_url=base_url,
-            max_tokens=550,
+            max_tokens=400,
         )
         data = _extract_json_object(raw)
         if not data:
@@ -2512,7 +2512,7 @@ async def generate_post_bundle(
             messages=[{"role": "user", "content": user_prompt}],
             temperature=temperature,
             base_url=base_url,
-            max_tokens=550,
+            max_tokens=400,
         )
         logger.info("GENERATE_POST_LLM_RAW requested=%r preview=%r", requested[:140], str(raw or "")[:400])
         data = _extract_json_object(raw)

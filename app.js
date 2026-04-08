@@ -1196,7 +1196,7 @@ function applyBootstrapCore(core = {}) {
   if (core.stats !== undefined) state.data.stats = core.stats;
   if (core.analytics !== undefined) state.data.analytics = core.analytics;
   if (core.drafts_current !== undefined) state.data.drafts_current = core.drafts_current;
-  if (core.settings) state.data.settings = { ...(state.data.settings || {}), ...(core.settings || {}) };
+  if (core.settings) state.data.settings = core.settings;
   updateOnboardingFromSettings();
   if (core.pending_media !== undefined) state.data.pending_media = core.pending_media;
   if (core.latest_media !== undefined) state.data.latest_media = core.latest_media;
@@ -1252,7 +1252,8 @@ async function refreshSections(sections = [], { silent = true } = {}) {
       }
       if (section === 'settings') {
         const payload = await api('/api/settings');
-        state.data.settings = { ...(state.data.settings || {}), ...(payload.settings || payload || {}) };
+        // Full replace instead of shallow merge to prevent stale settings from previous channel
+        state.data.settings = payload.settings || payload || {};
         return;
       }
       // 'stats' is served by /api/bootstrap/core — alias to a lightweight stats refresh
@@ -1931,8 +1932,8 @@ function activeChannelTitle() {
   const active = activeChannel();
   if (active?.title) return active.title;
   const raw = active?.channel_target || state.data?.settings?.channel_target || '';
-  // Numeric Telegram chat IDs are 6+ digits (e.g. -1001234567890); never show them as labels
-  if (/^-?\d{6,}$/.test(String(raw))) return 'Канал без названия';
+  // Never show any numeric Telegram chat ID as a label
+  if (/^-?\d+$/.test(String(raw))) return 'Канал без названия';
   return raw || 'Канал не выбран';
 }
 
@@ -4853,9 +4854,10 @@ function onboardingSetCustomTopic(v) {
   if (actions) {
     const cur = Number(state.onboarding.step || 0);
     const canCont = onboardingCanContinue(cur);
-    const nextBtn = actions.querySelector('button:last-child');
-    if (nextBtn && !nextBtn.getAttribute('onclick')?.includes('completeOnboarding')) {
+    const nextBtn = actions.querySelector('[data-action="onboardingNext"]');
+    if (nextBtn) {
       nextBtn.disabled = !canCont;
+      if (canCont) nextBtn.removeAttribute('disabled');
     }
   }
 }
@@ -4878,8 +4880,11 @@ function onboardingSetCustomAuthorRole(v) {
   if (actions) {
     const cur = Number(state.onboarding.step || 0);
     const canCont = onboardingCanContinue(cur);
-    const nextBtn = actions.querySelector('button:last-child');
-    if (nextBtn) nextBtn.disabled = !canCont;
+    const nextBtn = actions.querySelector('[data-action="onboardingNext"]');
+    if (nextBtn) {
+      nextBtn.disabled = !canCont;
+      if (canCont) nextBtn.removeAttribute('disabled');
+    }
   }
 }
 function onboardingSetAudience(v) {
