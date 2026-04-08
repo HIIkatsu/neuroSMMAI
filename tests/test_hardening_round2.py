@@ -302,14 +302,14 @@ class TestTextBudget(unittest.TestCase):
     """Verify text budget was reduced for shorter posts."""
 
     def test_text_only_budget_reduced(self):
-        """AUTOPOST_TEXT_BUDGET should be ≤ 1800 (was 2400)."""
+        """AUTOPOST_TEXT_BUDGET should be ≤ 1200 (was 1800, originally 2400)."""
         from content import AUTOPOST_TEXT_BUDGET
-        self.assertLessEqual(AUTOPOST_TEXT_BUDGET, 1800, "Text budget should be tightened")
+        self.assertLessEqual(AUTOPOST_TEXT_BUDGET, 1200, "Text budget should be tightened")
 
     def test_caption_budget_unchanged(self):
-        """AUTOPOST_CAPTION_BUDGET should remain at 900."""
+        """AUTOPOST_CAPTION_BUDGET should be ≤ 900 (reduced from 900 to 700)."""
         from content import AUTOPOST_CAPTION_BUDGET
-        self.assertEqual(AUTOPOST_CAPTION_BUDGET, 900)
+        self.assertLessEqual(AUTOPOST_CAPTION_BUDGET, 900)
 
 
 # ---------------------------------------------------------------------------
