@@ -887,13 +887,13 @@ def _meta_score(family: str, meta_text: str, query: str = "", post_text: str = "
     # actual nouns/subjects from the generated post body (not just the search query).
     post_hits = 0
     if post_text:
-        post_tokens = _query_tokens(post_text)[:12]
+        post_tokens = _query_tokens(post_text)[:16]
         post_hits = sum(1 for token in post_tokens if token in text)
-        score += post_hits * 5
+        score += post_hits * 6
         # Strong post-text alignment bonus: if multiple post-specific terms match,
         # this image is specifically relevant to THIS post, not just the family
         if post_hits >= 3:
-            score += 8  # Extra bonus for strong post-specific alignment
+            score += 12  # Extra bonus for strong post-specific alignment
 
     # Allowed visual class matches (strong positive signal)
     allowed = get_family_allowed_visuals(family)
@@ -952,6 +952,8 @@ def _meta_score(family: str, meta_text: str, query: str = "", post_text: str = "
         "handshake", "brainstorm", "motivation", "inspiration concept",
         "copy space", "banner template", "flat lay", "mock up",
         "blank space", "placeholder", "presentation template",
+        "growth chart", "puzzle pieces", "light bulb idea", "target goal",
+        "thumbs up", "high five", "fist bump",
     ]
     generic_stock_hits = sum(1 for gs in _generic_stock_signals if gs in text)
     if generic_stock_hits >= 1:
