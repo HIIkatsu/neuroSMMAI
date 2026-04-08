@@ -1,9 +1,35 @@
+# ── Environment & secrets ──
 .env
+.env.*
+
+# ── Database (SQLite) ──
 bot.db
 bot.db-shm
 bot.db-wal
+
+# ── Python ──
 venv/
 __pycache__/
 *.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.mypy_cache/
+.pytest_cache/
+
+# ── Runtime data (server-only) ──
 uploads/
 generated_images/
+*.log
+
+# ── OS / editor artifacts ──
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+*.sublime-project
+*.sublime-workspace
