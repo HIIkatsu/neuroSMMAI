@@ -48,19 +48,20 @@ with patch("config.load_config", _fake_load_config):
     pass  # ensures config module sees our fake during initial import if needed
 
 import auth as auth_module
-
-# Patch load_config in auth module for all test methods
-_original_load_config = auth_module.load_config
+import config as config_module
 
 
 class TestJWT(unittest.TestCase):
     """Tests for create_web_jwt / verify_web_jwt."""
 
     def setUp(self):
+        # Always use fake config — prevents cross-test contamination when other
+        # test modules import auth/config first in the same process.
         auth_module.load_config = _fake_load_config
+        config_module.load_config = _fake_load_config
 
     def tearDown(self):
-        auth_module.load_config = _original_load_config
+        pass  # Nothing to restore — each test re-patches in setUp
 
     def test_create_and_verify_roundtrip(self):
         """A token created by create_web_jwt should be verifiable."""
@@ -151,9 +152,10 @@ class TestTelegramLoginWidget(unittest.TestCase):
 
     def setUp(self):
         auth_module.load_config = _fake_load_config
+        config_module.load_config = _fake_load_config
 
     def tearDown(self):
-        auth_module.load_config = _original_load_config
+        pass  # Nothing to restore — each test re-patches in setUp
 
     def _make_valid_login_data(self, **overrides):
         """Generate a valid Telegram Login Widget data dict with correct hash."""
