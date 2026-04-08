@@ -413,7 +413,7 @@ def validate_planner_output(plan: PlannerOutput, spec: GenerationSpec) -> list[s
 _PERSONAL_CASE_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"клиент\w*\s+(?:пришёл|пришел|обратил\w*|написал\w*|позвонил\w*)", re.I),
     re.compile(r"(?:ко мне|к нам)\s+(?:пришёл|пришел|обратил\w*|написал\w*|позвонил\w*)", re.I),
-    re.compile(r"в\s+(?:мо[ей][мй]?|нашем?)\s+(?:сервис|мастерск|практик|клиник|салон|студи)", re.I),
+    re.compile(r"в\s+(?:мо[ей][мй]?|моём|нашем?)\s+(?:сервис|мастерск|практик|клиник|салон|студи)", re.I),
     re.compile(r"(?:ко мне|к нам)\s+обратил(?:ась|ся|ись)", re.I),
     re.compile(r"мы\s+часто\s+(?:видим|встречаем|сталкиваемся|наблюдаем)", re.I),
     re.compile(r"из\s+(?:моей|нашей)\s+практик", re.I),
