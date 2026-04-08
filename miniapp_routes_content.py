@@ -25,6 +25,7 @@ from miniapp_plan_service import days_label, generate_plan_items_ai, hashtags_te
 from miniapp_schemas import AIAddHashtags, AIAssets, AIGeneratePost, AIGenerateText, AIRewrite, DraftCreate, DraftGenerate, DraftPublish, DraftUpdate, PlanCreate, PlanGenerate, PlanUpdate, ScheduleCreate
 from miniapp_shared import _AI_POST_COOLDOWN_SECONDS, _AI_POST_LAST_CALLS, cache_invalidate, clean_text, create_bot, current_user_id, ensure_drafts_capacity, owned_channel_targets, verify_channel_ownership
 from topic_utils import detect_topic_family, get_family_guardrails
+from runtime_trace import new_trace_id, trace_text_generation, debug_fields, is_debug_trace_enabled, TraceTimer
 
 router = APIRouter(tags=["content"])
 
@@ -312,7 +313,23 @@ async def ai_generate_text(
     text = "\n\n".join(part for part in [bundle.get("title",""), bundle.get("body",""), bundle.get("cta","")] if part)
     await db.increment_generations_used(telegram_user_id)
     await db.increment_feature_used(telegram_user_id, "generate")
-    return {"ok": True, "text": normalized_post_text(text), **bundle}
+    _trace_id = bundle.get("_trace_id", "")
+    _trace = trace_text_generation(
+        trace_id=_trace_id or new_trace_id(),
+        route="/api/ai/generate-text",
+        source_mode="manual",
+        requested_topic=clean_text(data.topic),
+        channel_topic=topic,
+        author_role=str(ch_settings.get("author_role_type") or ""),
+        prompt_builder="generate_post_bundle",
+        planner_used=False, writer_used=bool(text),
+        rewrite_used=False, final_archetype="",
+    )
+    result = {"ok": True, "text": normalized_post_text(text), **bundle}
+    _dbg = debug_fields(_trace)
+    if _dbg:
+        result["_debug"] = _dbg
+    return result
 
 
 @router.post("/api/ai/add-hashtags")
@@ -396,6 +413,17 @@ async def ai_rewrite(
         ar_settings[_ar_key] = (ch_settings.get(_ar_key) or "").strip()
     result_text = _safety_consistency_pass(result_text, **_author_role_kwargs(ar_settings))
     await db.increment_feature_used(telegram_user_id, "rewrite")
+    trace_text_generation(
+        trace_id=new_trace_id(),
+        route="/api/ai/rewrite",
+        source_mode="rewrite",
+        requested_topic=topic,
+        channel_topic=topic,
+        author_role=str(ar_settings.get("author_role_type") or ""),
+        prompt_builder="ai_chat_direct",
+        planner_used=False, writer_used=False,
+        rewrite_used=True, final_archetype="",
+    )
     return {"ok": True, "text": result_text}
 
 

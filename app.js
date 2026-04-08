@@ -1930,6 +1930,8 @@ function _buildNavButtons() {
 
 function activeChannelTitle() {
   const active = activeChannel();
+  // Prefer server-computed display_label (never a raw numeric ID)
+  if (active?.display_label) return active.display_label;
   if (active?.title) return active.title;
   const raw = active?.channel_target || state.data?.settings?.channel_target || '';
   // Never show any numeric Telegram chat ID as a label
@@ -1941,9 +1943,11 @@ function resolveChannelLabel(channelTarget = '') {
   const raw = String(channelTarget || '').trim();
   if (!raw) return activeChannelTitle();
   const found = (state.data?.channels || []).find(ch => String(ch.channel_target || '').trim() === raw || String(ch.id) === raw || String(ch.channel_profile_id || '') === raw || String(ch.title || '').trim() === raw);
+  // Prefer server-computed display_label over raw title
+  if (found?.display_label) return found.display_label;
   if (found?.title) return found.title;
   // Never show any raw numeric ID as a label (Telegram chat IDs and internal DB IDs)
-  if (/^-?\d+$/.test(raw)) return activeChannel()?.title || 'Канал без названия';
+  if (/^-?\d+$/.test(raw)) return activeChannel()?.display_label || activeChannel()?.title || 'Канал без названия';
   return raw;
 }
 
