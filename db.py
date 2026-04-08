@@ -2187,6 +2187,9 @@ def _channel_profile_row_to_dict(r: tuple, columns: list[str]) -> dict:
     return result
 
 
+_UNSET = object()  # sentinel: field was not provided by caller
+
+
 async def upsert_channel_profile(
     owner_id: int | None,
     channel_target: str,
@@ -2194,27 +2197,27 @@ async def upsert_channel_profile(
     title: str = "",
     topic: str = "",
     make_active: bool = True,
-    # Structured profile fields
-    topic_raw: str = "",
-    topic_family: str = "",
-    topic_subfamily: str = "",
-    audience_type: str = "",
-    style_mode: str = "",
-    content_goals: str = "",
-    preferred_formats: str = "",
-    forbidden_topics: str = "",
-    forbidden_claims: str = "",
-    visual_policy: str = "auto",
-    forbidden_visual_classes: str = "",
-    rubric_map: str = "",
-    news_policy: str = "standard",
-    posting_mode: str = "manual",
-    sensitivity_flags: str = "",
+    # Structured profile fields — _UNSET means "keep existing value on update"
+    topic_raw: str | object = _UNSET,
+    topic_family: str | object = _UNSET,
+    topic_subfamily: str | object = _UNSET,
+    audience_type: str | object = _UNSET,
+    style_mode: str | object = _UNSET,
+    content_goals: str | object = _UNSET,
+    preferred_formats: str | object = _UNSET,
+    forbidden_topics: str | object = _UNSET,
+    forbidden_claims: str | object = _UNSET,
+    visual_policy: str | object = _UNSET,
+    forbidden_visual_classes: str | object = _UNSET,
+    rubric_map: str | object = _UNSET,
+    news_policy: str | object = _UNSET,
+    posting_mode: str | object = _UNSET,
+    sensitivity_flags: str | object = _UNSET,
     # Author role fields
-    author_role_type: str = "",
-    author_role_description: str = "",
-    author_activities: str = "",
-    author_forbidden_claims: str = "",
+    author_role_type: str | object = _UNSET,
+    author_role_description: str | object = _UNSET,
+    author_activities: str | object = _UNSET,
+    author_forbidden_claims: str | object = _UNSET,
 ):
     owner = int(owner_id or 0)
     channel_target = (channel_target or "").strip()
@@ -2222,8 +2225,6 @@ async def upsert_channel_profile(
         return
     title = (title or channel_target).strip()
     topic = (topic or "").strip()
-    # topic_raw defaults to topic if not separately provided
-    topic_raw = (topic_raw or topic).strip()
     now = datetime.utcnow().isoformat(timespec="seconds")
     async with _db_ctx() as db:
         if make_active:
@@ -2234,25 +2235,45 @@ async def upsert_channel_profile(
         )
         row = await cur.fetchone()
         if row:
+            profile_id = int(row[0])
             new_title = title or row[2] or channel_target
             new_topic = topic or row[1] or ""
+
+            # Build partial UPDATE: only set fields that were explicitly passed
+            updates: list[str] = ["title=?", "topic=?", "is_active=?", "updated_at=?"]
+            params: list = [new_title, new_topic, 1 if make_active else 0, now]
+
+            _structured_fields = {
+                "topic_raw": topic_raw, "topic_family": topic_family,
+                "topic_subfamily": topic_subfamily, "audience_type": audience_type,
+                "style_mode": style_mode, "content_goals": content_goals,
+                "preferred_formats": preferred_formats, "forbidden_topics": forbidden_topics,
+                "forbidden_claims": forbidden_claims, "visual_policy": visual_policy,
+                "forbidden_visual_classes": forbidden_visual_classes, "rubric_map": rubric_map,
+                "news_policy": news_policy, "posting_mode": posting_mode,
+                "sensitivity_flags": sensitivity_flags,
+                "author_role_type": author_role_type, "author_role_description": author_role_description,
+                "author_activities": author_activities, "author_forbidden_claims": author_forbidden_claims,
+            }
+            for col, val in _structured_fields.items():
+                if val is not _UNSET:
+                    # Special case: topic_raw defaults to topic if explicitly provided but empty
+                    if col == "topic_raw" and not val:
+                        val = new_topic
+                    updates.append(f"{col}=?")
+                    params.append(str(val))
+
+            params.append(profile_id)
             await db.execute(
-                """UPDATE channel_profiles SET title=?, topic=?, is_active=?, updated_at=?,
-                   topic_raw=?, topic_family=?, topic_subfamily=?, audience_type=?, style_mode=?,
-                   content_goals=?, preferred_formats=?, forbidden_topics=?, forbidden_claims=?,
-                   visual_policy=?, forbidden_visual_classes=?, rubric_map=?, news_policy=?,
-                   posting_mode=?, sensitivity_flags=?,
-                   author_role_type=?, author_role_description=?, author_activities=?, author_forbidden_claims=?
-                   WHERE id=?""",
-                (new_title, new_topic, 1 if make_active else 0, now,
-                 topic_raw or new_topic, topic_family, topic_subfamily, audience_type, style_mode,
-                 content_goals, preferred_formats, forbidden_topics, forbidden_claims,
-                 visual_policy, forbidden_visual_classes, rubric_map, news_policy,
-                 posting_mode, sensitivity_flags,
-                 author_role_type, author_role_description, author_activities, author_forbidden_claims,
-                 int(row[0])),
+                f"UPDATE channel_profiles SET {', '.join(updates)} WHERE id=?",
+                tuple(params),
             )
         else:
+            # INSERT: use explicit values or sensible defaults for new profiles
+            def _val(v, default=""):
+                return str(v) if v is not _UNSET else default
+
+            _topic_raw = _val(topic_raw) or topic
             await db.execute(
                 """INSERT INTO channel_profiles(
                    owner_id, telegram_user_id, title, channel_target, topic, is_active, created_at, updated_at,
@@ -2263,11 +2284,12 @@ async def upsert_channel_profile(
                    author_role_type, author_role_description, author_activities, author_forbidden_claims
                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (owner, owner, title, channel_target, topic, 1 if make_active else 0, now, now,
-                 topic_raw or topic, topic_family, topic_subfamily, audience_type, style_mode,
-                 content_goals, preferred_formats, forbidden_topics, forbidden_claims,
-                 visual_policy, forbidden_visual_classes, rubric_map, news_policy,
-                 posting_mode, sensitivity_flags,
-                 author_role_type, author_role_description, author_activities, author_forbidden_claims),
+                 _topic_raw, _val(topic_family), _val(topic_subfamily), _val(audience_type), _val(style_mode),
+                 _val(content_goals), _val(preferred_formats), _val(forbidden_topics), _val(forbidden_claims),
+                 _val(visual_policy, "auto"), _val(forbidden_visual_classes), _val(rubric_map),
+                 _val(news_policy, "standard"), _val(posting_mode, "manual"), _val(sensitivity_flags),
+                 _val(author_role_type), _val(author_role_description), _val(author_activities),
+                 _val(author_forbidden_claims)),
             )
         await db.commit()
 

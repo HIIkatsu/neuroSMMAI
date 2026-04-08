@@ -648,6 +648,7 @@ async def generate_post_payload(
                         model=getattr(config, "openrouter_model", ""),
                         base_url=getattr(config, "openrouter_base_url", None),
                         prebuilt_prompt=llm_image_prompt,
+                        owner_id=owner_id,
                     ),
                     timeout=30.0,
                 ) or ""

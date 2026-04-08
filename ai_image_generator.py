@@ -171,6 +171,7 @@ async def generate_ai_image(
     model: str = "",
     base_url: str | None = None,
     prebuilt_prompt: str = "",
+    owner_id: int = 0,
 ) -> str | None:
     hf_key = (os.getenv("HF_API_KEY") or "").strip()
     hf_model = (os.getenv("HF_IMAGE_MODEL") or DEFAULT_MODEL).strip()
@@ -243,7 +244,9 @@ async def generate_ai_image(
 
             ext = ".png" if "png" in ctype else ".jpg"
             digest = hashlib.sha1(f"{topic}|{prompt}|{post_text[:300]}|{image_prompt}".encode("utf-8", "ignore")).hexdigest()
-            out_path = GENERATED_DIR / f"{digest}{ext}"
+            # Owner-prefix for access control: serve_generated_image checks "{owner_id}_" prefix
+            prefix = f"{int(owner_id)}_" if owner_id else ""
+            out_path = GENERATED_DIR / f"{prefix}{digest}{ext}"
             out_path.write_bytes(r.content)
             logger.info("AI image generated model=%s path=%s attempt=%d", hf_model, out_path, attempt)
             return str(out_path)
