@@ -818,7 +818,7 @@ class SchedulerService:
                             if not cfg or not getattr(cfg, "openrouter_api_key", ""):
                                 continue
 
-                            candidates = await fetch_news_candidates(owner_id=owner_id, limit=3, channel_target=channel_target)
+                            candidates = await fetch_news_candidates(owner_id=owner_id, limit=3, channel_target=channel_target, channel_profile_id=int(ch_profile.get("id", 0)))
                             if not candidates:
                                 continue
 
