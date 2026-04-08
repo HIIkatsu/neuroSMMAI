@@ -21,6 +21,7 @@ from generation_spec import (
     PlannerOutput,
     VOICE_MODES,
     OPENING_ARCHETYPES,
+    _PERSONAL_INPUT_KEYWORDS,
 )
 
 logger = logging.getLogger(__name__)
@@ -86,10 +87,7 @@ def _build_anecdote_guard_block(spec: GenerationSpec) -> str:
     """Block fabricated personal/service anecdotes when not in input data."""
     # Check if input explicitly contains personal case signals
     input_text = f"{spec.source_prompt} {spec.primary_topic}".lower()
-    has_personal_input = any(kw in input_text for kw in [
-        "клиент", "обратил", "сервис", "мастерск", "из практик",
-        "из опыт", "кейс", "случай из", "история из",
-    ])
+    has_personal_input = any(kw in input_text for kw in _PERSONAL_INPUT_KEYWORDS)
     if has_personal_input:
         return ""  # Input explicitly mentions personal cases — allow
 

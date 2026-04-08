@@ -411,15 +411,25 @@ def validate_planner_output(plan: PlannerOutput, spec: GenerationSpec) -> list[s
 # Fabricated personal/service anecdote patterns — these MUST NOT appear
 # unless the input explicitly contains a client/service/personal case.
 _PERSONAL_CASE_PATTERNS: list[re.Pattern[str]] = [
+    # "клиент пришёл/обратился/написал/позвонил" — direct client mention
     re.compile(r"клиент\w*\s+(?:пришёл|пришел|обратил\w*|написал\w*|позвонил\w*)", re.I),
+    # "ко мне/к нам пришёл/обратился" — indirect client arrival
     re.compile(r"(?:ко мне|к нам)\s+(?:пришёл|пришел|обратил\w*|написал\w*|позвонил\w*)", re.I),
+    # "в моём/нашем сервисе/мастерской/клинике" — service location claim
     re.compile(r"в\s+(?:мо[ей][мй]?|моём|нашем?)\s+(?:сервис|мастерск|практик|клиник|салон|студи)", re.I),
+    # "ко мне/к нам обратился/обратилась" — formal client mention
     re.compile(r"(?:ко мне|к нам)\s+обратил(?:ась|ся|ись)", re.I),
+    # "мы часто видим/встречаем/сталкиваемся" — frequency from practice
     re.compile(r"мы\s+часто\s+(?:видим|встречаем|сталкиваемся|наблюдаем)", re.I),
+    # "из моей/нашей практики" — experience reference
     re.compile(r"из\s+(?:моей|нашей)\s+практик", re.I),
+    # "на моей/нашей практике" — practice reference variant
     re.compile(r"на\s+(?:моей|нашей)\s+практик", re.I),
+    # "мой/наш последний/недавний клиент/случай" — recent case claim
     re.compile(r"(?:мой|наш)\s+(?:последний|недавний|свежий)\s+(?:клиент|случай|кейс)", re.I),
+    # "расскажу случай/историю/кейс из практики" — storytelling from practice
     re.compile(r"расскажу\s+(?:случай|историю|кейс)\s+из\s+(?:практик|работ|опыт)", re.I),
+    # "недавно ко мне/к нам/в сервис" — recent visit claim
     re.compile(r"недавно\s+(?:ко мне|к нам|в сервис|в мастерск)", re.I),
 ]
 
@@ -442,6 +452,18 @@ REJECT_INVENTED_PERSONAL_CASE = "invented_personal_case"
 REJECT_ROLE_FACT_LEAK = "role_fact_leak"
 
 
+# Source drift detection thresholds
+MIN_SOURCE_OVERLAP_RATIO = 0.15     # minimum word overlap ratio with source facts
+SOURCE_DRIFT_TEXT_LIMIT = 500       # characters of output text to check for drift
+MIN_SOURCE_FACTS_FOR_DRIFT = 3     # minimum source_words to trigger drift detection
+
+# Keywords that indicate explicit personal/client case in input
+_PERSONAL_INPUT_KEYWORDS = [
+    "клиент", "обратил", "сервис", "мастерск", "из практик",
+    "из опыт", "кейс", "случай из", "история из",
+]
+
+
 def validate_generated_text(
     text: str,
     spec: GenerationSpec,
@@ -460,10 +482,7 @@ def validate_generated_text(
     # --- 1. Fabricated personal/service anecdotes ---
     # Only block if input does NOT explicitly contain personal case signals
     input_text = f"{spec.source_prompt} {spec.primary_topic}".lower()
-    has_personal_input = any(kw in input_text for kw in [
-        "клиент", "обратил", "сервис", "мастерск", "из практик",
-        "из опыт", "кейс", "случай из", "история из",
-    ])
+    has_personal_input = any(kw in input_text for kw in _PERSONAL_INPUT_KEYWORDS)
     if not has_personal_input:
         for pat in _PERSONAL_CASE_PATTERNS:
             match = pat.search(text)
@@ -497,10 +516,10 @@ def validate_generated_text(
                 w for w in re.findall(r"[а-яёa-z]{4,}", fact.lower()) if len(w) >= 4
             )
         if source_words:
-            text_words = set(re.findall(r"[а-яёa-z]{4,}", lower[:500]))
+            text_words = set(re.findall(r"[а-яёa-z]{4,}", lower[:SOURCE_DRIFT_TEXT_LIMIT]))
             overlap = len(source_words & text_words)
             ratio = overlap / max(len(source_words), 1)
-            if ratio < 0.15 and len(source_words) >= 3:
+            if ratio < MIN_SOURCE_OVERLAP_RATIO and len(source_words) >= MIN_SOURCE_FACTS_FOR_DRIFT:
                 issues.append((
                     REJECT_SOURCE_SUBJECT_DRIFT,
                     f"output drifted from source (overlap={ratio:.0%}, source_words={len(source_words)})"
@@ -535,10 +554,7 @@ def strip_personal_anecdotes(text: str, spec: GenerationSpec) -> str:
     Returns cleaned text.
     """
     input_text = f"{spec.source_prompt} {spec.primary_topic}".lower()
-    has_personal_input = any(kw in input_text for kw in [
-        "клиент", "обратил", "сервис", "мастерск", "из практик",
-        "из опыт", "кейс", "случай из", "история из",
-    ])
+    has_personal_input = any(kw in input_text for kw in _PERSONAL_INPUT_KEYWORDS)
     if has_personal_input:
         return text
 
@@ -613,7 +629,7 @@ def compute_archetype_balance(
     Returns dict mapping archetype -> fraction (0.0-1.0).
     """
     from collections import Counter
-    recent = recent_archetypes[-window:] if len(recent_archetypes) > window else recent_archetypes
+    recent = recent_archetypes[-window:] if len(recent_archetypes) >= window else recent_archetypes
     if not recent:
         return {}
     counts = Counter(recent)
