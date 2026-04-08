@@ -2223,7 +2223,17 @@ async def upsert_channel_profile(
     channel_target = (channel_target or "").strip()
     if not channel_target:
         return
-    title = (title or channel_target).strip()
+    # Never default title to a numeric channel_target (raw Telegram IDs like -100...).
+    # Only use channel_target as fallback when it looks like a human-readable @username.
+    _raw_title = (title or "").strip()
+    if _raw_title and not re.match(r'^-?\d+$', _raw_title):
+        title = _raw_title
+    else:
+        _ct = (channel_target or "").strip()
+        if _ct and not re.match(r'^-?\d+$', _ct):
+            title = _ct
+        else:
+            title = _raw_title  # keep whatever was provided, even empty
     topic = (topic or "").strip()
     now = datetime.utcnow().isoformat(timespec="seconds")
     async with _db_ctx() as db:
@@ -2236,7 +2246,13 @@ async def upsert_channel_profile(
         row = await cur.fetchone()
         if row:
             profile_id = int(row[0])
-            new_title = title or row[2] or channel_target
+            # Prefer provided title → existing DB title → non-numeric channel_target; never raw IDs
+            _existing_title = (row[2] or "").strip() if row[2] else ""
+            _candidate_titles = [title, _existing_title]
+            _non_numeric_ct = channel_target if (channel_target and not re.match(r'^-?\d+$', channel_target)) else ""
+            if _non_numeric_ct:
+                _candidate_titles.append(_non_numeric_ct)
+            new_title = next((t for t in _candidate_titles if t and not re.match(r'^-?\d+$', t)), title or _existing_title or "")
             new_topic = topic or row[1] or ""
 
             # Build partial UPDATE: only set fields that were explicitly passed

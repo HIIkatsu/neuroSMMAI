@@ -547,7 +547,120 @@ def validate_generated_text(
     return issues
 
 
-def strip_personal_anecdotes(text: str, spec: GenerationSpec) -> str:
+# ---------------------------------------------------------------------------
+# Cardinality / structure validation — "top 3 games" must contain 3 items
+# ---------------------------------------------------------------------------
+
+# Patterns that request a specific number of items (in Russian and English)
+_CARDINALITY_REQUEST_PATTERNS: list[re.Pattern[str]] = [
+    # "топ 3", "топ-5", "топ 10"
+    re.compile(r"топ[\s-]*(\d+)", re.I),
+    # "3 лучших", "5 главных", "10 популярных"
+    re.compile(r"(\d+)\s+(?:лучших|главных|популярных|интересных|новых|важных|крутых|топовых)", re.I),
+    # "назови 3", "покажи 5", "подбери 3"
+    re.compile(r"(?:назови|покажи|подбери|перечисли|выбери|предложи|расскажи о|расскажи про)\s+(\d+)", re.I),
+    # "top 3", "top-5"
+    re.compile(r"top[\s-]*(\d+)", re.I),
+    # "3 games", "5 items" etc.
+    re.compile(r"(\d+)\s+(?:games|items|things|reasons|ways|tips|tricks|examples|products)", re.I),
+]
+
+
+def detect_requested_cardinality(prompt: str) -> int | None:
+    """Detect how many items the user requested (e.g. "топ 3 игры" → 3).
+
+    Returns None if no explicit cardinality detected.
+    """
+    if not prompt:
+        return None
+    for pat in _CARDINALITY_REQUEST_PATTERNS:
+        m = pat.search(prompt)
+        if m:
+            n = int(m.group(1))
+            if 2 <= n <= 30:
+                return n
+    return None
+
+
+def count_list_items(text: str) -> int:
+    """Count the number of distinct list items in generated text.
+
+    Detects numbered lists (1. 2. 3.), bullet lists (• – — ▪ ✅ etc.),
+    and emoji-prefixed items.
+    """
+    if not text:
+        return 0
+
+    lines = [line.strip() for line in text.strip().split("\n") if line.strip()]
+
+    # Count numbered items: "1.", "2)", "1 —", etc.
+    numbered = set()
+    for line in lines:
+        m = re.match(r'^(\d+)\s*[.):\-—–]', line)
+        if m:
+            numbered.add(int(m.group(1)))
+
+    if len(numbered) >= 2:
+        return len(numbered)
+
+    # Count bullet items: lines starting with • – — ▪ ✅ ✔ ▸ ➤ ♦ etc.
+    bullet_re = re.compile(r'^[\u2022\u2013\u2014\u25AA\u25B8\u2605\u2606\u2714\u2716✅✔➤♦▪▸•–—★☆]\s')
+    bullet_count = sum(1 for line in lines if bullet_re.match(line))
+    if bullet_count >= 2:
+        return bullet_count
+
+    # Count emoji-prefixed items (🎮 Game Name, 🔥 Item)
+    emoji_re = re.compile(r'^[\U0001F300-\U0001F9FF\U00002600-\U000027BF\U0001FA00-\U0001FA6F\U0001FA70-\U0001FAFF]\s*\S')
+    emoji_count = sum(1 for line in lines if emoji_re.match(line))
+    if emoji_count >= 2:
+        return emoji_count
+
+    return 0
+
+
+REJECT_CARDINALITY_MISMATCH = "cardinality_mismatch"
+REJECT_CTA_COUNT_MISMATCH = "cta_count_mismatch"
+
+
+def validate_structure_cardinality(
+    body: str,
+    cta: str,
+    requested: str,
+) -> list[tuple[str, str]]:
+    """Validate that generated text satisfies requested cardinality.
+
+    E.g. "топ 3 игры" must produce 3 distinct items in body.
+    CTA must not reference a different count than what's in the body.
+
+    Returns list of (reject_reason, description) tuples.
+    """
+    issues: list[tuple[str, str]] = []
+
+    expected = detect_requested_cardinality(requested)
+    if expected is None:
+        return issues
+
+    actual = count_list_items(body)
+
+    if actual > 0 and actual < expected:
+        issues.append((
+            REJECT_CARDINALITY_MISMATCH,
+            f"requested {expected} items but only {actual} found in output"
+        ))
+
+    # CTA consistency: if CTA mentions a number, it should match actual items
+    if cta:
+        cta_numbers = re.findall(r'\d+', cta)
+        for n_str in cta_numbers:
+            n = int(n_str)
+            if 2 <= n <= 30 and actual > 0 and n != actual:
+                issues.append((
+                    REJECT_CTA_COUNT_MISMATCH,
+                    f"CTA mentions {n} items but body contains {actual}"
+                ))
+                break
+
+    return issues
     """Remove fabricated personal/service anecdotes from generated text.
 
     Only removes if input does NOT contain personal case signals.

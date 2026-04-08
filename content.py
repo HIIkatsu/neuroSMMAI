@@ -50,6 +50,7 @@ from generation_spec import (
     build_generation_spec,
     validate_planner_output,
     validate_generated_text,
+    validate_structure_cardinality,
     strip_personal_anecdotes,
     strip_commerce_claims,
     classify_opener_archetype,
@@ -418,7 +419,7 @@ def _apply_safety_pass(bundle: dict, *, author_role_type: str = "", author_role_
 
 
 def _apply_generation_validators(bundle: dict, spec: GenerationSpec) -> list[tuple[str, str]]:
-    """Apply runtime validators for anecdotes, commerce claims, and source drift.
+    """Apply runtime validators for anecdotes, commerce claims, structure, and source drift.
 
     Modifies bundle in-place (strips offending content) and returns list of issues found.
     """
@@ -435,6 +436,16 @@ def _apply_generation_validators(bundle: dict, spec: GenerationSpec) -> list[tup
         # Strip unsupported commerce claims
         val = strip_commerce_claims(val, spec)
         bundle[field_name] = val
+
+    # Cardinality / structure validation (e.g. "топ 3" must produce 3 items)
+    struct_issues = validate_structure_cardinality(
+        bundle.get("body", ""),
+        bundle.get("cta", ""),
+        spec.source_prompt or spec.primary_topic,
+    )
+    if struct_issues:
+        all_issues.extend(struct_issues)
+
     return all_issues
 
 

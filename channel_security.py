@@ -57,5 +57,12 @@ async def verify_channel_access(bot: Bot, telegram_user_id: int, raw_channel_tar
     if can_post is False and can_edit is False:
         raise ChannelAccessError("У бота нет прав на публикацию в этом канале.")
 
-    title = (getattr(chat, "title", None) or channel_target).strip()
+    raw_title = (getattr(chat, "title", None) or "").strip()
+    # Only use channel_target as fallback if it's a human-readable @username, not raw numeric ID
+    if raw_title:
+        title = raw_title
+    elif channel_target and not str(channel_id).lstrip("-").isdigit():
+        title = channel_target
+    else:
+        title = ""  # let downstream enrich_display_label handle the "Канал без названия" fallback
     return ChannelAccess(channel_id=channel_id, title=title, channel_target=str(channel_id))
