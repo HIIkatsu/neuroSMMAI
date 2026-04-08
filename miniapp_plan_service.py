@@ -166,7 +166,7 @@ async def _load_strategy_settings(owner_id: int, topic: str) -> dict[str, Any]:
         'topic', 'channel_audience', 'channel_style', 'channel_style_preset', 'channel_mode',
         'channel_formats', 'channel_frequency', 'content_constraints', 'news_enabled',
         'news_sources', 'content_rubrics', 'rubrics_schedule', 'post_scenarios',
-        'content_exclusions',
+        'content_exclusions', 'author_role_type', 'author_role_description',
     ]
     settings = await db.get_settings_bulk(keys, owner_id=owner_id)
     if topic and not str(settings.get('topic') or '').strip():
@@ -215,6 +215,9 @@ async def generate_plan_items_ai(
     audience_line = strategy.get("audience") or "не указана"
     style_line = strategy.get("style_preset") or strategy.get("style_text") or "не указан"
     constraint_line = strategy.get("constraint_line") or "без ограничений"
+    author_role_type = str(settings.get("author_role_type") or "").strip()
+    author_role_desc = str(settings.get("author_role_description") or "").strip()
+    author_role_line = author_role_desc or author_role_type or "не указана"
     exclusions_raw = str(settings.get("content_exclusions") or "").strip()
     exclusions_block = f'\nСТРОГО ЗАПРЕЩЕНО в любой идее (не упоминать, не намекать):\n{exclusions_raw}\n' if exclusions_raw else ''
     rubrics_schedule_raw = str(settings.get("rubrics_schedule") or settings.get("content_rubrics") or "").strip()
@@ -225,19 +228,21 @@ async def generate_plan_items_ai(
         f'Если "раз в неделю" — одна идея этой рубрики на весь план. '
         f'Дата начала плана: {dt.isoformat()}, планируем на {days} дн.\n'
     ) if rubrics_schedule_raw else ''
-    # Determine news share based on channel mode
+    # Determine news share based on channel mode — non-news channels get tighter cap
     _mode = str(strategy.get("mode") or "").lower()
     _is_news_channel = "новост" in str(subject).lower() or _mode == "news"
-    _news_cap = max(2, total_items // 3) if _is_news_channel else max(1, total_items // 5)
+    _news_cap = max(2, total_items // 3) if _is_news_channel else max(1, total_items // 7)
 
     prompt = (
         'Ты сильный редактор и контент-стратег Telegram-канала.\n'
         f'Сегодняшняя дата: {today}.\n'
         f'Тема канала: {subject}.\n'
+        f'Роль автора канала: {author_role_line}.\n'
         f'Нужно придумать {total_items} РАЗНЫХ конкретных идей для будущих постов.\n\n'
         'СТРОГИЕ ТРЕБОВАНИЯ К РАЗНООБРАЗИЮ РУБРИК:\n'
-        f'Максимум {_news_cap} из {total_items} идей могут быть новостными. Остальные — другие форматы.\n'
-        'Обязательно используй МИНИМУМ 4 разных формата из этого списка:\n'
+        f'Максимум {_news_cap} из {total_items} идей могут быть новостными. Остальные — ОБЯЗАТЕЛЬНО другие форматы.\n'
+        'НЕ ПРЕВРАЩАЙ ПЛАН В ЛЕНТУ НОВОСТЕЙ. Большинство идей должны быть evergreen-контентом: практические советы, разборы, кейсы, инсайты, FAQ.\n'
+        'Обязательно используй МИНИМУМ 5 разных форматов из этого списка:\n'
         '- Разбор частой ошибки / мифа\n'
         '- Практический совет / чек-лист / инструкция\n'
         '- Сравнение двух подходов / продуктов / решений\n'
@@ -261,6 +266,7 @@ async def generate_plan_items_ai(
         f'Профиль канала (ОБЯЗАТЕЛЬНО учитывать в каждой идее):\n'
         f'- Целевая аудитория: {audience_line}\n'
         f'- Стиль подачи: {style_line}\n'
+        f'- Роль автора: {author_role_line}\n'
         f'- Режим: {strategy.get("mode") or "не указан"}\n'
         f'- Ритм публикаций: {strategy.get("frequency_hint") or "не указан"}\n'
         f'- Контентные ограничения (строго соблюдать): {constraint_line}\n'

@@ -4709,7 +4709,7 @@ function renderChannelChoices() {
     return `<div class="onboarding-empty-note"><div class="note-title">Сначала добавь канал</div><div class="note-text">Финальный шаг нельзя завершить без хотя бы одного подключённого канала.</div></div>`;
   }
   return `<div class="onboarding-options-grid">${
-    channels.map(ch => `<button type="button" class="ob-choice-card ${Number(state.onboarding.answers.channelId || 0) === Number(ch.id) ? 'selected' : ''}" data-ob-handler="onboardingSelectChannel" data-ob-value="${Number(ch.id)}"><div class="ob-choice-title">${escapeHtml(resolveChannelLabel(ch.title || ch.channel_target || ''))}</div><div class="ob-choice-desc">${escapeHtml(/^-?\d{6,}$/.test(String(ch.channel_target || '')) ? '' : (ch.channel_target || ''))}</div>${Number(state.onboarding.answers.channelId || 0) === Number(ch.id) ? `<span class="ob-choice-check">✓</span>` : ''}</button>`).join('')
+    channels.map(ch => `<button type="button" class="ob-choice-card ${Number(state.onboarding.answers.channelId || 0) === Number(ch.id) ? 'selected' : ''}" data-ob-handler="onboardingSelectChannel" data-ob-value="${Number(ch.id)}"><div class="ob-choice-title">${escapeHtml(resolveChannelLabel(ch.title || ch.channel_target || ''))}</div><div class="ob-choice-desc">${escapeHtml(/^-?\d+$/.test(String(ch.channel_target || '')) ? '' : (ch.channel_target || ''))}</div>${Number(state.onboarding.answers.channelId || 0) === Number(ch.id) ? `<span class="ob-choice-check">✓</span>` : ''}</button>`).join('')
   }</div>`;
 }
 

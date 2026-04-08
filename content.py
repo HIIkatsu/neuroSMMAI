@@ -1442,6 +1442,14 @@ _ROLE_PROMPT_BLOCKS: dict[str, str] = {
         "- Допустимый hook: личное наблюдение, история из жизни, неожиданный поворот.\n"
         "- Формат: человеческий, разговорный, без казённых оборотов."
     ),
+    "educator": (
+        "ГОЛОС КАНАЛА — ПРЕПОДАВАТЕЛЬ / ОБРАЗОВАТЕЛЬНЫЙ КАНАЛ:\n"
+        "- Пиши как опытный преподаватель или наставник.\n"
+        "- Допустимо: «я», «в моей практике», но без маркетинговых штампов.\n"
+        "- ЗАПРЕЩЕНО: «мои клиенты», «наш продукт», фамильярный блогерский тон.\n"
+        "- Допустимый hook: учебный пример, типичное заблуждение, практическое упражнение.\n"
+        "- Тон: ясный, структурированный, дружелюбный, без снисходительности."
+    ),
 }
 
 
@@ -2126,6 +2134,7 @@ def _build_generation_prompt(*, today: str, channel_topic: str, requested: str, 
             "brand": "бренд",
             "media": "медиа / редакция",
             "blogger": "блогер",
+            "educator": "преподаватель / образовательный канал",
         }
         ar_parts: list[str] = ["\nРОЛЬ АВТОРА КАНАЛА (СТРОГО соблюдать — нельзя фантазировать):"]
         if author_role_type:
@@ -2142,7 +2151,21 @@ def _build_generation_prompt(*, today: str, channel_topic: str, requested: str, 
             "образование или опыт, которые не указаны выше."
         )
         # Role-specific voice constraints: prevent cross-persona writing
+        # Detect effective role from description when type is generic default
         _role_type_l = (author_role_type or "").strip().lower()
+        _role_desc_l = (author_role_description or "").strip().lower()
+        # Auto-detect role type from custom description for better voice matching
+        _media_keywords = ("новостн", "медиа", "редакци", "агентств", "сми", "журнал")
+        _brand_keywords = ("магазин", "бренд", "компани", "команд", "маркетплейс", "сервис ", "агентств")
+        _blogger_keywords = ("блогер", "блог ", "личн")
+        if _role_type_l == "expert" and _role_desc_l:
+            # Refine voice detection for custom roles defaulting to 'expert'
+            if any(kw in _role_desc_l for kw in _media_keywords):
+                _role_type_l = "media"
+            elif any(kw in _role_desc_l for kw in _brand_keywords):
+                _role_type_l = "brand"
+            elif any(kw in _role_desc_l for kw in _blogger_keywords):
+                _role_type_l = "blogger"
         if _role_type_l in ("media",):
             ar_parts.append(
                 "- ГОЛОС: Пиши как редакция / новостная лента. НЕ используй «я», «мой опыт», "
@@ -2156,12 +2179,18 @@ def _build_generation_prompt(*, today: str, channel_topic: str, requested: str, 
         elif _role_type_l in ("expert", "master"):
             ar_parts.append(
                 "- ГОЛОС: Пиши от первого лица как практикующий специалист. Допускается «я», «мой опыт», "
-                "«мои клиенты». НЕ пиши обезличенно как новостной агрегатор — тут важна экспертная позиция."
+                "«мои клиенты» — но ТОЛЬКО если роль автора подразумевает работу с клиентами. "
+                "Если роль автора — «новостной канал» или «обзорщик», НЕ используй «мои клиенты»."
             )
         elif _role_type_l in ("blogger",):
             ar_parts.append(
                 "- ГОЛОС: Пиши живо, от первого лица, с личными наблюдениями. "
                 "НЕ пиши сухо как корпоративная рассылка или новостной дайджест."
+            )
+        elif _role_type_l in ("educator",):
+            ar_parts.append(
+                "- ГОЛОС: Пиши как преподаватель/наставник — ясно, структурированно, с примерами. "
+                "Допускается «я», но без маркетинговых штампов и без «мои клиенты»."
             )
         author_role_block = "\n".join(ar_parts) + "\n"
 
