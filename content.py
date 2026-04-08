@@ -43,6 +43,20 @@ from topic_utils import (
     get_family_post_angles,
     get_family_cta_style,
 )
+from generation_spec import (
+    GenerationSpec,
+    PlannerOutput,
+    build_generation_spec,
+    validate_planner_output,
+    classify_opener_archetype,
+    compute_claim_risk,
+    OPENING_ARCHETYPES,
+)
+from prompt_builder import (
+    build_planner_prompt,
+    build_writer_prompt,
+    build_targeted_rewrite_prompt,
+)
 
 logger = logging.getLogger(__name__)
 _ERROR_PREFIXES = ("⚠️", "⏳", "🌐")
@@ -54,8 +68,8 @@ _ERROR_PREFIXES = ("⚠️", "⏳", "🌐")
 # For photo posts: caption limit is 1024 chars.
 # For text-only posts: message limit is 4096 chars.
 # We use conservative values to account for signature/formatting overhead.
-AUTOPOST_CAPTION_BUDGET = 900   # for posts with media (under 1024 caption limit)
-AUTOPOST_TEXT_BUDGET = 1800     # for text-only posts — compact Telegram format (was 2400)
+AUTOPOST_CAPTION_BUDGET = 700   # for posts with media (under 1024 caption limit, reduced from 900)
+AUTOPOST_TEXT_BUDGET = 1200     # for text-only posts — compact Telegram format (reduced from 1800)
 
 
 def enforce_autopost_budget(
@@ -932,11 +946,18 @@ async def _load_owner_strategy_settings(
     return settings
 
 
-def _blend_instruction(channel_topic: str, requested: str) -> str:
+def _blend_instruction(channel_topic: str, requested: str, generation_mode: str = "manual") -> str:
     ct = (channel_topic or "").strip()
     rq = (requested or "").strip()
     if not ct or not rq or ct.lower() == rq.lower():
         return "Раскрывай тему прямо, без лишних уводов в сторону."
+    if generation_mode == "manual":
+        return (
+            f"ПРИОРИТЕТ ЗАПРОСА ПОЛЬЗОВАТЕЛЯ: Главная тема поста — «{rq}». "
+            f"Тему канала «{ct}» используй только как лёгкий контекст для аудитории (не более 10-15% текста). "
+            f"Если тема запроса «{rq}» отличается от темы канала «{ct}» — пиши СТРОГО про «{rq}». "
+            f"НЕ подменяй, НЕ склеивай, НЕ тащи текст обратно в «{ct}»."
+        )
     return (
         f"Главная тема поста — «{rq}». Тему канала «{ct}» используй только как мягкий угол подачи: "
         "пример, полезный мостик для аудитории или контекст, но не подмену основной темы. "
@@ -955,16 +976,16 @@ def _normalize_lengths(title: str, body: str, cta: str, short: str, button_text:
     body = _strip_ai_cliches(body)
     # Trim weak abstract endings — better to end strong than pad with generic moral
     body = _trim_weak_ending(body)
-    if len(body) > 450:
+    if len(body) > 350:
         parts = re.split(r"(?<=[.!?…])\s+", body)
         acc = []
         cur = 0
         for p in parts:
-            if cur + len(p) + (1 if acc else 0) > 420:
+            if cur + len(p) + (1 if acc else 0) > 320:
                 break
             acc.append(p)
             cur += len(p) + (1 if acc else 0)
-        body = " ".join(acc).strip() or body[:420].rstrip() + "…"
+        body = " ".join(acc).strip() or body[:320].rstrip() + "…"
     cta = clean_text(cta)[:120]
     short = clean_text(short)[:120]
     button_text = clean_text(button_text)[:32] or "Подробнее"
@@ -1599,6 +1620,8 @@ def assess_text_quality(
     channel_topic: str = "",
     requested: str = "",
     author_role_type: str = "",
+    generation_mode: str = "manual",
+    recent_opener_types: list[str] | None = None,
 ) -> tuple[int, list[str], dict[str, int]]:
     """Multi-criteria quality assessment for generated posts.
 
@@ -1606,6 +1629,22 @@ def assess_text_quality(
     - score is 0-100 (higher = better)
     - reasons is a list of human-readable explanations for penalties
     - dimension_scores maps each quality dimension to its sub-score (0-10)
+
+    14 quality dimensions (each scored 0-10, base sum = 0-140, normalized to 0-100):
+    1. hook — strength of the opening / first sentence
+    2. specificity — concrete facts vs vague water
+    3. value — useful information density
+    4. naturalness — language quality, no AI slop
+    5. topic_fit — relevance to channel topic
+    6. role_fit — consistency with author role/persona
+    7. honesty — absence of fabrication / clickbait
+    8. density — text length and information-per-word ratio
+    9. readability — sentence variety, flow, scannability
+    10. publish_ready — can be published without manual editing
+    11. request_fit — how well text matches the specific user request
+    12. claim_risk — absence of overconfident unsupported assertions
+    13. opener_novelty — opening differs from recent posts
+    14. length_fit — matches target length constraints
 
     10 quality dimensions (each scored 0-10, sum = 0-100):
     1. hook — strength of the opening / first sentence
@@ -1861,26 +1900,26 @@ def assess_text_quality(
     dims["honesty"] = max(0, honesty_score)
 
     # --- 8. DENSITY: text length and information-per-word ---
-    # Target: 60-120 words (aligned with prompt instructions).
-    # Posts over ~150 words are considered too long for Telegram scroll.
+    # Target: 40-100 words (reduced from 60-120 for tighter Telegram posts).
+    # Posts over ~120 words are considered too long for Telegram scroll.
     density_score = 10
     if body_words < 15:
         density_score = 0
         reasons.append(f"density: текст слишком короткий ({body_words} слов)")
-    elif body_words < 40:
+    elif body_words < 30:
         density_score = 2
         reasons.append(f"density: слишком короткий текст ({body_words} слов)")
-    elif body_words < 60:
+    elif body_words < 40:
         density_score = 6
         reasons.append(f"density: текст на грани минимума ({body_words} слов)")
-    elif body_words > 250:
+    elif body_words > 200:
         density_score -= 5
-        reasons.append(f"density: слишком длинный текст ({body_words} слов), цель 60-120")
-    elif body_words > 180:
-        density_score -= 3
-        reasons.append(f"density: текст многословен ({body_words} слов), цель 60-120")
-    elif body_words > 130:
-        density_score -= 1
+        reasons.append(f"density: слишком длинный текст ({body_words} слов), цель 40-100")
+    elif body_words > 140:
+        density_score -= 4
+        reasons.append(f"density: текст многословен ({body_words} слов), цель 40-100")
+    elif body_words > 100:
+        density_score -= 2
         reasons.append(f"density: текст чуть длиннее цели ({body_words} слов)")
     # Penalize very low unique-word ratio (lots of repetition)
     if body_words > 30:
@@ -1961,16 +2000,120 @@ def assess_text_quality(
         reasons.append("publish_ready: нет заголовка")
     dims["publish_ready"] = max(0, pub_score)
 
-    # Final score = sum of all dimensions (0-100)
-    total = sum(dims.values())
+    # --- 11. REQUEST_FIT: how well text matches the specific user request ---
+    request_fit_score = 10
+
+    def _stem_match(word: str, text: str) -> bool:
+        """Check if any form of a Russian/English word appears in text using prefix matching."""
+        if word in text:
+            return True
+        # Try prefix matching (first N chars) for Russian word inflections
+        if len(word) >= 5:
+            prefix = word[:max(4, len(word) - 3)]
+            return prefix in text
+        return False
+
+    if requested and requested.strip():
+        req_lower = requested.strip().lower()
+        req_words = [w for w in re.findall(r"[а-яёa-z]{3,}", req_lower) if len(w) >= 4]
+        if req_words:
+            req_hits = sum(1 for rw in req_words if _stem_match(rw, lower_text))
+            req_ratio = req_hits / len(req_words)
+            if req_ratio == 0:
+                request_fit_score = 1
+                reasons.append("request_fit: текст не содержит ни одного слова из запроса пользователя")
+            elif req_ratio < 0.2:
+                request_fit_score = 3
+                reasons.append("request_fit: слабая связь с запросом пользователя")
+            elif req_ratio < 0.4:
+                request_fit_score = 6
+                reasons.append("request_fit: частичное соответствие запросу")
+            # Check if channel topic dominates over request in manual mode
+            if generation_mode == "manual" and channel_topic and channel_topic.lower() != req_lower:
+                ch_words = [w for w in re.findall(r"[а-яёa-z]{3,}", channel_topic.lower()) if len(w) >= 4]
+                if ch_words:
+                    ch_hits = sum(1 for cw in ch_words if _stem_match(cw, lower_text))
+                    ch_ratio = ch_hits / len(ch_words) if ch_words else 0
+                    if ch_ratio > req_ratio + 0.3:
+                        request_fit_score = min(request_fit_score, 3)
+                        reasons.append("request_fit: тема канала доминирует над запросом пользователя")
+    else:
+        request_fit_score = 7  # No explicit request — can't evaluate
+    dims["request_fit"] = max(0, request_fit_score)
+
+    # --- 12. CLAIM_RISK: absence of overconfident unsupported assertions ---
+    claim_risk_total, claim_risk_reasons = compute_claim_risk(body or "")
+    claim_risk_score = 10
+    if claim_risk_total >= 8:
+        claim_risk_score = 1
+        reasons.append(f"claim_risk: высокий риск выдуманных утверждений ({claim_risk_total})")
+    elif claim_risk_total >= 5:
+        claim_risk_score = 3
+        reasons.append(f"claim_risk: заметный риск необоснованных утверждений ({claim_risk_total})")
+    elif claim_risk_total >= 3:
+        claim_risk_score = 6
+        reasons.append(f"claim_risk: умеренный риск ({claim_risk_total})")
+    elif claim_risk_total >= 1:
+        claim_risk_score = 8
+    reasons.extend(claim_risk_reasons)
+    dims["claim_risk"] = max(0, claim_risk_score)
+
+    # --- 13. OPENER_NOVELTY: opening differs from recent posts ---
+    opener_score = 10
+    current_archetype = classify_opener_archetype(body or "")
+    recent_openers = recent_opener_types or []
+    if recent_openers:
+        from collections import Counter
+        archetype_counts = Counter(recent_openers[-6:])
+        if current_archetype in archetype_counts:
+            count = archetype_counts[current_archetype]
+            if count >= 3:
+                opener_score = 2
+                reasons.append(f"opener_novelty: тип начала '{current_archetype}' использован {count} раз из последних 6")
+            elif count >= 2:
+                opener_score = 5
+                reasons.append(f"opener_novelty: тип начала '{current_archetype}' повторяется")
+    dims["opener_novelty"] = max(0, opener_score)
+
+    # --- 14. LENGTH_FIT: matches target length constraints ---
+    length_fit_score = 10
+    # Target: 40-100 words for manual, 40-90 for autopost, 30-75 for news
+    if generation_mode == "news":
+        target_max = 75
+    elif generation_mode == "autopost":
+        target_max = 90
+    else:
+        target_max = 100
+    target_min = 40
+    if body_words > target_max * 1.5:
+        length_fit_score = 2
+        reasons.append(f"length_fit: текст значительно длиннее цели ({body_words} слов, цель до {target_max})")
+    elif body_words > target_max:
+        overshoot = body_words - target_max
+        length_fit_score = max(4, 10 - overshoot // 5)
+        reasons.append(f"length_fit: текст длиннее цели ({body_words} слов, цель до {target_max})")
+    elif body_words < target_min:
+        length_fit_score = max(3, 10 - (target_min - body_words) // 3)
+        reasons.append(f"length_fit: текст короче минимума ({body_words} слов, минимум {target_min})")
+    dims["length_fit"] = max(0, length_fit_score)
+
+    # Final score = sum of all 14 dimensions, normalized to 0-100
+    raw_total = sum(dims.values())
+    # 14 dimensions × 10 = 140 max, normalize to 100
+    total = int(round(raw_total * 100 / 140))
     total = max(0, min(100, total))
 
+    # Weighting adjustment: for manual mode, request_fit weighs more
+    if generation_mode == "manual" and requested and requested.strip():
+        rf = dims.get("request_fit", 10)
+        if rf <= 3:
+            # Strong penalty: request not followed
+            total = min(total, 45)
+            reasons.append("MANUAL_OVERRIDE: запрос пользователя не учтён — балл ограничен")
+
     # Hard floor: extremely low topic_fit always caps total below autopost threshold.
-    # A post with topic_fit ≤ 2 is practically off-topic and must not autopublish
-    # even if other dimensions score perfectly.
     TOPIC_FIT_HARD_FLOOR = 2
     if dims.get("topic_fit", 10) <= TOPIC_FIT_HARD_FLOOR and channel_topic:
-        # Cap total to ensure it falls below AUTOPOST_MIN_QUALITY_SCORE
         total = min(total, 50)
         reasons.append(f"topic_fit HARD FLOOR: topic_fit={dims['topic_fit']} ≤ {TOPIC_FIT_HARD_FLOOR} — автопубликация заблокирована")
 
@@ -1978,9 +2121,8 @@ def assess_text_quality(
 
 
 # Minimum quality score for autopost — posts below this threshold get rejected.
-# Total is the SUM of 10 dimensions (0-10 each, max 100). A threshold of 62
-# means the post needs at least 62 total points — it does NOT require each
-# dimension to reach 6.2; a post may score high on some and low on others.
+# Total is normalized from 14 dimensions (0-10 each) to 0-100 scale.
+# A threshold of 62 means the post needs 62+ normalized points.
 AUTOPOST_MIN_QUALITY_SCORE = int(os.environ.get("AUTOPOST_MIN_QUALITY_SCORE", "62"))
 # Manual generation threshold — lower than autopost since user can edit.
 # NOT actively blocking in editor path — kept as a configurable reference
@@ -2013,6 +2155,10 @@ def human_readable_quality_summary(dims: dict[str, int], reasons: list[str]) -> 
         "density": "текст слишком короткий или многословный",
         "readability": "плохая читаемость текста",
         "publish_ready": "текст не готов к публикации",
+        "request_fit": "текст не соответствует запросу пользователя",
+        "claim_risk": "слишком уверенные необоснованные утверждения",
+        "opener_novelty": "начало повторяет недавние посты",
+        "length_fit": "текст не соответствует целевой длине",
     }
 
     if weak:
@@ -2123,7 +2269,7 @@ def _family_style_instruction(family: str) -> str:
     ))
 
 
-def _build_generation_prompt(*, today: str, channel_topic: str, requested: str, bridge_instruction: str, strategy: dict[str, str], angle: dict[str, str], family: str, recent_posts: list[str], recent_plan: list[str], recent_topics: list[str] | None = None, extra_rules: str = "", channel_style: str = "", channel_audience: str = "", post_scenarios: str = "", content_constraints: str = "", content_exclusions: str = "", author_role_type: str = "", author_role_description: str = "", author_activities: str = "", author_forbidden_claims: str = "", strategy_mode: dict[str, str] | None = None) -> str:
+def _build_generation_prompt(*, today: str, channel_topic: str, requested: str, bridge_instruction: str, strategy: dict[str, str], angle: dict[str, str], family: str, recent_posts: list[str], recent_plan: list[str], recent_topics: list[str] | None = None, extra_rules: str = "", channel_style: str = "", channel_audience: str = "", post_scenarios: str = "", content_constraints: str = "", content_exclusions: str = "", author_role_type: str = "", author_role_description: str = "", author_activities: str = "", author_forbidden_claims: str = "", strategy_mode: dict[str, str] | None = None, generation_mode: str = "manual") -> str:
     history_block = recent_history_lines({"posts": recent_posts[:4], "plan": recent_plan[:4]}, limit=5)
     recent_openings = "\n".join(f"- {re.split(r'[.!?\n]', x, maxsplit=1)[0][:90]}" for x in recent_posts[:4] if x) or "- пока нет данных"
     blocked_phrases = _recent_phrases(recent_posts)
@@ -2139,7 +2285,30 @@ def _build_generation_prompt(*, today: str, channel_topic: str, requested: str, 
     if content_exclusions and content_exclusions.strip():
         exclusions_block = f"\nСТРОГО ЗАПРЕЩЕНО в этом посте (никогда не упоминать, не намекать, не касаться):\n{content_exclusions.strip()}\n"
 
-    # Build anti-repetition topics block from recent_topics (channel memory)
+    # --- Topic priority: manual request wins over channel topic ---
+    if generation_mode == "manual" and requested.lower() != channel_topic.lower():
+        topic_priority_block = (
+            f"ПРИОРИТЕТ ТЕМЫ: Тема ЭТОГО поста — «{requested}». Тема канала «{channel_topic}» — "
+            f"только мягкий контекст для аудитории (до 15% текста). "
+            f"Если запрос отличается от темы канала — пиши СТРОГО про запрос. "
+            f"НЕ подменяй тему поста темой канала. НЕ склеивай несовместимые сущности."
+        )
+    else:
+        topic_priority_block = (
+            f"СТРОГО: текст поста должен быть непосредственно о теме «{requested or channel_topic}». "
+            "Запрещено уходить в абстрактные рассуждения о «рынке в целом», «трендах», «бизнесе вообще». "
+            "Если тема узкая — пиши узко. Лучше глубоко по теме, чем широко мимо неё."
+        )
+
+    # --- Role voice block: role affects ONLY voice, not subject ---
+    role_voice_reminder = ""
+    if author_role_type or author_role_description:
+        role_voice_reminder = (
+            "\nВАЖНО О РОЛИ АВТОРА: роль автора задаёт ТОЛЬКО тон и подачу текста. "
+            "Роль автора НЕ определяет тему поста. НЕ превращай каждый текст в кейс из практики. "
+            "НЕ начинай каждый пост с «ко мне пришёл клиент», «в моей практике», «часто спрашивают». "
+            "Тема поста определяется запросом пользователя, а не ролью автора."
+        )
     recent_topics_list = recent_topics or []
     if recent_topics_list:
         recent_topics_block = (
@@ -2254,7 +2423,8 @@ def _build_generation_prompt(*, today: str, channel_topic: str, requested: str, 
 Тема поста: {requested}
 {bridge_instruction}
 {exclusions_block}{recent_topics_block}{ai_guard}
-СТРОГО: весь текст поста обязан быть НЕПОСРЕДСТВЕННО о теме канала «{channel_topic}». Запрещено уходить в абстрактные рассуждения о «рынке в целом», «трендах», «бизнесе вообще», «технологиях будущего» или любые смежные темы, если они не являются прямым содержанием канала. Если тема канала узкая — пиши узко. Лучше глубоко по теме, чем широко мимо неё.
+{topic_priority_block}
+{role_voice_reminder}
 
 Профиль канала — строго соблюдай:
 - Для кого пишешь (аудитория): {audience_line}
@@ -2293,7 +2463,7 @@ def _build_generation_prompt(*, today: str, channel_topic: str, requested: str, 
 Требования:
 - title: 4-9 слов, конкретный и цепляющий. Заголовок обязан содержать конкретное утверждение, цифру или неожиданный угол зрения — не просто перефразировать тему. Запрещены: чистое переформулирование темы («О пользе грибов»), обобщённый совет без конкретики («Как улучшить свой канал»), пустой кликбейт без содержания («ШОК! Это изменит всё»). Заголовок должен говорить напрямую о ситуации или проблеме читателя и вызывать желание читать первое предложение.
 - Не используй в заголовке конструкции вроде «вся правда», «без иллюзий», «за 10 минут», «как не выбрасывать деньги», «как выбрать без сожалений», «что реально тянет», «как оживить».
-- body: 2-3 коротких абзаца, целевой объём 60-120 слов. Это Telegram — читают на ходу. Одна мысль на пост, без вступлений, без «раскачки». Каждое предложение обязано добавлять новую информацию. Если фразу можно удалить без потери смысла — удали. Никаких повторов одной и той же идеи разными словами. Максимум 2 абзаца основного текста — если получается больше, режь безжалостно.
+- body: 1-2 коротких абзаца, целевой объём 40-100 слов (ЖЁСТКАЯ ЦЕЛЬ — НЕ ПРЕВЫШАЙ). Это Telegram — читают на ходу. Одна мысль на пост, без вступлений, без «раскачки». Каждое предложение обязано добавлять новую информацию. Если фразу можно удалить без потери смысла — удали. Максимум 2 абзаца. Короче = лучше.
 - ПРОСТОТА И ПОВЕРХНОСТЬ: Пиши на поверхности темы. Не уходи в чрезмерную экспертность, сложные термины и глубокую аналитику без явного запроса пользователя. Сначала ясно и прямо раскрой тему, потом максимум 1–2 полезных уточнения. Не превращай обычный пост в лекцию или научную статью. Telegram-стиль: просто, прямо, понятно обычному человеку. Если тема простая — текст должен быть простым.
 - АБСОЛЮТНЫЙ ЗАПРЕТ — нельзя начинать текст ни с одной из этих конструкций: «В современном мире», «Сегодня все знают», «Многие задаются вопросом», «Ни для кого не секрет», «В наше время», «Последнее время всё чаще», «Все мы знаем», «В этой статье», «В этом посте», «Давайте разберёмся», «Важно понимать», «Подводя итог», «Стоит отметить», «Каждый из нас», «Не будем лукавить». Если первое предложение начинается с любой из этих фраз — это провал, перепиши.
 - Начало должно цеплять и заметно отличаться от недавних постов.
@@ -2363,7 +2533,7 @@ REWRITE_THRESHOLD_MARGIN = int(os.environ.get("REWRITE_THRESHOLD_MARGIN", "12"))
 # Excluded: honesty (needs new facts), density (needs more/less content),
 # value (needs substantive new info), readability (structural).
 # topic_fit is now rewritable — the rewrite can refocus the text back on topic.
-_REWRITABLE_DIMS = {"hook", "naturalness", "role_fit", "specificity", "publish_ready", "topic_fit"}
+_REWRITABLE_DIMS = {"hook", "naturalness", "role_fit", "specificity", "publish_ready", "topic_fit", "request_fit", "opener_novelty", "length_fit", "claim_risk"}
 
 
 def _build_rewrite_prompt(
@@ -2454,6 +2624,10 @@ async def _try_rewrite_pass(
     channel_topic: str = "",
     author_role_type: str = "",
     base_url: str | None = None,
+    generation_mode: str = "manual",
+    requested: str = "",
+    recent_opener_types: list[str] | None = None,
+    gen_spec: GenerationSpec | None = None,
 ) -> tuple[dict[str, str], int, list[str], dict[str, int]] | None:
     """Attempt a targeted rewrite of a near-miss post.
 
@@ -2467,14 +2641,28 @@ async def _try_rewrite_pass(
         return None
 
     weak = {k: v for k, v in q_dims.items() if v <= 4}
-    prompt = _build_rewrite_prompt(
-        normalized.get("title", ""),
-        normalized.get("body", ""),
-        normalized.get("cta", ""),
-        weak,
-        channel_topic=channel_topic,
-        author_role_type=author_role_type,
-    )
+
+    # Try enhanced rewrite prompt first if we have a GenerationSpec
+    prompt = None
+    if gen_spec:
+        prompt = build_targeted_rewrite_prompt(
+            normalized.get("title", ""),
+            normalized.get("body", ""),
+            normalized.get("cta", ""),
+            weak,
+            gen_spec,
+        )
+
+    # Fallback to legacy rewrite prompt
+    if not prompt:
+        prompt = _build_rewrite_prompt(
+            normalized.get("title", ""),
+            normalized.get("body", ""),
+            normalized.get("cta", ""),
+            weak,
+            channel_topic=channel_topic,
+            author_role_type=author_role_type,
+        )
     if not prompt:
         return None
 
@@ -2508,7 +2696,10 @@ async def _try_rewrite_pass(
         rewritten.get("body", ""),
         rewritten.get("cta", ""),
         channel_topic=channel_topic,
+        requested=requested,
         author_role_type=author_role_type,
+        generation_mode=generation_mode,
+        recent_opener_types=recent_opener_types,
     )
 
     if new_score > q_score:
@@ -2554,11 +2745,26 @@ async def generate_post_bundle(
         content_constraints,
     )
     strategy = build_generation_strategy(owner_settings)
-    bridge_instruction = _blend_instruction(channel_topic, requested)
+    # Map generation_path to generation_mode for the new pipeline
+    generation_mode = "autopost" if generation_path == "autopost" else "manual"
+    bridge_instruction = _blend_instruction(channel_topic, requested, generation_mode=generation_mode)
     recent_posts = recent_posts or []
     recent_plan = recent_plan or []
     today = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d")
     family = _topic_family(channel_topic, requested)
+
+    # Classify recent opener archetypes for deduplication
+    recent_opener_types = [classify_opener_archetype(p) for p in recent_posts[:6] if p]
+
+    # Build GenerationSpec for the new pipeline
+    gen_spec = build_generation_spec(
+        channel_topic=channel_topic,
+        requested=requested,
+        generation_mode=generation_mode,
+        channel_family=family,
+        owner_settings=owner_settings,
+        recent_opener_types=recent_opener_types,
+    )
 
     logger.info(
         "GENERATE_POST_BUNDLE_ENTRY path=%s owner_id=%s literal_topic=%r channel_family=%s",
@@ -2625,6 +2831,7 @@ async def generate_post_bundle(
             content_constraints=str(owner_settings.get("content_constraints") or ""),
             content_exclusions=str(owner_settings.get("content_exclusions") or ""),
             strategy_mode=_strategy_mode,
+            generation_mode=generation_mode,
             **_author_role_kwargs(owner_settings),
         )
         if no_disclaimer:
@@ -2661,6 +2868,8 @@ async def generate_post_bundle(
                 channel_topic=channel_topic,
                 requested=requested,
                 author_role_type=_ar_kwargs.get("author_role_type", ""),
+                generation_mode=generation_mode,
+                recent_opener_types=recent_opener_types,
             )
             normalized["quality_score"] = str(q_score)
             normalized["quality_reasons"] = "; ".join(q_reasons) if q_reasons else ""
@@ -2675,6 +2884,10 @@ async def generate_post_bundle(
                         channel_topic=channel_topic,
                         author_role_type=_ar_kwargs.get("author_role_type", ""),
                         base_url=base_url,
+                        generation_mode=generation_mode,
+                        requested=requested,
+                        recent_opener_types=recent_opener_types,
+                        gen_spec=gen_spec,
                     )
                     if rewrite_result:
                         normalized, q_score, q_reasons, q_dims = rewrite_result
