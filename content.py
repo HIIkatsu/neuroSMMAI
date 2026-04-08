@@ -2156,8 +2156,8 @@ def _build_generation_prompt(*, today: str, channel_topic: str, requested: str, 
         _role_desc_l = (author_role_description or "").strip().lower()
         # Auto-detect role type from custom description for better voice matching
         _media_keywords = ("новостн", "медиа", "редакци", "агентств", "сми", "журнал")
-        _brand_keywords = ("магазин", "бренд", "компани", "команд", "маркетплейс", "сервис ", "агентств")
-        _blogger_keywords = ("блогер", "блог ", "личн")
+        _brand_keywords = ("магазин", "бренд", "компани", "команд", "маркетплейс", "сервис", "агентств")
+        _blogger_keywords = ("блогер", "блог", "личн")
         if _role_type_l == "expert" and _role_desc_l:
             # Refine voice detection for custom roles defaulting to 'expert'
             if any(kw in _role_desc_l for kw in _media_keywords):
