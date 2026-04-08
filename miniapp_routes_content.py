@@ -29,6 +29,17 @@ from topic_utils import detect_topic_family, get_family_guardrails
 router = APIRouter(tags=["content"])
 
 
+async def _active_channel_profile_id(owner_id: int) -> int | None:
+    """Return the active channel profile ID for the given owner.
+
+    Pinning the profile ID at request start prevents races where the user
+    switches channels mid-request and the ``get_channel_settings(owner_id)``
+    call would silently resolve to a different profile.
+    """
+    active = await db.get_active_channel_profile(owner_id=owner_id)
+    return int(active["id"]) if active else None
+
+
 async def _owned_targets(owner_id: int) -> set[str]:
     """Kept as thin wrapper for backward compat — delegates to shared helper."""
     return await owned_channel_targets(owner_id)
@@ -275,10 +286,12 @@ async def ai_generate_text(
 ):
     await _require_feature_quota(telegram_user_id, "generate", "Генерация текста")
     config = load_config()
+    # Pin channel_profile_id at request start to avoid mid-request channel-switch races
+    cpid = await _active_channel_profile_id(telegram_user_id)
     # Use channel-scoped settings for consistent per-channel generation
     history, ch_settings = await asyncio.gather(
         recent_channel_history(telegram_user_id),
-        db.get_channel_settings(telegram_user_id),
+        db.get_channel_settings(telegram_user_id, channel_profile_id=cpid),
     )
     topic = clean_text(data.topic) or (ch_settings.get("topic") or "")
     bundle = await generate_post_bundle(
@@ -330,7 +343,8 @@ async def ai_rewrite(
 ):
     await _require_feature_quota(telegram_user_id, "rewrite", "Рерайт текста")
     config = load_config()
-    ch_settings = await db.get_channel_settings(telegram_user_id)
+    cpid = await _active_channel_profile_id(telegram_user_id)
+    ch_settings = await db.get_channel_settings(telegram_user_id, channel_profile_id=cpid)
     topic = clean_text(data.topic) or (ch_settings.get("topic") or "")
     base_text = clean_text(data.text)
     if not base_text:
@@ -423,7 +437,8 @@ async def ai_generate_post(
 ):
     await _require_feature_quota(telegram_user_id, "generate", "Генерация поста")
     config = load_config()
-    ch_settings = await db.get_channel_settings(telegram_user_id)
+    cpid = await _active_channel_profile_id(telegram_user_id)
+    ch_settings = await db.get_channel_settings(telegram_user_id, channel_profile_id=cpid)
     channel_topic = clean_text(ch_settings.get("topic") or "")
     request_topic = clean_text(data.topic)
     topic = request_topic or channel_topic
@@ -798,7 +813,8 @@ async def generate_plan(
     telegram_user_id: int = Depends(current_user_id),
 ):
     await _require_feature_quota(telegram_user_id, "plan_generate", "Генерация плана")
-    ch_settings = await db.get_channel_settings(telegram_user_id)
+    cpid = await _active_channel_profile_id(telegram_user_id)
+    ch_settings = await db.get_channel_settings(telegram_user_id, channel_profile_id=cpid)
     topic = (
         clean_text(data.topic)
         or (ch_settings.get("topic") or "")
@@ -815,6 +831,7 @@ async def generate_plan(
         config=config,
         owner_id=telegram_user_id,
         history=history,
+        channel_profile_id=cpid,
     )
 
     if data.clear_existing:
@@ -898,7 +915,8 @@ async def competitor_spy(
         raise HTTPException(status_code=400, detail="Укажи ссылку на канал конкурента")
 
     # Load user context for personalised generation — channel-scoped
-    ch_settings = await db.get_channel_settings(telegram_user_id)
+    cpid = await _active_channel_profile_id(telegram_user_id)
+    ch_settings = await db.get_channel_settings(telegram_user_id, channel_profile_id=cpid)
 
     try:
         generated = await analyse_competitor_and_generate(

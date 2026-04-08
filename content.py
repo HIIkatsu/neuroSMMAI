@@ -55,7 +55,7 @@ _ERROR_PREFIXES = ("⚠️", "⏳", "🌐")
 # For text-only posts: message limit is 4096 chars.
 # We use conservative values to account for signature/formatting overhead.
 AUTOPOST_CAPTION_BUDGET = 900   # for posts with media (under 1024 caption limit)
-AUTOPOST_TEXT_BUDGET = 2400     # for text-only posts — shorter, denser Telegram format
+AUTOPOST_TEXT_BUDGET = 1800     # for text-only posts — compact Telegram format (was 2400)
 
 
 def enforce_autopost_budget(
@@ -1861,6 +1861,8 @@ def assess_text_quality(
     dims["honesty"] = max(0, honesty_score)
 
     # --- 8. DENSITY: text length and information-per-word ---
+    # Target: 60-120 words (aligned with prompt instructions).
+    # Posts over ~150 words are considered too long for Telegram scroll.
     density_score = 10
     if body_words < 15:
         density_score = 0
@@ -1868,16 +1870,16 @@ def assess_text_quality(
     elif body_words < 40:
         density_score = 2
         reasons.append(f"density: слишком короткий текст ({body_words} слов)")
-    elif body_words < 70:
+    elif body_words < 60:
         density_score = 6
         reasons.append(f"density: текст на грани минимума ({body_words} слов)")
-    elif body_words > 300:
+    elif body_words > 250:
         density_score -= 5
-        reasons.append(f"density: слишком длинный текст ({body_words} слов), цель 90-180")
-    elif body_words > 220:
-        density_score -= 3
-        reasons.append(f"density: текст многословен ({body_words} слов), цель 90-180")
+        reasons.append(f"density: слишком длинный текст ({body_words} слов), цель 60-120")
     elif body_words > 180:
+        density_score -= 3
+        reasons.append(f"density: текст многословен ({body_words} слов), цель 60-120")
+    elif body_words > 130:
         density_score -= 1
         reasons.append(f"density: текст чуть длиннее цели ({body_words} слов)")
     # Penalize very low unique-word ratio (lots of repetition)
