@@ -21,6 +21,7 @@ from generation_spec import (
     PlannerOutput,
     VOICE_MODES,
     OPENING_ARCHETYPES,
+    _PERSONAL_INPUT_KEYWORDS,
 )
 
 logger = logging.getLogger(__name__)
@@ -74,6 +75,49 @@ def _build_factual_safety_block(spec: GenerationSpec) -> str:
 
     if spec.author_forbidden_claims:
         parts.append(f"- НЕЛЬЗЯ приписывать автору: {spec.author_forbidden_claims}")
+
+    # Anti-hallucination: commerce/location claims
+    parts.append("- ЗАПРЕЩЕНО: «можно купить в ...», «продаётся в ...», «есть в Связном/DNS/МВидео» — если это НЕ указано во входных данных")
+    parts.append("- ЗАПРЕЩЕНО: конкретные цены, магазины, локации, бренды — если их нет в исходных фактах или запросе")
+
+    return "\n".join(parts)
+
+
+def _build_anecdote_guard_block(spec: GenerationSpec) -> str:
+    """Block fabricated personal/service anecdotes when not in input data."""
+    # Check if input explicitly contains personal case signals
+    input_text = f"{spec.source_prompt} {spec.primary_topic}".lower()
+    has_personal_input = any(kw in input_text for kw in _PERSONAL_INPUT_KEYWORDS)
+    if has_personal_input:
+        return ""  # Input explicitly mentions personal cases — allow
+
+    return (
+        "ЗАПРЕТ НА ВЫДУМАННЫЕ ИСТОРИИ (ОБЯЗАТЕЛЬНО):\n"
+        "- Во входных данных НЕТ упоминаний клиентов, сервиса, практики.\n"
+        "- Поэтому НЕЛЬЗЯ писать: «клиент пришёл», «ко мне обратились», «в моём сервисе»,\n"
+        "  «мы часто видим», «из практики», «недавно ко мне», «мой последний клиент».\n"
+        "- Роль автора влияет ТОЛЬКО на тон, но НЕ даёт права выдумывать истории из практики.\n"
+        "- Если хочешь дать пример — используй обезличенную ситуацию или общеизвестный факт."
+    )
+
+
+def _build_source_grounding_block(spec: GenerationSpec) -> str:
+    """Source grounding for news mode — text must be built from source facts."""
+    if spec.generation_mode != "news" or not spec.source_facts:
+        return ""
+
+    facts_text = "\n".join(f"  - {f}" for f in spec.source_facts[:10])
+    parts = [
+        "ПРИВЯЗКА К ИСТОЧНИКУ (ОБЯЗАТЕЛЬНО для новостного режима):",
+        f"- Используй ТОЛЬКО эти факты из источника:\n{facts_text}",
+        "- НЕ добавляй факты, которых нет в этом списке.",
+        "- Главные сущности/субъекты в тексте ДОЛЖНЫ совпадать с фактами из источника.",
+        "- Если не можешь написать по этим фактам — так и скажи, НЕ выдумывай.",
+    ]
+
+    if spec.forbidden_facts:
+        forbidden_text = "\n".join(f"  - {f}" for f in spec.forbidden_facts[:5])
+        parts.append(f"- НЕ упоминай (запрещённые факты):\n{forbidden_text}")
 
     return "\n".join(parts)
 
@@ -170,6 +214,10 @@ def build_planner_prompt(
 
 {_build_voice_block(spec)}
 
+{_build_anecdote_guard_block(spec)}
+
+{_build_source_grounding_block(spec)}
+
 {strategy_hint}
 
 Угол поста:
@@ -221,6 +269,8 @@ def build_writer_prompt(
     safety_block = _build_factual_safety_block(spec)
     brevity_block = _build_brevity_block(spec)
     must_not_block = _build_must_not_force_block(spec)
+    anecdote_guard = _build_anecdote_guard_block(spec)
+    source_grounding = _build_source_grounding_block(spec)
 
     plan_block = f"""ПЛАН ПОСТА (уже проверен, следуй ему):
 - Тема: {plan.resolved_topic}
@@ -249,6 +299,10 @@ def build_writer_prompt(
 {plan_block}
 
 {voice_block}
+
+{anecdote_guard}
+
+{source_grounding}
 
 {safety_block}
 

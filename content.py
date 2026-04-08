@@ -48,8 +48,13 @@ from generation_spec import (
     PlannerOutput,
     build_generation_spec,
     validate_planner_output,
+    validate_generated_text,
+    strip_personal_anecdotes,
+    strip_commerce_claims,
     classify_opener_archetype,
     compute_claim_risk,
+    is_service_case_overused,
+    FAMILY_PREFERRED_ARCHETYPES,
     OPENING_ARCHETYPES,
 )
 from prompt_builder import (
@@ -409,6 +414,27 @@ def _apply_safety_pass(bundle: dict, *, author_role_type: str = "", author_role_
                 author_activities=author_activities,
                 author_forbidden_claims=author_forbidden_claims,
             )
+
+
+def _apply_generation_validators(bundle: dict, spec: GenerationSpec) -> list[tuple[str, str]]:
+    """Apply runtime validators for anecdotes, commerce claims, and source drift.
+
+    Modifies bundle in-place (strips offending content) and returns list of issues found.
+    """
+    all_issues: list[tuple[str, str]] = []
+    for field_name in ("body", "cta"):
+        val = bundle.get(field_name)
+        if not val:
+            continue
+        issues = validate_generated_text(val, spec)
+        if issues:
+            all_issues.extend(issues)
+        # Strip fabricated anecdotes
+        val = strip_personal_anecdotes(val, spec)
+        # Strip unsupported commerce claims
+        val = strip_commerce_claims(val, spec)
+        bundle[field_name] = val
+    return all_issues
 
 
 def _author_role_kwargs(settings: dict) -> dict[str, str]:
@@ -2926,6 +2952,14 @@ async def generate_post_bundle(
             )
             _apply_fabrication_cleanup(normalized)
             _apply_safety_pass(normalized, **_author_role_kwargs(owner_settings))
+            # Apply runtime generation validators (anecdote stripping, commerce claim removal)
+            gen_issues = _apply_generation_validators(normalized, gen_spec)
+            if gen_issues:
+                logger.info(
+                    "generate_post_bundle: generation validators found %d issues: %s",
+                    len(gen_issues),
+                    "; ".join(f"{r}: {d}" for r, d in gen_issues[:3]),
+                )
             # Enforce single-message budget for autopost path
             if generation_path == "autopost":
                 t, b, c = enforce_autopost_budget(
@@ -2976,6 +3010,14 @@ async def generate_post_bundle(
     )
     _apply_fabrication_cleanup(best)
     _apply_safety_pass(best, **_author_role_kwargs(owner_settings))
+    # Apply runtime generation validators (anecdote stripping, commerce claim removal)
+    gen_issues = _apply_generation_validators(best, gen_spec)
+    if gen_issues:
+        logger.info(
+            "generate_post_bundle: generation validators found %d issues in best candidate: %s",
+            len(gen_issues),
+            "; ".join(f"{r}: {d}" for r, d in gen_issues[:3]),
+        )
 
     # Enforce single-message budget for autopost path
     if generation_path == "autopost":
