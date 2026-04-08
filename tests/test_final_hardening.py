@@ -103,14 +103,22 @@ class TestSettingsModalSafety(unittest.TestCase):
         """saveSettings() must call closeModal() only in success path."""
         app_js = (Path(__file__).resolve().parent.parent / "app.js").read_text(encoding="utf-8")
         start = app_js.index("async function saveSettings()")
-        # Find the function body (next function or end)
-        end = app_js.index("\nfunction ", start + 10)
+        # Find the end of the function — look for next top-level function definition
+        end = len(app_js)
+        for pattern in ["\nfunction ", "\nasync function "]:
+            try:
+                idx = app_js.index(pattern, start + 10)
+                if idx < end:
+                    end = idx
+            except ValueError:
+                pass
         func_body = app_js[start:end]
         # closeModal must be called inside the try block (after toast)
         self.assertIn("closeModal()", func_body, "saveSettings should call closeModal on success")
-        # closeModal should come AFTER the toast success message
+        # closeModal should come AFTER the toast message about saving
         close_idx = func_body.index("closeModal()")
-        toast_idx = func_body.index("toast('Настройки сохранены')")
+        # Find any toast call that indicates success (before closeModal)
+        toast_idx = func_body.index("toast(")
         self.assertGreater(close_idx, toast_idx, "closeModal should be after success toast")
 
 

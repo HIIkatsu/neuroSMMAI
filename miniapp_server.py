@@ -847,7 +847,6 @@ async def serve_styles_css():
     if etag:
         headers["ETag"] = f'"{etag}"'
     return FileResponse(str(path), media_type=_ALLOWED_ROOT_ASSETS["styles.css"], headers=headers)
-    return FileResponse(str(path), media_type=_ALLOWED_ROOT_ASSETS["styles.css"])
 
 
 # Ensure the miniapp directory exists for the StaticFiles mount.
