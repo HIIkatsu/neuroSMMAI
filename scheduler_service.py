@@ -618,7 +618,8 @@ class SchedulerService:
                         if await check_scheduler_dedup(durable_key):
                             self._last_schedule_run[dedupe_key] = minute_key
                             continue
-                        await set_scheduler_dedup(durable_key, trigger_type="schedule", owner_id=owner_id)
+                        if not await set_scheduler_dedup(durable_key, trigger_type="schedule", owner_id=owner_id):
+                            continue  # DB write failed — skip to avoid inconsistent state
                         self._last_schedule_run[dedupe_key] = minute_key
                         # Pass channel_profile_id so the post uses channel-specific settings
                         cpid = int(row.get("channel_profile_id", 0))
@@ -656,7 +657,8 @@ class SchedulerService:
                     if await check_scheduler_dedup(durable_key):
                         self._last_plan_run[plan_id] = minute_key
                         continue
-                    await set_scheduler_dedup(durable_key, trigger_type="plan", owner_id=item_owner)
+                    if not await set_scheduler_dedup(durable_key, trigger_type="plan", owner_id=item_owner):
+                        continue  # DB write failed — skip to avoid inconsistent state
                     self._last_plan_run[plan_id] = minute_key
 
                     # --- Tier gate: plan auto-publish is a Pro+ feature ---
