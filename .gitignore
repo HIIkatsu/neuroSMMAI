@@ -23,7 +23,7 @@ uploads/
 generated_images/
 *.log
 
-# ── OS / editor artefacts ──
+# ── OS / editor artifacts ──
 .DS_Store
 Thumbs.db
 *.swp
