@@ -162,13 +162,8 @@ def sanitize_plan_topic_line(value: str, subject: str) -> str:
 
 
 async def _load_strategy_settings(owner_id: int, topic: str) -> dict[str, Any]:
-    keys = [
-        'topic', 'channel_audience', 'channel_style', 'channel_style_preset', 'channel_mode',
-        'channel_formats', 'channel_frequency', 'content_constraints', 'news_enabled',
-        'news_sources', 'content_rubrics', 'rubrics_schedule', 'post_scenarios',
-        'content_exclusions', 'author_role_type', 'author_role_description',
-    ]
-    settings = await db.get_settings_bulk(keys, owner_id=owner_id)
+    settings = await db.get_channel_settings(owner_id)
+    # Ensure topic falls back to the supplied argument if the profile has none
     if topic and not str(settings.get('topic') or '').strip():
         settings['topic'] = topic
     return settings

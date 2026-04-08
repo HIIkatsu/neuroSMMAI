@@ -875,12 +875,17 @@ async def set_posts_enabled(enabled: bool, owner_id: int | None = None):
 
 
 async def get_channel_settings(owner_id: int, channel_profile_id: int | None = None) -> dict[str, str]:
-    """Read settings that are channel-specific from channel_profiles with owner fallback.
+    """Read channel-specific settings from the channel_profiles table.
 
-    Returns a dict of setting keys → values, merging:
-    1. Values from the specified channel profile (if channel_profile_id given)
-       or the active channel profile for this owner.
-    2. Fallback to owner-scoped settings table for any missing values.
+    Returns a dict of setting keys → values sourced **exclusively** from the
+    channel profile.  No owner-level ``settings`` fallback is performed for
+    channel-scoped keys so that one channel's configuration can never leak
+    into another.
+
+    Resolution order:
+    1. If *channel_profile_id* is given, use that profile.
+    2. Otherwise fall back to the active profile for *owner_id*.
+    3. If no profile is found at all, return empty strings for every key.
     """
     profile: dict | None = None
     if channel_profile_id:
@@ -896,61 +901,63 @@ async def get_channel_settings(owner_id: int, channel_profile_id: int | None = N
     if not profile:
         profile = await get_active_channel_profile(owner_id=owner_id)
 
-    # Build result from profile + fallback to owner settings
+    # Build result exclusively from the channel profile — no owner-level
+    # fallback for channel-scoped keys.
     result: dict[str, str] = {}
-    owner_bulk = await get_settings_bulk(list(_CHANNEL_SETTINGS_KEYS), owner_id=owner_id)
 
     for key in _CHANNEL_SETTINGS_KEYS:
-        # Try channel profile first
         profile_val = str(profile.get(key, "")).strip() if profile else ""
-        if profile_val:
-            result[key] = profile_val
-        else:
-            # Fall back to owner-level settings table
-            result[key] = str(owner_bulk.get(key) or "")
+        result[key] = profile_val
 
-    # Also include topic and channel_target from profile
+    # topic, channel_target and posting_mode live directly on the profile row
     if profile:
         result["topic"] = str(profile.get("topic") or "")
         result["channel_target"] = str(profile.get("channel_target") or "")
-        result["posting_mode"] = str(profile.get("posting_mode") or owner_bulk.get("posting_mode") or "manual")
+        result["posting_mode"] = str(profile.get("posting_mode") or "manual")
     else:
-        result["topic"] = str(owner_bulk.get("topic") or "")
-        result["channel_target"] = str(owner_bulk.get("channel_target") or "")
-        result["posting_mode"] = str(owner_bulk.get("posting_mode") or "manual")
+        result["topic"] = ""
+        result["channel_target"] = ""
+        result["posting_mode"] = "manual"
 
     return result
 
 
 async def save_channel_setting(owner_id: int, key: str, value: str, channel_profile_id: int | None = None):
-    """Save a channel-specific setting to the channel_profiles table.
+    """Save a setting.
 
-    If the key is a known channel-level setting, update the channel profile.
-    Always also update the owner-level settings table for backwards compat.
+    * Channel-scoped keys (topic/style/audience/…) are written **only** to the
+      ``channel_profiles`` row — never to the flat ``settings`` table.  This
+      prevents cross-channel contamination that previously occurred because
+      ``get_channel_settings`` fell back to the owner-level ``settings`` row
+      when a profile column was empty.
+    * Non-channel keys (e.g. ``auto_hashtags``) are stored in the ``settings``
+      table as before.
     """
-    # Always save to owner-level settings for backwards compatibility
-    await set_setting(key, value, owner_id=owner_id)
+    is_channel_key = key in _CHANNEL_SETTINGS_KEYS or key in ("topic", "posting_mode")
 
-    if key not in _CHANNEL_SETTINGS_KEYS and key not in ("topic", "posting_mode"):
+    if not is_channel_key:
+        # Pure owner-level setting — write to flat settings table only
+        await set_setting(key, value, owner_id=owner_id)
         return
 
-    # Find the target profile
+    # --- Channel-scoped key: write to channel_profiles only ---
     pid = int(channel_profile_id) if channel_profile_id else 0
     if not pid:
         profile = await get_active_channel_profile(owner_id=owner_id)
         pid = int(profile.get("id", 0)) if profile else 0
     if not pid:
+        # No channel profile exists yet — fall back to owner-level settings
+        # so the value is not lost entirely.  Once a profile is created the
+        # backfill migration will copy it over.
+        await set_setting(key, value, owner_id=owner_id)
         return
 
-    # Update the channel profile column
-    # Safety: key is validated against _CHANNEL_SETTINGS_KEYS (hardcoded)
     allowed_cols = set(_CHANNEL_SETTINGS_KEYS) | {"topic", "posting_mode"}
     if key not in allowed_cols:
         return
-    assert key.isidentifier(), f"Invalid column name: {key}"  # safety: prevent SQL injection
+    assert key.isidentifier(), f"Invalid column name: {key}"
     now = datetime.utcnow().isoformat(timespec="seconds")
     async with _db_ctx() as db:
-        # Safe: key is from hardcoded allowed_cols, not user input
         await db.execute(
             f"UPDATE channel_profiles SET {key}=?, updated_at=? WHERE id=? AND owner_id=?",
             (value, now, pid, int(owner_id)),

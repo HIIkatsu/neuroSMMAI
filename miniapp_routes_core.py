@@ -485,7 +485,8 @@ async def news_sniper_run(telegram_user_id: int = Depends(current_user_id)):
     # Build source metadata JSON
     news_source_json = build_news_source_meta(item)
 
-    channel_target = (await db.get_setting("channel_target", owner_id=telegram_user_id) or "").strip()
+    ch_settings = await db.get_channel_settings(telegram_user_id)
+    channel_target = (ch_settings.get("channel_target") or "").strip()
 
     # Verify that channel_target actually belongs to this user
     if channel_target:
@@ -642,8 +643,9 @@ async def patch_settings(
         await verify_channel_ownership(telegram_user_id, fields["channel_target"])
 
     if "onboarding_completed" in fields and str(fields["onboarding_completed"]) == "1":
-        topic = (fields.get("topic") or (await db.get_setting("topic", owner_id=telegram_user_id) or "")).strip()
-        audience = (fields.get("channel_audience") or (await db.get_setting("channel_audience", owner_id=telegram_user_id) or "")).strip()
+        ch_settings = await db.get_channel_settings(telegram_user_id)
+        topic = (fields.get("topic") or (ch_settings.get("topic") or "")).strip()
+        audience = (fields.get("channel_audience") or (ch_settings.get("channel_audience") or "")).strip()
         if not topic or not audience:
             logger.warning("patch_settings: ignoring onboarding_completed=1 for owner_id=%s — profile incomplete (topic_len=%d audience_len=%d)", telegram_user_id, len(topic), len(audience))
             del fields["onboarding_completed"]

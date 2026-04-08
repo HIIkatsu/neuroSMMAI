@@ -696,7 +696,7 @@ class SchedulerService:
                                         continue
                                 except Exception:
                                     pass
-                            item = await fetch_latest_news(owner_id=owner_id, channel_target=channel)
+                            item = await fetch_latest_news(owner_id=owner_id, channel_target=channel, channel_profile_id=int(ch_profile.get("id", 0)))
                             if not item or not cfg or not getattr(cfg, "openrouter_api_key", ""):
                                 continue
                             text = await build_news_post(cfg, item, owner_id=owner_id)
