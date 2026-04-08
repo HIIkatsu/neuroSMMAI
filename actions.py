@@ -17,6 +17,7 @@ import db
 from content import generate_post_bundle
 from image_search import find_image, _LATIN_TOKEN_RE, validate_image_for_autopost
 from ai_image_generator import generate_ai_image, _heuristic_prompt
+from runtime_trace import new_trace_id, trace_text_generation, trace_image_selection, TraceTimer, debug_fields, is_debug_trace_enabled
 from safe_send import safe_send, safe_send_document, safe_send_photo, safe_send_video
 from topic_utils import detect_topic_family, detect_subfamily, get_family_image_queries, get_subfamily_image_queries
 
@@ -475,16 +476,17 @@ async def resolve_post_image(
     config: Any | None = None,
     used_refs: set[str] | None = None,
     raw_user_query: str = "",
+    trace_id: str = "",
 ) -> str:
+    _tid = trace_id or new_trace_id()
+    _timer = TraceTimer()
+    _timer.__enter__()
     logger.info(
-        "resolve_post_image start owner_id=%s raw_user_query=%r query=%r topic=%r ai_prompt=%r",
-        owner_id, raw_user_query, query, topic, ai_prompt,
+        "resolve_post_image start owner_id=%s raw_user_query=%r query=%r topic=%r ai_prompt=%r trace_id=%s",
+        owner_id, raw_user_query, query, topic, ai_prompt, _tid,
     )
 
     # ---------- STEP 1: Try raw user query first (literal-first priority) ----------
-    # Try the user's literal input first for maximum relevance.
-    # If no relevant image is found, STEP 2 falls back to enriched family-aware query.
-    # build_best_visual_queries() in image_search.py handles literal→English translation.
     if raw_user_query:
         logger.info("resolve_post_image trying raw_user_query=%r", raw_user_query)
         try:
@@ -502,6 +504,14 @@ async def resolve_post_image(
             image_ref, topic=topic, prompt=ai_prompt, post_text=post_text
         ):
             logger.info("resolve_post_image SELECTED via raw_user_query=%r url=%r", raw_user_query, image_ref[:80])
+            _timer.__exit__(None, None, None)
+            trace_image_selection(
+                trace_id=_tid, route="resolve_post_image",
+                title_excerpt=topic, body_excerpt=(post_text or "")[:100],
+                visual_subject=raw_user_query, built_query=raw_user_query,
+                provider_result_count=1, scoring_path="raw_user_query",
+                accept_outcome="accepted", duration_ms=_timer.elapsed_ms,
+            )
             return image_ref
         elif image_ref:
             logger.warning("resolve_post_image raw_user_query result REJECTED by quality gate url=%r", image_ref[:80])
@@ -531,11 +541,27 @@ async def resolve_post_image(
         )
         image_ref = ""
 
+    _timer.__exit__(None, None, None)
     if image_ref:
         logger.info("resolve_post_image SELECTED via fallback url=%r", image_ref[:80])
+        trace_image_selection(
+            trace_id=_tid, route="resolve_post_image",
+            title_excerpt=topic, body_excerpt=(post_text or "")[:100],
+            visual_subject=search_query, built_query=search_query,
+            provider_result_count=1, scoring_path="enriched_fallback",
+            accept_outcome="accepted", duration_ms=_timer.elapsed_ms,
+        )
         return image_ref
 
     logger.debug("RESOLVE_POST_IMAGE_EMPTY raw_user_query=%r query=%r", (raw_user_query or "")[:200], (query or "")[:240])
+    trace_image_selection(
+        trace_id=_tid, route="resolve_post_image",
+        title_excerpt=topic, body_excerpt=(post_text or "")[:100],
+        visual_subject=search_query or raw_user_query, built_query=search_query,
+        provider_result_count=0, scoring_path="enriched_fallback",
+        accept_outcome="no_image", reject_reason="no_match",
+        duration_ms=_timer.elapsed_ms,
+    )
     return ""
 
 
@@ -550,6 +576,10 @@ async def generate_post_payload(
     current_media_ref: str = "",
     generation_path: str = "editor",
 ) -> dict:
+    _trace_id = new_trace_id()
+    _trace_timer = TraceTimer()
+    _trace_timer.__enter__()
+
     # Use channel-scoped settings instead of owner-level get_setting()
     # to respect per-channel audience/style/rubrics when user has multiple channels
     ch_settings = await db.get_channel_settings(owner_id)
@@ -557,8 +587,8 @@ async def generate_post_payload(
     effective_prompt = (prompt or channel_topic or "").strip()
 
     logger.info(
-        "GENERATE_POST_PAYLOAD_ENTRY path=%s owner_id=%s literal_topic=%r prompt=%r",
-        generation_path, owner_id, (channel_topic or "")[:80], (effective_prompt or "")[:80],
+        "GENERATE_POST_PAYLOAD_ENTRY path=%s owner_id=%s literal_topic=%r prompt=%r trace_id=%s",
+        generation_path, owner_id, (channel_topic or "")[:80], (effective_prompt or "")[:80], _trace_id,
     )
 
     recent_posts: list[str] = []
@@ -693,7 +723,38 @@ async def generate_post_payload(
             logger.exception("generate_post_payload image stage failed: %s", exc)
             logger.debug("GENERATE_POST_PAYLOAD_IMAGE_STAGE_FAILED type=%s msg=%r", type(exc).__name__, str(exc)[:300])
             image_ref = ""
-    return {
+    _trace_timer.__exit__(None, None, None)
+    _text_trace = trace_text_generation(
+        trace_id=_trace_id,
+        route="generate_post_payload",
+        source_mode=generation_path,
+        requested_topic=effective_prompt,
+        channel_topic=channel_topic,
+        author_role=str(ch_settings.get("author_role_type") or ""),
+        prompt_builder="generate_post_bundle",
+        planner_used=False,
+        writer_used=bool(text),
+        rewrite_used=False,
+        final_archetype="",
+        reject_reason="" if text else "empty_text",
+        quality_score=float(bundle.get("quality_score") or 0) if bundle else None,
+        duration_ms=_trace_timer.elapsed_ms,
+        extra={"generation_path": generation_path, "has_image": bool(image_ref)},
+    )
+    _img_trace = trace_image_selection(
+        trace_id=_trace_id,
+        route="generate_post_payload",
+        title_excerpt=title,
+        body_excerpt=(body or "")[:100],
+        visual_subject=visual_brief or post_intent or "",
+        built_query=effective_prompt,
+        provider_result_count=1 if image_ref else 0,
+        scoring_path="ai_image+stock_search" if force_image else "skipped",
+        accept_outcome="accepted" if image_ref else "no_image",
+        reject_reason="" if image_ref else "no_match",
+        duration_ms=_trace_timer.elapsed_ms,
+    )
+    _result = {
         "text": text,
         "title": title,
         "body": body,
@@ -713,7 +774,13 @@ async def generate_post_payload(
         "reply_to_message_id": 0,
         "post_intent": post_intent,
         "visual_brief": visual_brief,
+        "_trace_id": _trace_id,
     }
+    _dbg = debug_fields(_text_trace)
+    if _dbg:
+        _dbg.update(debug_fields(_img_trace) or {})
+        _result["_debug"] = _dbg
+    return _result
 
 
 # ---------- СОЗДАНИЕ ЧЕРНОВИКА ----------

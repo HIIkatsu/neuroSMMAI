@@ -28,6 +28,7 @@ import json
 import logging
 import os
 import random
+from runtime_trace import new_trace_id, trace_text_generation, TraceTimer, is_debug_trace_enabled
 import re
 import time
 from datetime import datetime, timezone
@@ -2758,6 +2759,9 @@ async def generate_post_bundle(
     base_url: str | None = None,
     generation_path: str = "editor",
 ) -> dict[str, str]:
+    _trace_id = new_trace_id()
+    _trace_timer = TraceTimer()
+    _trace_timer.__enter__()
     no_disclaimer = (await get_setting("no_disclaimer", owner_id=owner_id) or "1") == "1"
     channel_topic = (topic or "").strip() or "без общей темы"
     requested = (prompt or "").strip() or channel_topic
@@ -2971,9 +2975,45 @@ async def generate_post_bundle(
                 normalized["title"] = t
                 normalized["body"] = b
                 normalized["cta"] = c
+            _trace_timer.__exit__(None, None, None)
+            _trace_payload = trace_text_generation(
+                trace_id=_trace_id,
+                route="generate_post_bundle",
+                source_mode=generation_mode,
+                requested_topic=requested,
+                channel_topic=channel_topic,
+                author_role=str(owner_settings.get("author_role_type") or ""),
+                prompt_builder="build_generation_prompt",
+                planner_used=False,
+                writer_used=True,
+                rewrite_used=bool(normalized.get("quality_reasons")),
+                final_archetype=classify_opener_archetype(normalized.get("body", ""))[:40],
+                reject_reason="",
+                quality_score=float(normalized.get("quality_score") or 0),
+                duration_ms=_trace_timer.elapsed_ms,
+                extra={"generation_path": generation_path, "family": family},
+            )
+            normalized["_trace_id"] = _trace_id
             return normalized
 
     if not candidates:
+        _trace_timer.__exit__(None, None, None)
+        trace_text_generation(
+            trace_id=_trace_id,
+            route="generate_post_bundle",
+            source_mode=generation_mode,
+            requested_topic=requested,
+            channel_topic=channel_topic,
+            author_role=str(owner_settings.get("author_role_type") or ""),
+            prompt_builder="build_generation_prompt",
+            planner_used=False,
+            writer_used=True,
+            rewrite_used=False,
+            final_archetype="",
+            reject_reason="no_viable_candidate",
+            duration_ms=_trace_timer.elapsed_ms,
+            extra={"generation_path": generation_path, "family": family},
+        )
         raise RuntimeError("Не удалось получить пригодный текст от модели")
 
     candidates.sort(key=lambda item: (item[2], -len(item[0].get("body", ""))))
@@ -2996,6 +3036,23 @@ async def generate_post_bundle(
             logger.warning(
                 "generate_post_bundle: rejecting autopost candidate due to quality issues: %s (human: %s)",
                 "; ".join(final_issues[:4]), _hr_reason,
+            )
+            _trace_timer.__exit__(None, None, None)
+            trace_text_generation(
+                trace_id=_trace_id,
+                route="generate_post_bundle",
+                source_mode=generation_mode,
+                requested_topic=requested,
+                channel_topic=channel_topic,
+                author_role=str(owner_settings.get("author_role_type") or ""),
+                prompt_builder="build_generation_prompt",
+                planner_used=False,
+                writer_used=True,
+                rewrite_used=False,
+                final_archetype="",
+                reject_reason="quality_gate_reject",
+                duration_ms=_trace_timer.elapsed_ms,
+                extra={"generation_path": generation_path, "family": family},
             )
             raise RuntimeError(f"Не удалось сгенерировать достаточно качественный текст для автопостинга: {_hr_reason}" if _hr_reason else "Не удалось сгенерировать достаточно качественный текст для автопостинга")
         logger.warning("generate_post_bundle: returning best candidate despite quality issues: %s", "; ".join(final_issues[:4]))
@@ -3031,6 +3088,25 @@ async def generate_post_bundle(
         best["body"] = b
         best["cta"] = c
 
+    _trace_timer.__exit__(None, None, None)
+    _trace_payload = trace_text_generation(
+        trace_id=_trace_id,
+        route="generate_post_bundle",
+        source_mode=generation_mode,
+        requested_topic=requested,
+        channel_topic=channel_topic,
+        author_role=str(owner_settings.get("author_role_type") or ""),
+        prompt_builder="build_generation_prompt",
+        planner_used=False,
+        writer_used=True,
+        rewrite_used=bool(best.get("quality_reasons")),
+        final_archetype=classify_opener_archetype(best.get("body", ""))[:40],
+        reject_reason="",
+        quality_score=float(best.get("quality_score") or 0),
+        duration_ms=_trace_timer.elapsed_ms,
+        extra={"generation_path": generation_path, "family": family},
+    )
+    best["_trace_id"] = _trace_id
     return best
 
 
@@ -3069,6 +3145,7 @@ async def generate_post_text(
         owner_id=owner_id,
         generation_path=generation_path,
     )
+    _trace_id = bundle.get("_trace_id", new_trace_id())
     # _apply_fabrication_cleanup already runs inside generate_post_bundle, but the
     # final joined text may still contain references if they span field boundaries.
     text = "\n\n".join(part for part in [bundle.get("title", ""), bundle.get("body", ""), bundle.get("cta", "")] if part)

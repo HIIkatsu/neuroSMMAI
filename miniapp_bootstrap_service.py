@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from typing import Any
 
 import db
@@ -9,6 +10,27 @@ from miniapp_analytics_service import build_channel_analytics, recent_channel_hi
 from miniapp_media_service import build_media_shortcuts
 from miniapp_settings_service import build_operator_profile, normalize_settings_snapshot
 from miniapp_shared import cache_get, cache_set, owner_settings
+
+
+def enrich_display_label(channel: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Add ``display_label`` to a channel dict.
+
+    Prefers the human-readable ``title``; falls back to ``channel_target``
+    (e.g. ``@mychannel``).  Raw numeric Telegram chat IDs are never used as
+    the label — ``Канал без названия`` is shown instead.
+    """
+    if not channel:
+        return channel
+    title = str(channel.get("title") or "").strip()
+    target = str(channel.get("channel_target") or "").strip()
+    if title and not re.match(r'^-?\d+$', title):
+        label = title
+    elif target and not re.match(r'^-?\d+$', target):
+        label = target
+    else:
+        label = "Канал без названия"
+    channel["display_label"] = label
+    return channel
 
 
 def _active_drafts(rows: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
@@ -49,6 +71,10 @@ def _build_analytics_compat(
 async def bootstrap_core_payload(telegram_user_id: int) -> dict[str, Any]:
     active = await db.get_active_channel_profile(owner_id=telegram_user_id)
     channels = await db.list_channel_profiles(owner_id=telegram_user_id)
+    # Enrich channels with display_label at the source
+    enrich_display_label(active)
+    for ch in channels:
+        enrich_display_label(ch)
     stats = await db.get_post_stats(owner_id=telegram_user_id)
     drafts = _active_drafts(await db.list_drafts(owner_id=telegram_user_id, limit=80))
     drafts_current = len(drafts)
@@ -110,6 +136,10 @@ async def owner_summary(telegram_user_id: int) -> dict[str, Any]:
         return cached
     payload = await db.get_owner_bootstrap_snapshot(telegram_user_id, drafts_limit=80, plan_limit=300, media_limit=24)
     payload["telegram_user_id"] = telegram_user_id
+    # Enrich channels with display_label
+    enrich_display_label(payload.get("active_channel"))
+    for ch in (payload.get("channels") or []):
+        enrich_display_label(ch)
     payload.update(await build_media_shortcuts(telegram_user_id))
     payload["settings"] = normalize_settings_snapshot(payload.get("settings") or {}, payload.get("active_channel"))
     history = await recent_channel_history(telegram_user_id)
