@@ -66,16 +66,11 @@ def prompt_looks_news(prompt: str) -> bool:
     return any(m in p for m in markers)
 
 
-async def load_editorial_settings(owner_id: int | None, overrides: dict[str, Any] | None = None) -> dict[str, Any]:
-    keys = [
-        'topic', 'channel_audience', 'channel_style', 'channel_style_preset', 'channel_mode',
-        'channel_formats', 'channel_frequency', 'content_constraints', 'news_enabled',
-        'news_sources', 'content_rubrics', 'post_scenarios', 'posting_mode', 'onboarding_completed',
-    ]
-    settings = {}
+async def load_editorial_settings(owner_id: int | None, overrides: dict[str, Any] | None = None, *, channel_profile_id: int | None = None) -> dict[str, Any]:
+    settings: dict[str, Any] = {}
     if owner_id:
         try:
-            settings = await db.get_settings_bulk(keys, owner_id=int(owner_id or 0))
+            settings = await db.get_channel_settings(int(owner_id or 0), channel_profile_id=channel_profile_id)
         except Exception:
             settings = {}
     for k, v in (overrides or {}).items():

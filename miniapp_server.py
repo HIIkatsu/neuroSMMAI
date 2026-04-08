@@ -778,12 +778,25 @@ async def serve_generated_image(
     filename: str,
     telegram_user: dict = Depends(get_current_telegram_user),
 ):
-    """Serve AI-generated images with authentication.
+    """Serve AI-generated images with authentication and ownership verification.
 
-    Generated images are named by a content-hash (not owner-specific) so
-    ownership cannot be checked by filename.  Authentication alone is required.
+    New images are named ``{owner_id}_{hash}.{ext}``.  Legacy images without
+    an owner prefix are served to any authenticated user for backward compat.
     """
     safe_name = _safe_media_filename(filename)
+
+    owner_id = int(telegram_user.get("id") or 0)
+    if not owner_id:
+        raise HTTPException(status_code=403, detail="Invalid user ID")
+
+    # Ownership check: new images have "{owner_id}_" prefix
+    # Legacy images (hash-only names) are allowed for any authenticated user
+    parts = safe_name.split("_", 1)
+    if len(parts) == 2 and parts[0].isdigit():
+        file_owner = int(parts[0])
+        if file_owner != owner_id:
+            raise HTTPException(status_code=403, detail="Access denied")
+
     file_path = _resolve_confined_path(GENERATED_DIR, safe_name)
     if not file_path.exists() or not file_path.is_file():
         raise HTTPException(status_code=404, detail="File not found")
@@ -801,13 +814,27 @@ _ALLOWED_ROOT_ASSETS = {
     "styles.css": "text/css; charset=utf-8",
 }
 
+# Compute content hashes at import time for cache-busting ETag headers.
+# This ensures browsers fetch fresh assets after every deploy without
+# needing to manually update version strings in HTML.
+_ASSET_ETAGS: dict[str, str] = {}
+for _asset_name in _ALLOWED_ROOT_ASSETS:
+    _asset_path = BASE_DIR / _asset_name
+    if _asset_path.is_file():
+        import hashlib as _hl
+        _ASSET_ETAGS[_asset_name] = _hl.md5(_asset_path.read_bytes()).hexdigest()[:12]
+
 
 @app.get("/app.js")
 async def serve_app_js():
     path = BASE_DIR / "app.js"
     if not path.is_file():
         raise HTTPException(status_code=404, detail="Not found")
-    return FileResponse(str(path), media_type=_ALLOWED_ROOT_ASSETS["app.js"])
+    headers = {"Cache-Control": "public, max-age=300, must-revalidate"}
+    etag = _ASSET_ETAGS.get("app.js")
+    if etag:
+        headers["ETag"] = f'"{etag}"'
+    return FileResponse(str(path), media_type=_ALLOWED_ROOT_ASSETS["app.js"], headers=headers)
 
 
 @app.get("/styles.css")
@@ -815,7 +842,11 @@ async def serve_styles_css():
     path = BASE_DIR / "styles.css"
     if not path.is_file():
         raise HTTPException(status_code=404, detail="Not found")
-    return FileResponse(str(path), media_type=_ALLOWED_ROOT_ASSETS["styles.css"])
+    headers = {"Cache-Control": "public, max-age=300, must-revalidate"}
+    etag = _ASSET_ETAGS.get("styles.css")
+    if etag:
+        headers["ETag"] = f'"{etag}"'
+    return FileResponse(str(path), media_type=_ALLOWED_ROOT_ASSETS["styles.css"], headers=headers)
 
 
 # Ensure the miniapp directory exists for the StaticFiles mount.

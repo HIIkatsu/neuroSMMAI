@@ -550,12 +550,11 @@ async def generate_post_payload(
     current_media_ref: str = "",
     generation_path: str = "editor",
 ) -> dict:
-    channel_topic = await db.get_setting("topic", owner_id=owner_id) or ""
-    effective_prompt = (prompt or channel_topic or "").strip()
-
     # Use channel-scoped settings instead of owner-level get_setting()
     # to respect per-channel audience/style/rubrics when user has multiple channels
     ch_settings = await db.get_channel_settings(owner_id)
+    channel_topic = ch_settings.get("topic") or ""
+    effective_prompt = (prompt or channel_topic or "").strip()
 
     logger.info(
         "GENERATE_POST_PAYLOAD_ENTRY path=%s owner_id=%s literal_topic=%r prompt=%r",
@@ -649,6 +648,7 @@ async def generate_post_payload(
                         model=getattr(config, "openrouter_model", ""),
                         base_url=getattr(config, "openrouter_base_url", None),
                         prebuilt_prompt=llm_image_prompt,
+                        owner_id=owner_id,
                     ),
                     timeout=30.0,
                 ) or ""
@@ -728,7 +728,8 @@ async def create_generated_draft(
     if await db.count_drafts(owner_id=owner_id, status="draft") >= max(1, int(getattr(config, "max_active_drafts_per_user", 25))):
         raise ValueError(f"Достигнут лимит черновиков: {getattr(config, 'max_active_drafts_per_user', 25)}")
 
-    channel = await db.get_setting("channel_target", owner_id=owner_id) or ""
+    ch_settings = await db.get_channel_settings(owner_id)
+    channel = ch_settings.get("channel_target") or ""
 
     payload = await generate_post_payload(
         config,
@@ -880,16 +881,14 @@ async def send_draft_preview(target, bot, draft: dict, *, owner_id: int | None =
 # ---------- ПУБЛИКАЦИЯ ----------
 
 async def publish_draft(bot, draft: dict, *, owner_id: int | None = 0) -> ActionResult:
-    channel = draft.get("channel_target") or await db.get_setting(
-        "channel_target",
-        owner_id=owner_id,
-    )
+    resolved_owner = int(owner_id or draft.get("owner_id") or 0)
+    ch_settings = await db.get_channel_settings(resolved_owner)
+    channel = draft.get("channel_target") or ch_settings.get("channel_target") or ""
 
     if not channel:
         return ActionResult(False, "Канал не привязан")
 
     draft_id = int(draft.get("id") or 0)
-    resolved_owner = int(owner_id or draft.get("owner_id") or 0)
 
     # Atomic claim: prevents double-publishing if two jobs fire simultaneously.
     # Skip claim when the caller (e.g. the API route) already pre-claimed the draft
@@ -909,8 +908,8 @@ async def publish_draft(bot, draft: dict, *, owner_id: int | None = 0) -> Action
     )
     send_silent = bool(int(draft.get("send_silent", 0) or 0))
 
-    # Append channel signature if set
-    signature = str(await db.get_setting("channel_signature", owner_id=resolved_owner) or "").strip()
+    # Append channel signature if set — from channel-scoped settings
+    signature = (ch_settings.get("channel_signature") or "").strip()
     if signature and text and not text.endswith(signature):
         text = text + "\n\n" + signature
 

@@ -22,7 +22,7 @@ from aiogram.types import (
 from ai_client import ai_chat, whisper_transcribe
 from billing_service import process_successful_payment, send_stars_invoice, create_yookassa_payment, RUB_PRICES, TIER_LABELS
 from content import generate_post_bundle
-from db import get_settings_bulk, list_drafts, list_plan_items, list_schedules, get_setting, create_draft, get_user_subscription, TIER_PRO, TIER_MAX, TIER_FREE, is_generation_allowed, FREE_TIER_GENERATIONS_LIMIT, increment_generations_used, is_feature_allowed, increment_feature_used
+from db import get_settings_bulk, list_drafts, list_plan_items, list_schedules, get_setting, create_draft, get_user_subscription, TIER_PRO, TIER_MAX, TIER_FREE, is_generation_allowed, FREE_TIER_GENERATIONS_LIMIT, increment_generations_used, is_feature_allowed, increment_feature_used, get_channel_settings
 from safe_send import answer_plain
 
 router = Router()
@@ -109,28 +109,12 @@ async def _send_with_app_button(message: Message, text: str, *, app_label: str =
 
 
 async def _load_context(owner_id: int) -> dict:
-    settings = await get_settings_bulk(
-        [
-            "channel_target",
-            "topic",
-            "news_enabled",
-            "posts_enabled",
-            "posting_mode",
-            "channel_style",
-            "channel_audience",
-            "content_formats",
-            "content_rubrics",
-            "content_constraints",
-            "channel_frequency",
-            "auto_mode",
-        ],
-        owner_id=owner_id,
-    )
+    ch_settings = await get_channel_settings(owner_id)
     schedules = await list_schedules(owner_id=owner_id)
     drafts = await list_drafts(owner_id=owner_id, limit=50)
     plan_items = await list_plan_items(limit=100, owner_id=owner_id)
     return {
-        "settings": settings,
+        "settings": ch_settings,
         "schedules": schedules,
         "drafts": drafts,
         "plan_items": plan_items,
@@ -798,26 +782,23 @@ async def handle_voice_message(message: Message):
         )
         return
 
-    # Generate post draft from transcribed text
-    topic = (await get_setting("topic", owner_id=owner_id) or "").strip() or transcript[:80]
-    channel_target = (await get_setting("channel_target", owner_id=owner_id) or "").strip()
+    # Generate post draft from transcribed text — use channel-scoped settings
+    ch_settings = await get_channel_settings(owner_id)
+    topic = (ch_settings.get("topic") or "").strip() or transcript[:80]
+    channel_target = (ch_settings.get("channel_target") or "").strip()
 
     try:
-        settings = await get_settings_bulk(
-            ["channel_style", "channel_audience", "content_rubrics", "post_scenarios", "content_constraints"],
-            owner_id=owner_id,
-        )
         bundle = await generate_post_bundle(
             api_key=api_key,
             model=getattr(cfg, "llm_model", "") or "",
             topic=topic,
             prompt=transcript,
             owner_id=owner_id,
-            channel_style=settings.get("channel_style") or "",
-            channel_audience=settings.get("channel_audience") or "",
-            content_rubrics=settings.get("content_rubrics") or "",
-            post_scenarios=settings.get("post_scenarios") or "",
-            content_constraints=settings.get("content_constraints") or "",
+            channel_style=ch_settings.get("channel_style") or "",
+            channel_audience=ch_settings.get("channel_audience") or "",
+            content_rubrics=ch_settings.get("content_rubrics") or "",
+            post_scenarios=ch_settings.get("post_scenarios") or "",
+            content_constraints=ch_settings.get("content_constraints") or "",
             base_url=getattr(cfg, "llm_base_url", None),
             generation_path="voice",
         )

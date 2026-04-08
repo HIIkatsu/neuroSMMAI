@@ -464,35 +464,22 @@ def _candidate_score(topic: str, title: str, description: str, article_text: str
     return score, relevance_hits
 
 
-async def fetch_news_candidates(owner_id: int = 0, limit: int = 5, *, channel_target: str = "") -> list[dict]:
-    # If channel_target is provided, try to read channel-scoped settings first
-    if channel_target:
-        ch_settings = await db.get_channel_settings(owner_id, channel_profile_id=None)
-        topic = (ch_settings.get("topic") or "").strip()
-        if not topic:
-            topic = (
-                await db.get_setting("news_topic", owner_id=owner_id)
-                or await db.get_setting("topic", owner_id=owner_id)
-                or ""
-            ).strip()
-        settings = {k: ch_settings.get(k, "") for k in (
-            "topic", "channel_audience", "channel_style", "content_rubrics", "rubrics_schedule",
-            "post_scenarios", "news_sources", "news_topic", "content_exclusions", "news_strict_mode"
-        )}
-        # Fill in any blanks from owner-level
-        for k, v in settings.items():
-            if not v:
-                settings[k] = await db.get_setting(k, owner_id=owner_id) or ""
-    else:
-        topic = (
-            await db.get_setting("news_topic", owner_id=owner_id)
-            or await db.get_setting("topic", owner_id=owner_id)
-            or ""
-        ).strip()
-        settings = await db.get_settings_bulk([
-            "topic", "channel_audience", "channel_style", "content_rubrics", "rubrics_schedule",
-            "post_scenarios", "news_sources", "news_topic", "content_exclusions", "news_strict_mode"
-        ], owner_id=owner_id)
+async def fetch_news_candidates(owner_id: int = 0, limit: int = 5, *, channel_target: str = "", channel_profile_id: int | None = None) -> list[dict]:
+    """Fetch news candidates using channel-scoped settings.
+
+    When *channel_profile_id* is provided, settings are read from that specific
+    channel profile — not the active channel and not the owner-level flat table.
+    This prevents cross-channel contamination for multi-channel users.
+    """
+    ch_settings = await db.get_channel_settings(owner_id, channel_profile_id=channel_profile_id)
+    topic = (ch_settings.get("topic") or "").strip()
+
+    settings: dict[str, str] = {}
+    for k in (
+        "topic", "channel_audience", "channel_style", "content_rubrics", "rubrics_schedule",
+        "post_scenarios", "news_sources", "content_exclusions", "news_strict_mode",
+    ):
+        settings[k] = ch_settings.get(k, "") or ""
 
     if not topic:
         return []
@@ -600,8 +587,8 @@ async def fetch_news_candidates(owner_id: int = 0, limit: int = 5, *, channel_ta
     return candidates[:limit]
 
 
-async def fetch_latest_news(owner_id: int = 0, *, channel_target: str = "") -> dict | None:
-    items = await fetch_news_candidates(owner_id=owner_id, limit=1, channel_target=channel_target)
+async def fetch_latest_news(owner_id: int = 0, *, channel_target: str = "", channel_profile_id: int | None = None) -> dict | None:
+    items = await fetch_news_candidates(owner_id=owner_id, limit=1, channel_target=channel_target, channel_profile_id=channel_profile_id)
     return items[0] if items else None
 
 

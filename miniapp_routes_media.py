@@ -53,8 +53,9 @@ async def create_draft_from_inbox(
     if not media_ref:
         raise HTTPException(status_code=400, detail="У файла нет Telegram file_id")
 
-    channel_target = await db.get_setting("channel_target", owner_id=telegram_user_id) or ""
-    topic = await db.get_setting("topic", owner_id=telegram_user_id) or ""
+    ch_settings = await db.get_channel_settings(telegram_user_id)
+    channel_target = ch_settings.get("channel_target") or ""
+    topic = ch_settings.get("topic") or ""
     draft_id = await db.create_draft(
         owner_id=telegram_user_id,
         channel_target=channel_target,

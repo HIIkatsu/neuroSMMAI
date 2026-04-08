@@ -76,6 +76,16 @@ class TestWebSmokeWithTestClient(unittest.TestCase):
         import auth as auth_module
         auth_module.load_config = _fake_load_config
         import miniapp_server
+        miniapp_server.load_config = _fake_load_config
+        # Remove TrustedHostMiddleware that may have been added by other test
+        # modules importing miniapp_server with a stricter config first.
+        from starlette.middleware.trustedhost import TrustedHostMiddleware
+        if miniapp_server.app.middleware_stack is not None:
+            miniapp_server.app.middleware_stack = None  # force rebuild
+        miniapp_server.app.user_middleware = [
+            m for m in miniapp_server.app.user_middleware
+            if not (hasattr(m, 'cls') and m.cls is TrustedHostMiddleware)
+        ]
         cls._app = miniapp_server.app
 
     def setUp(self):
@@ -83,6 +93,9 @@ class TestWebSmokeWithTestClient(unittest.TestCase):
         config.load_config = _fake_load_config
         import auth as auth_module
         auth_module.load_config = _fake_load_config
+
+    # Default Origin header sent with every POST/PATCH to pass CSRF middleware.
+    _ORIGIN_HEADERS: dict[str, str] = {"Origin": "http://testserver"}
 
     def _client(self):
         from starlette.testclient import TestClient
@@ -113,7 +126,7 @@ class TestWebSmokeWithTestClient(unittest.TestCase):
         """POST /api/web-auth/telegram-login should set an HttpOnly session cookie."""
         login_data = _make_tg_login_data()
         with self._client() as c:
-            r = c.post("/api/web-auth/telegram-login", json=login_data)
+            r = c.post("/api/web-auth/telegram-login", json=login_data, headers=self._ORIGIN_HEADERS)
             self.assertEqual(r.status_code, 200, r.text)
             self.assertTrue(r.json().get("ok"))
             raw = r.headers.get("set-cookie", "")
@@ -128,7 +141,7 @@ class TestWebSmokeWithTestClient(unittest.TestCase):
         data = _make_tg_login_data()
         data["hash"] = "bad" * 21 + "ab"  # 64 chars but wrong
         with self._client() as c:
-            r = c.post("/api/web-auth/telegram-login", json=data)
+            r = c.post("/api/web-auth/telegram-login", json=data, headers=self._ORIGIN_HEADERS)
             self.assertEqual(r.status_code, 401)
 
     # --- 5. Protected API fails without cookie ---
@@ -175,7 +188,7 @@ class TestWebSmokeWithTestClient(unittest.TestCase):
     def test_logout_clears_cookie(self):
         """POST /api/web-auth/logout should delete the session cookie."""
         with self._client() as c:
-            r = c.post("/api/web-auth/logout")
+            r = c.post("/api/web-auth/logout", headers=self._ORIGIN_HEADERS)
             self.assertEqual(r.status_code, 200)
             raw = r.headers.get("set-cookie", "")
             self.assertIn("neurosmm_session", raw)
@@ -193,7 +206,7 @@ class TestWebSmokeWithTestClient(unittest.TestCase):
         login_data = _make_tg_login_data()
         with self._client() as c:
             # Step 1: Login -- get cookie from response
-            r = c.post("/api/web-auth/telegram-login", json=login_data)
+            r = c.post("/api/web-auth/telegram-login", json=login_data, headers=self._ORIGIN_HEADERS)
             self.assertEqual(r.status_code, 200)
             # Extract the cookie from Set-Cookie header
             from auth import WEB_SESSION_COOKIE
@@ -210,7 +223,7 @@ class TestWebSmokeWithTestClient(unittest.TestCase):
             self.assertNotEqual(r2.status_code, 401, "Should be authenticated after login")
 
             # Step 3: Logout
-            r3 = c.post("/api/web-auth/logout")
+            r3 = c.post("/api/web-auth/logout", headers=self._ORIGIN_HEADERS)
             self.assertEqual(r3.status_code, 200)
 
     # --- 10. Web-auth disabled returns 403 for login ---
@@ -229,7 +242,7 @@ class TestWebSmokeWithTestClient(unittest.TestCase):
         try:
             login_data = _make_tg_login_data()
             with self._client() as c:
-                r = c.post("/api/web-auth/telegram-login", json=login_data)
+                r = c.post("/api/web-auth/telegram-login", json=login_data, headers=self._ORIGIN_HEADERS)
                 self.assertEqual(r.status_code, 403)
         finally:
             auth_module.load_config = _fake_load_config

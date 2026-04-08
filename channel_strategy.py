@@ -161,9 +161,9 @@ def build_plan_format_rotation(settings: dict[str, Any] | None, total_items: int
     for item in catalog:
         label = item['label']
         weights[label] = 1
-        if label in {'Разборы', 'Полезные советы'}:
-            weights[label] += 1
-        if label == 'Новости' and total_items >= 5:
+        # Boost practical formats to encourage diversity — news gets NO extra boost
+        # to prevent plan from drifting into a news feed.
+        if label in {'Разборы', 'Полезные советы', 'FAQ', 'Кейсы'}:
             weights[label] += 1
     pool: list[dict[str, str]] = []
     for item in catalog:

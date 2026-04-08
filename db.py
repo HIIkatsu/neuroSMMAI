@@ -128,6 +128,7 @@ _ALLOWED_TABLES = frozenset({
     "generation_history", "user_media_inbox", "news_logs", "channel_profiles",
     "dm_memory", "subscriptions", "feature_quotas", "payment_events",
     "user_subscriptions", "user_feature_quotas", "schema_versions",
+    "scheduler_dedup",
 })
 
 _ALLOWED_COLUMNS = frozenset({
@@ -628,6 +629,41 @@ async def _ensure_payment_events_schema(db: aiosqlite.Connection):
     )
 
 
+async def _ensure_scheduler_dedup_schema(db: aiosqlite.Connection):
+    """Durable dedup table for scheduler — survives process restarts.
+
+    Each row represents a scheduler event that was already processed.
+    The ``dedup_key`` is unique and prevents the same schedule slot,
+    plan item, or news item from being processed twice in the same
+    time window.
+
+    Rows older than 48 hours are garbage-collected on each startup so
+    the table stays small.
+    """
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS scheduler_dedup (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            dedup_key TEXT NOT NULL UNIQUE,
+            trigger_type TEXT NOT NULL DEFAULT '',
+            owner_id INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_scheduler_dedup_key "
+        "ON scheduler_dedup(dedup_key)"
+    )
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_scheduler_dedup_created "
+        "ON scheduler_dedup(created_at)"
+    )
+    # Garbage-collect entries older than 48 hours on schema init
+    cutoff = (datetime.utcnow() - timedelta(hours=48)).isoformat(timespec="seconds")
+    await db.execute("DELETE FROM scheduler_dedup WHERE created_at < ? AND created_at != ''", (cutoff,))
+
+
 # Keys that should live per-channel in channel_profiles rather than in the
 # global settings table.  Used by backfill migration and by get_channel_settings().
 _CHANNEL_SETTINGS_KEYS = (
@@ -738,6 +774,7 @@ async def init_db():
         await _ensure_subscriptions_schema(db)
         await _ensure_feature_quotas_schema(db)
         await _ensure_payment_events_schema(db)
+        await _ensure_scheduler_dedup_schema(db)
 
         for table in ("schedules", "plan_items", "post_logs", "draft_posts", "generation_history", "user_media_inbox", "news_logs", "channel_profiles"):
             await _ensure_user_binding_column(db, table)
@@ -875,12 +912,17 @@ async def set_posts_enabled(enabled: bool, owner_id: int | None = None):
 
 
 async def get_channel_settings(owner_id: int, channel_profile_id: int | None = None) -> dict[str, str]:
-    """Read settings that are channel-specific from channel_profiles with owner fallback.
+    """Read channel-specific settings from the channel_profiles table.
 
-    Returns a dict of setting keys → values, merging:
-    1. Values from the specified channel profile (if channel_profile_id given)
-       or the active channel profile for this owner.
-    2. Fallback to owner-scoped settings table for any missing values.
+    Returns a dict of setting keys → values sourced **exclusively** from the
+    channel profile.  No owner-level ``settings`` fallback is performed for
+    channel-scoped keys so that one channel's configuration can never leak
+    into another.
+
+    Resolution order:
+    1. If *channel_profile_id* is given, use that profile.
+    2. Otherwise fall back to the active profile for *owner_id*.
+    3. If no profile is found at all, return empty strings for every key.
     """
     profile: dict | None = None
     if channel_profile_id:
@@ -896,61 +938,63 @@ async def get_channel_settings(owner_id: int, channel_profile_id: int | None = N
     if not profile:
         profile = await get_active_channel_profile(owner_id=owner_id)
 
-    # Build result from profile + fallback to owner settings
+    # Build result exclusively from the channel profile — no owner-level
+    # fallback for channel-scoped keys.
     result: dict[str, str] = {}
-    owner_bulk = await get_settings_bulk(list(_CHANNEL_SETTINGS_KEYS), owner_id=owner_id)
 
     for key in _CHANNEL_SETTINGS_KEYS:
-        # Try channel profile first
         profile_val = str(profile.get(key, "")).strip() if profile else ""
-        if profile_val:
-            result[key] = profile_val
-        else:
-            # Fall back to owner-level settings table
-            result[key] = str(owner_bulk.get(key) or "")
+        result[key] = profile_val
 
-    # Also include topic and channel_target from profile
+    # topic, channel_target and posting_mode live directly on the profile row
     if profile:
         result["topic"] = str(profile.get("topic") or "")
         result["channel_target"] = str(profile.get("channel_target") or "")
-        result["posting_mode"] = str(profile.get("posting_mode") or owner_bulk.get("posting_mode") or "manual")
+        result["posting_mode"] = str(profile.get("posting_mode") or "manual")
     else:
-        result["topic"] = str(owner_bulk.get("topic") or "")
-        result["channel_target"] = str(owner_bulk.get("channel_target") or "")
-        result["posting_mode"] = str(owner_bulk.get("posting_mode") or "manual")
+        result["topic"] = ""
+        result["channel_target"] = ""
+        result["posting_mode"] = "manual"
 
     return result
 
 
 async def save_channel_setting(owner_id: int, key: str, value: str, channel_profile_id: int | None = None):
-    """Save a channel-specific setting to the channel_profiles table.
+    """Save a setting.
 
-    If the key is a known channel-level setting, update the channel profile.
-    Always also update the owner-level settings table for backwards compat.
+    * Channel-scoped keys (topic/style/audience/…) are written **only** to the
+      ``channel_profiles`` row — never to the flat ``settings`` table.  This
+      prevents cross-channel contamination that previously occurred because
+      ``get_channel_settings`` fell back to the owner-level ``settings`` row
+      when a profile column was empty.
+    * Non-channel keys (e.g. ``auto_hashtags``) are stored in the ``settings``
+      table as before.
     """
-    # Always save to owner-level settings for backwards compatibility
-    await set_setting(key, value, owner_id=owner_id)
+    is_channel_key = key in _CHANNEL_SETTINGS_KEYS or key in ("topic", "posting_mode")
 
-    if key not in _CHANNEL_SETTINGS_KEYS and key not in ("topic", "posting_mode"):
+    if not is_channel_key:
+        # Pure owner-level setting — write to flat settings table only
+        await set_setting(key, value, owner_id=owner_id)
         return
 
-    # Find the target profile
+    # --- Channel-scoped key: write to channel_profiles only ---
     pid = int(channel_profile_id) if channel_profile_id else 0
     if not pid:
         profile = await get_active_channel_profile(owner_id=owner_id)
         pid = int(profile.get("id", 0)) if profile else 0
     if not pid:
+        # No channel profile exists yet — fall back to owner-level settings
+        # so the value is not lost entirely.  Once a profile is created the
+        # backfill migration will copy it over.
+        await set_setting(key, value, owner_id=owner_id)
         return
 
-    # Update the channel profile column
-    # Safety: key is validated against _CHANNEL_SETTINGS_KEYS (hardcoded)
     allowed_cols = set(_CHANNEL_SETTINGS_KEYS) | {"topic", "posting_mode"}
     if key not in allowed_cols:
         return
-    assert key.isidentifier(), f"Invalid column name: {key}"  # safety: prevent SQL injection
+    assert key.isidentifier(), f"Invalid column name: {key}"
     now = datetime.utcnow().isoformat(timespec="seconds")
     async with _db_ctx() as db:
-        # Safe: key is from hardcoded allowed_cols, not user input
         await db.execute(
             f"UPDATE channel_profiles SET {key}=?, updated_at=? WHERE id=? AND owner_id=?",
             (value, now, pid, int(owner_id)),
@@ -2143,6 +2187,9 @@ def _channel_profile_row_to_dict(r: tuple, columns: list[str]) -> dict:
     return result
 
 
+_UNSET = object()  # sentinel: field was not provided by caller
+
+
 async def upsert_channel_profile(
     owner_id: int | None,
     channel_target: str,
@@ -2150,27 +2197,27 @@ async def upsert_channel_profile(
     title: str = "",
     topic: str = "",
     make_active: bool = True,
-    # Structured profile fields
-    topic_raw: str = "",
-    topic_family: str = "",
-    topic_subfamily: str = "",
-    audience_type: str = "",
-    style_mode: str = "",
-    content_goals: str = "",
-    preferred_formats: str = "",
-    forbidden_topics: str = "",
-    forbidden_claims: str = "",
-    visual_policy: str = "auto",
-    forbidden_visual_classes: str = "",
-    rubric_map: str = "",
-    news_policy: str = "standard",
-    posting_mode: str = "manual",
-    sensitivity_flags: str = "",
+    # Structured profile fields — _UNSET means "keep existing value on update"
+    topic_raw: str | object = _UNSET,
+    topic_family: str | object = _UNSET,
+    topic_subfamily: str | object = _UNSET,
+    audience_type: str | object = _UNSET,
+    style_mode: str | object = _UNSET,
+    content_goals: str | object = _UNSET,
+    preferred_formats: str | object = _UNSET,
+    forbidden_topics: str | object = _UNSET,
+    forbidden_claims: str | object = _UNSET,
+    visual_policy: str | object = _UNSET,
+    forbidden_visual_classes: str | object = _UNSET,
+    rubric_map: str | object = _UNSET,
+    news_policy: str | object = _UNSET,
+    posting_mode: str | object = _UNSET,
+    sensitivity_flags: str | object = _UNSET,
     # Author role fields
-    author_role_type: str = "",
-    author_role_description: str = "",
-    author_activities: str = "",
-    author_forbidden_claims: str = "",
+    author_role_type: str | object = _UNSET,
+    author_role_description: str | object = _UNSET,
+    author_activities: str | object = _UNSET,
+    author_forbidden_claims: str | object = _UNSET,
 ):
     owner = int(owner_id or 0)
     channel_target = (channel_target or "").strip()
@@ -2178,8 +2225,6 @@ async def upsert_channel_profile(
         return
     title = (title or channel_target).strip()
     topic = (topic or "").strip()
-    # topic_raw defaults to topic if not separately provided
-    topic_raw = (topic_raw or topic).strip()
     now = datetime.utcnow().isoformat(timespec="seconds")
     async with _db_ctx() as db:
         if make_active:
@@ -2190,25 +2235,45 @@ async def upsert_channel_profile(
         )
         row = await cur.fetchone()
         if row:
+            profile_id = int(row[0])
             new_title = title or row[2] or channel_target
             new_topic = topic or row[1] or ""
+
+            # Build partial UPDATE: only set fields that were explicitly passed
+            updates: list[str] = ["title=?", "topic=?", "is_active=?", "updated_at=?"]
+            params: list = [new_title, new_topic, 1 if make_active else 0, now]
+
+            _structured_fields = {
+                "topic_raw": topic_raw, "topic_family": topic_family,
+                "topic_subfamily": topic_subfamily, "audience_type": audience_type,
+                "style_mode": style_mode, "content_goals": content_goals,
+                "preferred_formats": preferred_formats, "forbidden_topics": forbidden_topics,
+                "forbidden_claims": forbidden_claims, "visual_policy": visual_policy,
+                "forbidden_visual_classes": forbidden_visual_classes, "rubric_map": rubric_map,
+                "news_policy": news_policy, "posting_mode": posting_mode,
+                "sensitivity_flags": sensitivity_flags,
+                "author_role_type": author_role_type, "author_role_description": author_role_description,
+                "author_activities": author_activities, "author_forbidden_claims": author_forbidden_claims,
+            }
+            for col, val in _structured_fields.items():
+                if val is not _UNSET:
+                    # Special case: topic_raw defaults to topic if explicitly provided but empty
+                    if col == "topic_raw" and not val:
+                        val = new_topic
+                    updates.append(f"{col}=?")
+                    params.append(str(val))
+
+            params.append(profile_id)
             await db.execute(
-                """UPDATE channel_profiles SET title=?, topic=?, is_active=?, updated_at=?,
-                   topic_raw=?, topic_family=?, topic_subfamily=?, audience_type=?, style_mode=?,
-                   content_goals=?, preferred_formats=?, forbidden_topics=?, forbidden_claims=?,
-                   visual_policy=?, forbidden_visual_classes=?, rubric_map=?, news_policy=?,
-                   posting_mode=?, sensitivity_flags=?,
-                   author_role_type=?, author_role_description=?, author_activities=?, author_forbidden_claims=?
-                   WHERE id=?""",
-                (new_title, new_topic, 1 if make_active else 0, now,
-                 topic_raw or new_topic, topic_family, topic_subfamily, audience_type, style_mode,
-                 content_goals, preferred_formats, forbidden_topics, forbidden_claims,
-                 visual_policy, forbidden_visual_classes, rubric_map, news_policy,
-                 posting_mode, sensitivity_flags,
-                 author_role_type, author_role_description, author_activities, author_forbidden_claims,
-                 int(row[0])),
+                f"UPDATE channel_profiles SET {', '.join(updates)} WHERE id=?",
+                tuple(params),
             )
         else:
+            # INSERT: use explicit values or sensible defaults for new profiles
+            def _val(v, default=""):
+                return str(v) if v is not _UNSET else default
+
+            _topic_raw = _val(topic_raw) or topic
             await db.execute(
                 """INSERT INTO channel_profiles(
                    owner_id, telegram_user_id, title, channel_target, topic, is_active, created_at, updated_at,
@@ -2219,11 +2284,12 @@ async def upsert_channel_profile(
                    author_role_type, author_role_description, author_activities, author_forbidden_claims
                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (owner, owner, title, channel_target, topic, 1 if make_active else 0, now, now,
-                 topic_raw or topic, topic_family, topic_subfamily, audience_type, style_mode,
-                 content_goals, preferred_formats, forbidden_topics, forbidden_claims,
-                 visual_policy, forbidden_visual_classes, rubric_map, news_policy,
-                 posting_mode, sensitivity_flags,
-                 author_role_type, author_role_description, author_activities, author_forbidden_claims),
+                 _topic_raw, _val(topic_family), _val(topic_subfamily), _val(audience_type), _val(style_mode),
+                 _val(content_goals), _val(preferred_formats), _val(forbidden_topics), _val(forbidden_claims),
+                 _val(visual_policy, "auto"), _val(forbidden_visual_classes), _val(rubric_map),
+                 _val(news_policy, "standard"), _val(posting_mode, "manual"), _val(sensitivity_flags),
+                 _val(author_role_type), _val(author_role_description), _val(author_activities),
+                 _val(author_forbidden_claims)),
             )
         await db.commit()
 
@@ -2903,3 +2969,41 @@ async def is_payment_processed(payment_id: str) -> bool:
         )
         row = await cur.fetchone()
     return row is not None
+
+
+# ---------------------------------------------------------------------------
+# Durable scheduler dedup helpers
+# ---------------------------------------------------------------------------
+
+async def check_scheduler_dedup(dedup_key: str) -> bool:
+    """Return True if *dedup_key* has already been processed (should skip)."""
+    async with _db_ctx() as conn:
+        cur = await conn.execute(
+            "SELECT 1 FROM scheduler_dedup WHERE dedup_key=? LIMIT 1",
+            (dedup_key,),
+        )
+        return (await cur.fetchone()) is not None
+
+
+async def set_scheduler_dedup(dedup_key: str, trigger_type: str = "", owner_id: int = 0) -> bool:
+    """Mark *dedup_key* as processed.  Returns True on success, False if already exists."""
+    now = datetime.utcnow().isoformat(timespec="seconds")
+    try:
+        async with _db_ctx() as conn:
+            await conn.execute(
+                "INSERT OR IGNORE INTO scheduler_dedup(dedup_key, trigger_type, owner_id, created_at) VALUES(?,?,?,?)",
+                (dedup_key, trigger_type, int(owner_id), now),
+            )
+            await conn.commit()
+            return True
+    except Exception:
+        return False
+
+
+async def cleanup_scheduler_dedup(max_age_hours: int = 48) -> int:
+    """Remove dedup entries older than *max_age_hours*. Returns count deleted."""
+    cutoff = (datetime.utcnow() - timedelta(hours=max_age_hours)).isoformat(timespec="seconds")
+    async with _db_ctx() as conn:
+        cur = await conn.execute("DELETE FROM scheduler_dedup WHERE created_at < ? AND created_at != ''", (cutoff,))
+        await conn.commit()
+        return cur.rowcount or 0

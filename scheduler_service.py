@@ -26,6 +26,9 @@ from db import (
     expire_overdue_subscriptions,
     get_user_subscription,
     get_last_post_time,
+    check_scheduler_dedup,
+    set_scheduler_dedup,
+    cleanup_scheduler_dedup,
     TIER_FREE,
     TIER_PRO,
     TIER_MAX,
@@ -55,6 +58,7 @@ _MIN_POST_GAP_MINUTES = 45  # do not publish if last post was < 45 min ago
 # back-to-back.  Maps (owner_id, channel_target) → list of last N used template indices.
 _CHANNEL_RECENT_ANGLES: dict[tuple[int, str], list[int]] = {}
 _RECENT_ANGLES_LIMIT = 6
+_MAX_ANGLES_CHANNELS = 500  # max distinct channels tracked; evict oldest on overflow
 
 # Templates for varied post angle prompts; {topic} is substituted at runtime.
 # All templates are channel-agnostic — no niche-specific language.
@@ -182,6 +186,9 @@ async def _check_post_cooldown(owner_id: int, tz: str, *, channel_target: str = 
 
     If *channel_target* is provided, checks per-channel cooldown (recommended).
     Otherwise falls back to owner-level cooldown.
+
+    SAFETY: corrupted or unparseable timestamps cause the function to return
+    False (block publication) — fail-closed, not fail-open.
     """
     last_ts = await get_last_post_time(owner_id, channel_target=channel_target)
     if not last_ts:
@@ -199,7 +206,14 @@ async def _check_post_cooldown(owner_id: int, tz: str, *, channel_target: str = 
             )
             return False
     except Exception as exc:
-        logger.warning("_check_post_cooldown: failed to parse timestamp %r for owner_id=%s: %s", last_ts, owner_id, exc)
+        # FAIL-CLOSED: corrupted timestamp → block publication rather than
+        # silently skipping cooldown.  This prevents burst-publish after a
+        # data corruption event.
+        logger.warning(
+            "_check_post_cooldown: FAIL-CLOSED — corrupted timestamp %r for owner_id=%s channel=%s: %s",
+            last_ts, owner_id, channel_target or "(any)", exc,
+        )
+        return False
     return True
 
 
@@ -279,6 +293,15 @@ class SchedulerService:
             max_instances=1,
             coalesce=True,
         )
+        self.scheduler.add_job(
+            self._job_cleanup_dedup,
+            "interval",
+            hours=12,
+            id="cleanup_dedup",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
         self._jobs_synced = True
 
     def start(self) -> None:
@@ -296,7 +319,7 @@ class SchedulerService:
         self._jobs_synced = False
 
     def _trim_dedup_caches(self) -> None:
-        """Предотвращает бесконечный рост in-memory дедуп-кешей."""
+        """Предотвращает бесконечный рост in-memory дедуп-кешей и runtime dicts."""
         if len(self._last_schedule_run) > _DEDUP_MAX_SIZE:
             # Удаляем первую половину (FIFO-like)
             keys = list(self._last_schedule_run.keys())
@@ -306,6 +329,12 @@ class SchedulerService:
             keys = list(self._last_plan_run.keys())
             for k in keys[: _DEDUP_MAX_SIZE // 2]:
                 del self._last_plan_run[k]
+        # Trim the global recent-angles cache to prevent unbounded growth
+        if len(_CHANNEL_RECENT_ANGLES) > _MAX_ANGLES_CHANNELS:
+            excess = len(_CHANNEL_RECENT_ANGLES) - _MAX_ANGLES_CHANNELS // 2
+            keys = list(_CHANNEL_RECENT_ANGLES.keys())
+            for k in keys[:excess]:
+                del _CHANNEL_RECENT_ANGLES[k]
 
     async def _send_with_optional_photo(self, channel: str, text: str, image_ref: str, *, is_autopost: bool = False):
         from actions import TELEGRAM_CAPTION_LIMIT, _split_media_caption_and_body, _split_text_chunks
@@ -578,10 +607,19 @@ class SchedulerService:
                         allowed = set(DAY_MAP[p] for p in days.split(",") if p in DAY_MAP) if days != "*" else set(range(7))
                         if weekday not in allowed:
                             continue
-                        dedupe_key = (int(owner_id), int(row.get("id", 0)))
+                        schedule_id = int(row.get("id", 0))
                         minute_key = now.strftime("%Y-%m-%d %H:%M")
+                        # In-memory fast-path (still useful within a single process lifetime)
+                        dedupe_key = (int(owner_id), schedule_id)
                         if self._last_schedule_run.get(dedupe_key) == minute_key:
                             continue
+                        # Durable dedup — survives restart
+                        durable_key = f"schedule:{owner_id}:{schedule_id}:{minute_key}"
+                        if await check_scheduler_dedup(durable_key):
+                            self._last_schedule_run[dedupe_key] = minute_key
+                            continue
+                        if not await set_scheduler_dedup(durable_key, trigger_type="schedule", owner_id=owner_id):
+                            continue  # DB write failed — skip to avoid inconsistent state
                         self._last_schedule_run[dedupe_key] = minute_key
                         # Pass channel_profile_id so the post uses channel-specific settings
                         cpid = int(row.get("channel_profile_id", 0))
@@ -609,12 +647,26 @@ class SchedulerService:
                         continue
                     minute_key = now.strftime("%Y-%m-%d %H:%M")
                     plan_id = int(it.get("id") or 0)
+
+                    # In-memory fast-path
                     if self._last_plan_run.get(plan_id) == minute_key:
                         continue
+                    # Durable dedup — survives restart
+                    item_owner = int(it.get("owner_id") or 0)
+                    durable_key = f"plan:{item_owner}:{plan_id}:{minute_key}"
+                    if await check_scheduler_dedup(durable_key):
+                        self._last_plan_run[plan_id] = minute_key
+                        continue
+                    if not await set_scheduler_dedup(durable_key, trigger_type="plan", owner_id=item_owner):
+                        continue  # DB write failed — skip to avoid inconsistent state
                     self._last_plan_run[plan_id] = minute_key
 
+                    # --- Tier gate: plan auto-publish is a Pro+ feature ---
+                    if not await _is_paid_tier(item_owner):
+                        logger.info("_job_plan_tick: free tier, skipping plan_id=%s owner=%s", plan_id, item_owner)
+                        continue
+
                     # Cooldown check: respect per-channel post gap
-                    item_owner = int(it.get("owner_id") or 0)
                     cpid = int(it.get("channel_profile_id") or 0)
                     ch_settings = await db.get_channel_settings(item_owner, channel_profile_id=cpid or None)
                     ch_target = (ch_settings.get("channel_target") or "").strip()
@@ -695,8 +747,13 @@ class SchedulerService:
                                     if datetime.now(ZoneInfo(self.tz)) - last_dt.replace(tzinfo=ZoneInfo(self.tz)) < timedelta(hours=interval_h):
                                         continue
                                 except Exception:
-                                    pass
-                            item = await fetch_latest_news(owner_id=owner_id, channel_target=channel)
+                                    # FAIL-CLOSED: corrupted news interval timestamp → skip
+                                    logger.warning(
+                                        "_job_news_tick: FAIL-CLOSED — corrupted news_last_posted_at %r owner_id=%s channel=%s",
+                                        last_ts, owner_id, channel,
+                                    )
+                                    continue
+                            item = await fetch_latest_news(owner_id=owner_id, channel_target=channel, channel_profile_id=int(ch_profile.get("id", 0)))
                             if not item or not cfg or not getattr(cfg, "openrouter_api_key", ""):
                                 continue
                             text = await build_news_post(cfg, item, owner_id=owner_id)
@@ -813,12 +870,17 @@ class SchedulerService:
                                     if now_local - last_dt.replace(tzinfo=ZoneInfo(self.tz)) < timedelta(hours=3):
                                         continue
                                 except Exception:
-                                    pass
+                                    # FAIL-CLOSED: corrupted sniper timestamp → skip
+                                    logger.warning(
+                                        "_job_news_sniper_tick: FAIL-CLOSED — corrupted sniper timestamp %r owner_id=%s channel=%s",
+                                        last_ts, owner_id, channel_target,
+                                    )
+                                    continue
 
                             if not cfg or not getattr(cfg, "openrouter_api_key", ""):
                                 continue
 
-                            candidates = await fetch_news_candidates(owner_id=owner_id, limit=3, channel_target=channel_target)
+                            candidates = await fetch_news_candidates(owner_id=owner_id, limit=3, channel_target=channel_target, channel_profile_id=int(ch_profile.get("id", 0)))
                             if not candidates:
                                 continue
 
@@ -894,3 +956,12 @@ class SchedulerService:
                 logger.info("_job_expire_subscriptions: downgraded %d expired subscriptions", count)
         except Exception:
             logger.exception("_job_expire_subscriptions error")
+
+    async def _job_cleanup_dedup(self):
+        """Garbage-collect stale scheduler_dedup entries (older than 48h)."""
+        try:
+            deleted = await cleanup_scheduler_dedup(max_age_hours=48)
+            if deleted:
+                logger.info("_job_cleanup_dedup: removed %d stale dedup entries", deleted)
+        except Exception:
+            logger.exception("_job_cleanup_dedup error")

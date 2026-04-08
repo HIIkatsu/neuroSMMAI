@@ -1,11 +1,12 @@
 
-from db import get_post_stats, get_setting
+from db import get_post_stats, get_channel_settings
 
 async def build_channel_stats(bot, owner_id: int = 0) -> str:
     stats = await get_post_stats(owner_id=owner_id)
-    channel = await get_setting("channel_target", owner_id=owner_id)
-    topic = await get_setting("topic", owner_id=owner_id)
-    news_enabled = (await get_setting("news_enabled", owner_id=owner_id) or "0").strip() not in ("0", "false", "False")
+    ch_settings = await get_channel_settings(owner_id)
+    channel = ch_settings.get("channel_target") or ""
+    topic = ch_settings.get("topic") or ""
+    news_enabled = (ch_settings.get("news_enabled") or "0").strip() not in ("0", "false", "False")
 
     return (
         "📊 СТАТИСТИКА БОТА\n\n"

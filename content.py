@@ -55,7 +55,7 @@ _ERROR_PREFIXES = ("⚠️", "⏳", "🌐")
 # For text-only posts: message limit is 4096 chars.
 # We use conservative values to account for signature/formatting overhead.
 AUTOPOST_CAPTION_BUDGET = 900   # for posts with media (under 1024 caption limit)
-AUTOPOST_TEXT_BUDGET = 2400     # for text-only posts — shorter, denser Telegram format
+AUTOPOST_TEXT_BUDGET = 1800     # for text-only posts — compact Telegram format (was 2400)
 
 
 def enforce_autopost_budget(
@@ -1818,9 +1818,37 @@ def assess_text_quality(
     if vague_hits >= 1 and "источник:" not in lower_text:
         honesty_score -= min(4, vague_hits * 2)
         reasons.append("honesty: непроверяемые утверждения без источника")
+    # Invented statistics / fabricated research claims (common LLM hallucination)
+    _invented_stats = [
+        "по данным исследования", "по данным исследований",
+        "клинически доказано", "клинически подтверждено",
+        "эксперты установили", "как показали исследования",
+        "научно доказано", "научно подтверждено",
+        "доказано наукой", "учёные установили",
+    ]
+    invented_stat_hits = sum(1 for p in _invented_stats if p in lower_text)
+    if invented_stat_hits >= 1 and "источник:" not in lower_text:
+        honesty_score -= min(5, invented_stat_hits * 3)
+        reasons.append(f"honesty: вероятно выдуманные исследования/статистика ({invented_stat_hits})")
+    # Invented percentages without source (e.g. "73% людей", "по данным 85%")
+    _invented_pct = re.findall(r"\b\d{2,3}\s*%\s*(?:людей|клиентов|пациентов|респондентов|участников|пользователей|компаний|предпринимателей)", lower_text)
+    if _invented_pct and "источник:" not in lower_text:
+        honesty_score -= min(4, len(_invented_pct) * 2)
+        reasons.append(f"honesty: выдуманные процентные показатели без источника ({len(_invented_pct)})")
+    # Fabricated case studies / client stories
+    _fabricated_case = [
+        "один из моих клиентов", "одна из моих клиенток",
+        "история из практики", "реальный случай из",
+        "мой клиент рассказал", "ко мне обратился клиент",
+        "был случай когда", "недавно ко мне пришел",
+    ]
+    case_hits = sum(1 for p in _fabricated_case if p in lower_text)
+    if case_hits >= 1:
+        honesty_score -= min(4, case_hits * 2)
+        reasons.append(f"honesty: вероятно выдуманные кейсы/истории клиентов ({case_hits})")
     # Medical / legal / financial fabrication markers (heuristic: likely hallucinated specifics)
     _risky_claims = [
-        "доказано клинически", "клинически подтверждено", "одобрено минздравом",
+        "доказано клинически", "одобрено минздравом",
         "одобрено fda", "fda approved", "гарантирует излечение",
         "полностью безопасн", "не имеет побочных", "не имеет противопоказаний",
         "юридически обязан", "по закону вы обязаны", "суд постановил",
@@ -1833,6 +1861,8 @@ def assess_text_quality(
     dims["honesty"] = max(0, honesty_score)
 
     # --- 8. DENSITY: text length and information-per-word ---
+    # Target: 60-120 words (aligned with prompt instructions).
+    # Posts over ~150 words are considered too long for Telegram scroll.
     density_score = 10
     if body_words < 15:
         density_score = 0
@@ -1840,16 +1870,16 @@ def assess_text_quality(
     elif body_words < 40:
         density_score = 2
         reasons.append(f"density: слишком короткий текст ({body_words} слов)")
-    elif body_words < 70:
+    elif body_words < 60:
         density_score = 6
         reasons.append(f"density: текст на грани минимума ({body_words} слов)")
-    elif body_words > 300:
+    elif body_words > 250:
         density_score -= 5
-        reasons.append(f"density: слишком длинный текст ({body_words} слов), цель 90-180")
-    elif body_words > 220:
-        density_score -= 3
-        reasons.append(f"density: текст многословен ({body_words} слов), цель 90-180")
+        reasons.append(f"density: слишком длинный текст ({body_words} слов), цель 60-120")
     elif body_words > 180:
+        density_score -= 3
+        reasons.append(f"density: текст многословен ({body_words} слов), цель 60-120")
+    elif body_words > 130:
         density_score -= 1
         reasons.append(f"density: текст чуть длиннее цели ({body_words} слов)")
     # Penalize very low unique-word ratio (lots of repetition)
@@ -1934,6 +1964,15 @@ def assess_text_quality(
     # Final score = sum of all dimensions (0-100)
     total = sum(dims.values())
     total = max(0, min(100, total))
+
+    # Hard floor: extremely low topic_fit always caps total below autopost threshold.
+    # A post with topic_fit ≤ 2 is practically off-topic and must not autopublish
+    # even if other dimensions score perfectly.
+    TOPIC_FIT_HARD_FLOOR = 2
+    if dims.get("topic_fit", 10) <= TOPIC_FIT_HARD_FLOOR and channel_topic:
+        # Cap total to ensure it falls below AUTOPOST_MIN_QUALITY_SCORE
+        total = min(total, 50)
+        reasons.append(f"topic_fit HARD FLOOR: topic_fit={dims['topic_fit']} ≤ {TOPIC_FIT_HARD_FLOOR} — автопубликация заблокирована")
 
     return total, reasons, dims
 

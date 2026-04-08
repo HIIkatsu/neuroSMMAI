@@ -161,14 +161,14 @@ def sanitize_plan_topic_line(value: str, subject: str) -> str:
     return raw or f"Полезный пост по теме {subject}"
 
 
-async def _load_strategy_settings(owner_id: int, topic: str) -> dict[str, Any]:
-    keys = [
-        'topic', 'channel_audience', 'channel_style', 'channel_style_preset', 'channel_mode',
-        'channel_formats', 'channel_frequency', 'content_constraints', 'news_enabled',
-        'news_sources', 'content_rubrics', 'rubrics_schedule', 'post_scenarios',
-        'content_exclusions', 'author_role_type', 'author_role_description',
-    ]
-    settings = await db.get_settings_bulk(keys, owner_id=owner_id)
+async def _load_strategy_settings(
+    owner_id: int,
+    topic: str,
+    *,
+    channel_profile_id: int | None = None,
+) -> dict[str, Any]:
+    settings = await db.get_channel_settings(owner_id, channel_profile_id=channel_profile_id)
+    # Ensure topic falls back to the supplied argument if the profile has none
     if topic and not str(settings.get('topic') or '').strip():
         settings['topic'] = topic
     return settings
@@ -184,6 +184,7 @@ async def generate_plan_items_ai(
     config: Any,
     owner_id: int,
     history: dict[str, list[str]] | None = None,
+    channel_profile_id: int | None = None,
 ) -> list[dict[str, str]]:
     subject = clean_text(topic) or 'канала'
     try:
@@ -201,11 +202,11 @@ async def generate_plan_items_ai(
         pass
 
     total_items = days * posts_per_day
-    settings = await _load_strategy_settings(owner_id, subject)
+    settings = await _load_strategy_settings(owner_id, subject, channel_profile_id=channel_profile_id)
     strategy = build_generation_strategy(settings)
     rotation = build_plan_format_rotation(settings, total_items)
     history_block = recent_history_lines(history, limit=12)
-    news_candidates = await fetch_news_candidates(owner_id=owner_id, limit=min(6, max(3, total_items))) if bool(strategy.get('news_enabled', True)) else []
+    news_candidates = await fetch_news_candidates(owner_id=owner_id, limit=min(6, max(3, total_items)), channel_profile_id=channel_profile_id) if bool(strategy.get('news_enabled', True)) else []
     news_block = plan_news_brief(news_candidates)
     today = datetime.now(timezone.utc).astimezone().strftime('%Y-%m-%d')
     format_targets = '\n'.join(

@@ -2817,6 +2817,9 @@ async function toggleAutopost(enabled) {
     await refreshSections(['settings','core'], { silent: false });
   } catch (e) {
     toast(e.message);
+    // Rollback: refresh settings to restore true server state in UI
+    await refreshSections(['settings'], { silent: true });
+    render();
   }
 }
 
@@ -2829,6 +2832,9 @@ async function toggleAutopostNews(enabled) {
     await refreshSections(['settings','core'], { silent: true });
   } catch (e) {
     toast(e.message);
+    // Rollback: refresh settings to restore true server state in UI
+    await refreshSections(['settings'], { silent: true });
+    render();
   }
 }
 
@@ -2980,7 +2986,7 @@ function openSettingsModal() {
       ${logoutBtn}
     </div>
   `;
-  modal('Настройки', body, `<button class="btn primary" data-action="saveSettings" data-dismiss-modal="true">Сохранить</button><button class="btn ghost" data-action="closeModal">Отмена</button>`);
+  modal('Настройки', body, `<button class="btn primary" data-action="saveSettings">Сохранить</button><button class="btn ghost" data-action="closeModal">Отмена</button>`);
 }
 
 function renderBody() {
@@ -3200,8 +3206,8 @@ async function activateChannel(profileId) {
     showBusy('Переключаю канал…');
     await api('/api/channels/activate', { method: 'POST', body: JSON.stringify({ profile_id: profileId }) });
     toast('Активный канал обновлён');
-    // Refresh core + channels + settings — all three change on channel switch
-    await refreshSections(['core','channels','settings'], { silent: false });
+    // Refresh ALL channel-scoped sections to prevent stale data from previous channel
+    await refreshSections(['core','channels','settings','drafts','plan','schedules','media_inbox'], { silent: false });
     switchTab('channels');
   } catch (e) {
     toast(e.message);
@@ -5109,8 +5115,11 @@ async function saveSettings() {
     });
     toast('Настройки сохранены');
     await refreshSections(['settings','core'], { silent: false });
+    // Close modal only after save + refresh succeeded
+    closeModal();
   } catch (e) {
-    toast(e.message);
+    // Modal stays open — user sees the error and can retry
+    toast(e.message || 'Не удалось сохранить настройки');
   }
 }
 
