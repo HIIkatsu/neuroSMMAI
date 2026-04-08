@@ -543,6 +543,8 @@ def _disambiguate(text: str, title: str = "") -> tuple[str, str, list[str]]:
 # ---------------------------------------------------------------------------
 
 _LATIN_TOKEN_RE = re.compile(r"^[A-Za-z0-9][\w.+-]*$")
+# Most image provider APIs cap query length around 200 chars; 140 balances
+# specificity with API compatibility and search effectiveness.
 MAX_QUERY_LEN = 140
 
 

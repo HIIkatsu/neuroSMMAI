@@ -80,6 +80,10 @@ AFFIRMATION_MIN_SUBJECT_HITS = 1
 AFFIRMATION_MIN_ALLOWED_HITS = 1
 AFFIRMATION_MIN_SCENE_HITS = 2   # Scene needs 2; single scene words too generic
 
+# Score cap when no positive affirmation is found. Prevents low-confidence
+# candidates from accumulating points purely from weak signals.
+MAX_SCORE_WITHOUT_AFFIRMATION = 10
+
 # Top-N reranking
 TOP_N_CANDIDATES = 8    # Collect up to N candidates before final pick
 
@@ -421,6 +425,9 @@ def score_candidate(
     trace.allowed_visual_hits = allowed_hits
 
     # --- 7. Blocked visual class penalty ---
+    # Multiple blocked visuals CAN accumulate: if an image matches several
+    # off-topic categories, each adds a penalty. This is intentional to
+    # strongly reject candidates that are clearly from the wrong domain.
     blocked = get_family_blocked_visuals(intent.post_family)
     if blocked:
         for cls in blocked:
@@ -450,7 +457,7 @@ def score_candidate(
         or (scene_hits >= AFFIRMATION_MIN_SCENE_HITS)
     )
     if not has_affirmation and score > 0:
-        score = min(score, 10)  # Cap score without affirmation
+        score = min(score, MAX_SCORE_WITHOUT_AFFIRMATION)
         if not reject_reason:
             reject_reason = "no_positive_affirmation"
 
