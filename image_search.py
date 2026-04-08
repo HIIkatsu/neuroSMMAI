@@ -1135,41 +1135,48 @@ async def find_image(
     topic: str = "",
     post_text: str = "",
     title: str = "",
+    mode: str = "",
 ) -> str:
     """Find the best semantically relevant image for the given query.
 
     Uses the new POST-CENTRIC pipeline when post_text or title is available.
     Falls back to the legacy query-based flow otherwise.
 
+    Args:
+        mode: "autopost" (strict, prefers no-image over junk) or
+              "editor" (lenient, tolerable for user selection).
+              Empty string defaults to "autopost".
+
     New pipeline flow:
     1. Extract visual intent from post text (title + body)
     2. Word-sense disambiguation to avoid wrong-meaning images
-    3. Post-centric scoring: subject > sense > scene > generic stock penalty
-    4. Wrong-sense hard reject
+    3. Post-centric scoring (PRIMARY) + provider bonus (CAPPED secondary)
+    4. Top-N reranking → mode-specific threshold → accept or no-image
     5. Channel topic used ONLY as weak fallback
 
     Legacy flow (backward-compatible):
     Uses family detection from query + topic, build_best_visual_queries, _meta_score.
     """
+    from image_pipeline import run_image_pipeline, MODE_AUTOPOST, MODE_EDITOR
+    pipeline_mode = mode if mode in (MODE_AUTOPOST, MODE_EDITOR) else MODE_AUTOPOST
+
     # --- NEW: Post-centric pipeline ---
-    # When we have actual post content, use the new post-centric pipeline.
-    # This is the primary path for all new content generation.
     actual_post_text = post_text or ""
     actual_title = title or query or ""
     if actual_post_text or actual_title:
-        from image_pipeline import run_image_pipeline
         result = await run_image_pipeline(
             title=actual_title,
             body=actual_post_text,
             channel_topic=topic,
             used_refs=used_refs,
+            mode=pipeline_mode,
         )
         if result.has_image:
             return result.image_url
         if result.no_image_reason:
             logger.info(
-                "IMAGE_POSTCENTRIC_NO_IMAGE reason=%s query=%r",
-                result.no_image_reason, query[:60],
+                "IMAGE_POSTCENTRIC_NO_IMAGE reason=%s outcome=%s mode=%s query=%r",
+                result.no_image_reason, result.outcome, pipeline_mode, query[:60],
             )
         # If post-centric pipeline found nothing, try legacy as last resort
         # but only if there's query text distinct from post text
@@ -1303,10 +1310,15 @@ def validate_image_for_autopost(
     post_text: str = "",
     image_meta: str = "",
     title: str = "",
+    mode: str = "",
 ) -> bool:
     """Final quality gate for autopost: decide if an image is safe to publish.
 
     Returns True if the image passes, False if it should be rejected.
+
+    Args:
+        mode: "autopost" (strict) or "editor" (lenient).
+              Empty string defaults to "autopost".
 
     Uses the new post-centric validation when post_text/title available:
     1. Wrong-sense hard reject via visual intent
@@ -1322,24 +1334,25 @@ def validate_image_for_autopost(
 
     url_lower = image_ref.lower()
 
-    # --- NEW: Post-centric validation ---
+    # --- Post-centric validation ---
     actual_post_text = post_text or ""
     actual_title = title or prompt or ""
     if (actual_post_text or actual_title) and image_meta:
-        from image_pipeline import validate_image_post_centric
+        from image_pipeline import validate_image_post_centric, MODE_AUTOPOST, MODE_EDITOR
         from visual_intent import extract_visual_intent
+        pipeline_mode = mode if mode in (MODE_AUTOPOST, MODE_EDITOR) else MODE_AUTOPOST
         intent = extract_visual_intent(
             title=actual_title,
             body=actual_post_text,
             channel_topic=topic,
         )
         is_valid, reject_reason = validate_image_post_centric(
-            image_ref, intent=intent, image_meta=image_meta,
+            image_ref, intent=intent, image_meta=image_meta, mode=pipeline_mode,
         )
         if not is_valid:
             logger.warning(
-                "VALIDATE_POSTCENTRIC_REJECT reason=%s url=%r",
-                reject_reason, image_ref[:80],
+                "VALIDATE_POSTCENTRIC_REJECT reason=%s mode=%s url=%r",
+                reject_reason, pipeline_mode, image_ref[:80],
             )
             return False
 

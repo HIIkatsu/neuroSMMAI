@@ -276,13 +276,15 @@ _HIGH_VISUALITY_SIGNALS = [
     "массаж", "massage",
     "маникюр", "nail", "стриж", "hair",
     "ремонт", "repair", "workshop",
-    "кухн", "kitchen", "ресторан", "restaurant",
+    "кухн", "kitchen", "ресторан", "restaurant", "кафе",
     "интерьер", "interior", "дизайн",
     "животн", "animal", "питом", "pet",
     "пейзаж", "landscape", "природ", "nature",
     "архитектур", "architecture", "здани", "building",
-    "спорт", "sport", "тренировк", "workout",
-    "гаджет", "gadget", "устройств", "device",
+    "спорт", "sport", "тренировк", "workout", "спортзал", "gym", "фитнес",
+    "гаджет", "gadget", "устройств", "device", "смартфон", "smartphone",
+    "ноутбук", "laptop", "телефон",
+    "тест-драйв", "обзор авто", "седан", "кроссовер",
 ]
 
 _LOW_VISUALITY_SIGNALS = [
@@ -367,6 +369,8 @@ _SUBJECT_TRANSLATIONS: list[tuple[str, str]] = [
     ("автомобил", "automobile car"), ("авто ", "car automotive"),
     ("грузовик", "truck"), ("мотоцикл", "motorcycle"),
     ("электромоб", "electric vehicle"),
+    ("седан", "sedan car"), ("кроссовер", "crossover suv car"),
+    ("тест-драйв", "test drive car"), ("внедорожник", "suv offroad"),
     # Tech
     ("ноутбук", "laptop"), ("компьют", "computer"), ("сервер", "server"),
     ("видеокарт", "graphics card gpu"), ("процессор", "processor cpu"),
@@ -386,6 +390,7 @@ _SUBJECT_TRANSLATIONS: list[tuple[str, str]] = [
     ("парк", "park"), ("лес", "forest"), ("озер", "lake"),
     # Business
     ("офис", "office"), ("склад", "warehouse"), ("магазин", "shop store"),
+    ("ресторан", "restaurant dining"),
     # Professions
     ("стоматолог", "dentist"), ("психолог", "psychologist"),
     ("ветеринар", "veterinarian"), ("юрист", "lawyer"),
@@ -398,6 +403,9 @@ _SUBJECT_TRANSLATIONS: list[tuple[str, str]] = [
     ("животн", "animals"), ("собак", "dog"), ("кошк", "cat"),
     ("путешеств", "travel"), ("туризм", "tourism"),
     ("недвижимост", "real estate"), ("ипотек", "mortgage"),
+    ("спортзал", "gym fitness"), ("фитнес", "fitness workout"),
+    ("телефон", "phone smartphone"), ("iphone", "iphone smartphone"),
+    ("galaxy", "galaxy smartphone"), ("samsung", "samsung smartphone"),
 ]
 
 
@@ -481,26 +489,33 @@ def _extract_scene(text: str) -> str:
 # Word-sense disambiguation
 # ---------------------------------------------------------------------------
 
-def _disambiguate(text: str) -> tuple[str, str, list[str]]:
+def _disambiguate(text: str, title: str = "") -> tuple[str, str, list[str]]:
     """Perform word-sense disambiguation on the post text.
 
     Uses word-boundary-aware stem matching to avoid false positives
     (e.g., "ремен" inside "современная").
 
+    The title is given extra priority: if the ambiguous word appears in the
+    title, we treat it as the main subject. If it only appears in the body,
+    we require at least one context keyword to match before overriding
+    subject extraction (avoids hijacking subjects for incidental mentions
+    like "время работы от батареи" in a smartphone review).
+
     Returns: (resolved_subject, sense_name, forbidden_meanings)
     """
     src = _normalize(text)
+    title_norm = _normalize(title) if title else ""
 
     for stem, senses in _WSD_RULES.items():
-        # Use word-start boundary matching: stem must appear after a space,
-        # at the start of text, or after a non-Cyrillic character.
-        # This prevents matching "ремен" inside "современная".
+        # Use word-start boundary matching
         pattern = re.compile(
             r"(?:^|(?<=\s)|(?<=[^а-яё]))" + re.escape(stem),
             re.IGNORECASE,
         )
         if not pattern.search(src):
             continue
+
+        in_title = bool(title_norm and pattern.search(title_norm))
 
         # Score each sense by counting context keyword matches
         best_sense: WordSense | None = None
@@ -514,8 +529,9 @@ def _disambiguate(text: str) -> tuple[str, str, list[str]]:
         if best_sense and best_score > 0:
             return best_sense.english_subject, best_sense.name, best_sense.forbidden_subjects
 
-        # No context match — return first sense as default but with low confidence
-        if senses:
+        # No context match: only default if the word is in the title
+        # (i.e., it's likely the main subject, not an incidental mention)
+        if in_title and senses:
             default = senses[0]
             return default.english_subject, f"{default.name}_default", default.forbidden_subjects
 
@@ -596,7 +612,10 @@ def extract_visual_intent(
     # --- Step 1: Assess visuality ---
     intent.visuality = _assess_visuality(post_text)
 
-    if intent.visuality == VISUALITY_NONE:
+    # If post is empty but we have channel_topic, don't bail early.
+    # Let the fallback path on step 6 handle it.
+    post_is_empty = len(post_normalized.strip()) < 5
+    if intent.visuality == VISUALITY_NONE and not (post_is_empty and channel_topic):
         intent.no_image_reason = "low_visuality"
         intent.source = "post"
         logger.info(
@@ -609,7 +628,7 @@ def extract_visual_intent(
     intent.post_family = detect_topic_family(post_text)
 
     # --- Step 3: Word-sense disambiguation ---
-    wsd_subject, sense_name, forbidden = _disambiguate(post_text)
+    wsd_subject, sense_name, forbidden = _disambiguate(post_text, title=title)
     if wsd_subject:
         intent.main_subject = wsd_subject
         intent.sense = sense_name
@@ -631,13 +650,17 @@ def extract_visual_intent(
                 intent.main_subject = fallback_subject
             # Also try WSD on channel topic
             if not intent.main_subject:
-                wsd_subj, sense, forb = _disambiguate(channel_topic)
+                wsd_subj, sense, forb = _disambiguate(channel_topic, title=channel_topic)
                 if wsd_subj:
                     intent.main_subject = wsd_subj
                     intent.sense = sense
                     intent.forbidden_meanings = forb
             intent.scene = _extract_scene(channel_topic)
             intent.post_family = detect_topic_family(channel_topic)
+            # Re-assess visuality with fallback content
+            if intent.main_subject and intent.visuality == VISUALITY_NONE:
+                intent.visuality = VISUALITY_LOW
+                intent.no_image_reason = ""
         else:
             intent.no_image_reason = "no_visual_subject"
             intent.visuality = VISUALITY_LOW

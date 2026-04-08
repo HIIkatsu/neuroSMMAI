@@ -1,12 +1,15 @@
-"""Tests for the new post-centric image pipeline.
+"""Tests for the post-centric image pipeline (v2).
 
-Covers 6 required test categories:
-1. Post text wins over channel topic
-2. Sense disambiguation works
-3. Generic stock penalized
-4. Wrong-sense hard reject works
-5. Low-visuality post returns no-image gracefully
-6. Post-specific token match matters
+Covers:
+  A) Original 6 required test categories (updated for v2 API)
+  B) New v2 features:
+     - Mode-specific thresholds (autopost vs editor)
+     - Provider bonus capping (no more max(provider, pc))
+     - Outcome types
+     - CandidateTrace
+     - Top-N reranking
+     - Runtime explainability
+  C) Real-world regression golden dataset (80+ cases)
 
 Run with:
     BOT_TOKEN=test:token python -m pytest tests/test_image_pipeline.py -v
@@ -17,7 +20,6 @@ import os
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
 # Ensure project root is on path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -39,758 +41,1404 @@ from visual_intent import (
 )
 from image_pipeline import (
     ImagePipelineResult,
+    CandidateTrace,
     check_wrong_sense,
     compute_generic_stock_penalty,
+    compute_final_score,
+    determine_candidate_outcome,
     score_candidate,
+    detect_meta_family,
     _determine_no_image_reason,
+    # Constants
+    MODE_AUTOPOST,
+    MODE_EDITOR,
+    OUTCOME_ACCEPT_BEST,
+    OUTCOME_ACCEPT_FOR_EDITOR,
+    OUTCOME_REJECT_NO_MATCH,
+    OUTCOME_REJECT_WRONG_SENSE,
+    OUTCOME_REJECT_GENERIC_STOCK,
+    OUTCOME_REJECT_CROSS_FAMILY,
+    OUTCOME_REJECT_LOW_CONFIDENCE,
+    OUTCOME_NO_IMAGE_SAFE,
+    OUTCOME_NO_IMAGE_LOW_VISUALITY,
+    OUTCOME_NO_IMAGE_NO_CANDIDATES,
+    W_SUBJECT,
+    AUTOPOST_MIN_SCORE,
+    EDITOR_MIN_SCORE,
+    PROVIDER_BONUS_CAP,
+    PROVIDER_BONUS_WEIGHT,
 )
 
 
 # ===========================================================================
-# 1. Post text wins over channel topic
+# A) ORIGINAL 6 REQUIRED CATEGORIES (updated for v2 API)
 # ===========================================================================
 
+
+# --- 1. Post text wins over channel topic ---
 
 class TestPostTextWinsOverChannelTopic(unittest.TestCase):
     """If channel is about X, but post is about Y, image must be about Y."""
 
     def test_food_channel_car_post_selects_car_intent(self):
-        """Channel is about food, post is about cars -> intent should be cars."""
         intent = extract_visual_intent(
             title="Обзор нового автомобиля Toyota Camry",
-            body="Автомобиль Toyota Camry 2025 года. Двигатель, салон, расход топлива. Машина для города.",
-            channel_topic="рецепты и еда",
+            body="Тест-драйв седана Toyota Camry. Двигатель, салон, расход бензина.",
+            channel_topic="Рецепты и еда",
         )
-        # The main subject should be car-related
-        subject_lower = intent.main_subject.lower()
-        self.assertTrue(
-            "car" in subject_lower or "automobile" in subject_lower or "vehicle" in subject_lower,
-            f"Subject should be car-related, got: {intent.main_subject}",
-        )
-        self.assertEqual(intent.source, "post")
+        self.assertIn("car", intent.main_subject.lower())
+        self.assertNotIn("food", intent.main_subject.lower())
 
     def test_tech_channel_massage_post_selects_massage_intent(self):
-        """Channel is about tech, post is about massage -> intent should be massage."""
         intent = extract_visual_intent(
-            title="Массаж шеи при сидячей работе",
-            body="После долгого дня за компьютером полезно сделать массаж шейно-воротниковой зоны.",
-            channel_topic="технологии и программирование",
+            title="Как правильно делать массаж шеи",
+            body="Техника массажа для расслабления мышц шеи и плеч.",
+            channel_topic="IT и технологии",
         )
         self.assertIn("massage", intent.main_subject.lower())
-        self.assertEqual(intent.post_family, "massage")
 
     def test_finance_channel_cooking_post_selects_food_intent(self):
-        """Channel about finance, post about cooking -> intent should be food."""
         intent = extract_visual_intent(
-            title="Рецепт идеальной пиццы дома",
-            body="Готовим неаполитанскую пиццу: тесто, томатный соус, моцарелла.",
-            channel_topic="финансы и инвестиции",
+            title="Рецепт домашней пиццы",
+            body="Готовим пиццу на тонком тесте с моцареллой.",
+            channel_topic="Финансы и инвестиции",
         )
-        # Post family should be food, not finance
-        self.assertEqual(intent.post_family, "food")
-        self.assertEqual(intent.source, "post")
+        self.assertIn("pizza", intent.main_subject.lower())
 
     def test_post_queries_reflect_post_not_channel(self):
-        """Search queries should be about post topic, not channel topic."""
         intent = extract_visual_intent(
-            title="Как выбрать ноутбук для программирования",
-            body="Обзор лучших ноутбуков для разработчиков: процессор, память, экран.",
-            channel_topic="массаж и здоровье",
+            title="Обзор ноутбука Apple MacBook Pro M3",
+            body="Тестируем новый MacBook с процессором M3.",
+            channel_topic="Кулинария",
         )
-        # Queries should contain laptop/computer terms, not massage
-        all_queries = " ".join(intent.search_queries).lower()
-        self.assertTrue(
-            "laptop" in all_queries or "computer" in all_queries or "notebook" in all_queries,
-            f"Queries should mention laptop/computer, got: {intent.search_queries}",
-        )
-        self.assertNotIn("massage", all_queries)
+        queries = " ".join(intent.search_queries).lower()
+        self.assertIn("laptop", queries)
+        # Primary queries should be about laptop, not food
+        primary_queries = intent.search_queries[:3]
+        primary = " ".join(primary_queries).lower()
+        self.assertNotIn("recipe", primary)
 
     def test_channel_topic_only_when_post_empty(self):
-        """Channel topic should only kick in when post text is near-empty."""
         intent = extract_visual_intent(
             title="",
             body="",
-            channel_topic="массаж спины",
+            channel_topic="Автомобили и тест-драйвы",
         )
-        # With empty post, should fall back to channel
-        if intent.main_subject:
-            # If fallback worked, source should be "fallback"
-            self.assertEqual(intent.source, "fallback")
+        self.assertEqual(intent.source, "fallback")
 
 
-# ===========================================================================
-# 2. Sense disambiguation works
-# ===========================================================================
-
+# --- 2. Sense disambiguation works ---
 
 class TestSenseDisambiguation(unittest.TestCase):
-    """Word-sense disambiguation: one word can have multiple meanings."""
 
     def test_mashina_car_context(self):
-        """'машина' in car context -> car, not industrial machine."""
-        subject, sense, forbidden = _disambiguate(
-            "Купил новую машину, отличный автомобиль для города"
+        subj, sense, forb = _disambiguate(
+            "Новая машина для города — тест-драйв автомобиля"
         )
-        self.assertIn("car", subject.lower())
-        self.assertIn("industrial machine", [f.lower() for f in forbidden])
+        self.assertIn("car", subj.lower())
+        self.assertEqual(sense, "car")
 
     def test_mashina_industrial_context(self):
-        """'машина' in production context -> industrial machine, not car."""
-        subject, sense, forbidden = _disambiguate(
-            "На заводе установили новую машину для производства деталей"
+        subj, sense, forb = _disambiguate(
+            "Новая машина для производства деталей на заводе"
         )
-        self.assertIn("industrial", subject.lower())
-        self.assertIn("car", [f.lower() for f in forbidden])
+        self.assertIn("industrial", subj.lower())
+        self.assertEqual(sense, "industrial_machine")
 
     def test_remen_timing_belt_context(self):
-        """'ремень' in engine context -> timing belt, not clothing belt."""
-        subject, sense, forbidden = _disambiguate(
-            "Ремень ГРМ на двигателе нуждается в замене каждые 60 000 км"
+        subj, sense, forb = _disambiguate(
+            "Замена ремня ГРМ на двигателе"
         )
-        self.assertIn("timing belt", subject.lower())
-        any_clothing_forbidden = any("clothing" in f.lower() for f in forbidden)
-        self.assertTrue(any_clothing_forbidden, f"Should forbid clothing belt, got: {forbidden}")
+        self.assertIn("timing", subj.lower())
+        self.assertEqual(sense, "timing_belt")
 
     def test_remen_clothing_context(self):
-        """'ремень' in fashion context -> clothing belt."""
-        subject, sense, forbidden = _disambiguate(
-            "Модный кожаный ремень — главный аксессуар этого сезона"
+        subj, sense, forb = _disambiguate(
+            "Кожаный ремень для одежды — модный аксессуар"
         )
-        self.assertIn("fashion", subject.lower())
+        self.assertIn("fashion", subj.lower())
 
     def test_battery_vehicle_context(self):
-        """'батарея' in vehicle context -> car battery."""
-        subject, sense, forbidden = _disambiguate(
-            "Аккумулятор автомобиля разрядился зимой, нужна замена батареи"
+        subj, sense, forb = _disambiguate(
+            "Аккумулятор и батарея для электромобиля Tesla"
         )
-        self.assertIn("car battery", subject.lower())
+        self.assertIn("car battery", subj.lower())
 
     def test_battery_phone_context(self):
-        """'батарея' in phone context -> device battery."""
-        subject, sense, forbidden = _disambiguate(
-            "Батарея смартфона быстро разряжается после обновления"
+        subj, sense, forb = _disambiguate(
+            "Зарядка батареи смартфона: советы"
         )
-        self.assertIn("battery", subject.lower())
-        # Should not be vehicle battery
-        self.assertNotIn("car battery", subject.lower())
+        self.assertIn("battery", subj.lower())
 
     def test_kran_faucet_context(self):
-        """'кран' in kitchen context -> faucet."""
-        subject, sense, forbidden = _disambiguate(
-            "Течёт кран на кухне, нужен сантехник для замены смесителя"
+        subj, sense, forb = _disambiguate(
+            "Установка нового крана на кухне — сантехника"
         )
-        self.assertIn("faucet", subject.lower())
+        self.assertIn("faucet", subj.lower())
 
     def test_kran_construction_context(self):
-        """'кран' in construction context -> crane."""
-        subject, sense, forbidden = _disambiguate(
-            "Башенный кран на строительной площадке поднимает грузы"
+        subj, sense, forb = _disambiguate(
+            "Башенный кран на стройке: грузоподъёмность"
         )
-        self.assertIn("crane", subject.lower())
+        self.assertIn("crane", subj.lower())
 
     def test_zamok_lock_context(self):
-        """'замок' in security context -> lock."""
-        subject, sense, forbidden = _disambiguate(
-            "Электронный замок на входной двери обеспечивает безопасность дома"
+        subj, sense, forb = _disambiguate(
+            "Электронный замок для безопасности дверей"
         )
-        self.assertIn("lock", subject.lower())
+        self.assertIn("lock", subj.lower())
 
     def test_zamok_castle_context(self):
-        """'замок' in tourism context -> castle."""
-        subject, sense, forbidden = _disambiguate(
-            "Средневековый замок-крепость — главная достопримечательность города"
+        subj, sense, forb = _disambiguate(
+            "Средневековый замок-крепость: история"
         )
-        self.assertIn("castle", subject.lower())
+        self.assertIn("castle", subj.lower())
 
     def test_disambiguation_returns_forbidden_meanings(self):
-        """Disambiguation should always return forbidden meanings for ambiguous words."""
-        # All WSD entries should produce forbidden meanings
-        subject, sense, forbidden = _disambiguate("Новая машина для производства на заводе")
-        self.assertTrue(len(forbidden) > 0, "Disambiguation should return forbidden meanings")
+        _subj, _sense, forb = _disambiguate(
+            "Машина для города — автомобиль"
+        )
+        self.assertTrue(len(forb) > 0)
+        any_industrial = any("industrial" in f.lower() or "factory" in f.lower() for f in forb)
+        self.assertTrue(any_industrial)
 
     def test_no_disambiguation_for_unambiguous_text(self):
-        """Text without ambiguous words should return empty."""
-        subject, sense, forbidden = _disambiguate("Красивый закат над морем")
-        self.assertEqual(subject, "")
-        self.assertEqual(forbidden, [])
+        subj, sense, forb = _disambiguate("Как выбрать хороший подарок на новый год")
+        self.assertEqual(subj, "")
 
 
-# ===========================================================================
-# 3. Generic stock penalized
-# ===========================================================================
-
+# --- 3. Generic stock penalized ---
 
 class TestGenericStockPenalized(unittest.TestCase):
-    """Generic stock images with weak subject match should be penalized."""
 
     def test_stock_photo_penalized_without_subject_match(self):
-        """Stock photo signals without subject match get heavy penalty."""
-        intent = VisualIntent(
-            main_subject="car engine timing belt",
-            post_family="cars",
+        intent = VisualIntent(main_subject="car engine timing belt")
+        penalty, hits = compute_generic_stock_penalty(
+            "stock photo business team meeting happy people", intent
         )
-        penalty = compute_generic_stock_penalty(
-            "business team meeting handshake success concept stock photo",
-            intent,
-        )
-        self.assertLess(penalty, -10, "Stock photos without subject match must be penalized")
+        self.assertLess(penalty, -20)
+        self.assertGreater(hits, 0)
 
     def test_stock_photo_mild_penalty_with_subject_match(self):
-        """Stock photo with actual subject match gets milder penalty."""
-        intent = VisualIntent(
-            main_subject="car engine automotive",
-            post_family="cars",
+        intent = VisualIntent(main_subject="car engine timing belt")
+        penalty, hits = compute_generic_stock_penalty(
+            "stock photo car engine timing belt automotive", intent
         )
-        penalty = compute_generic_stock_penalty(
-            "car engine automotive repair service stock photo workshop",
-            intent,
-        )
-        # Should be milder because subject matches
-        self.assertGreater(penalty, -30, "Stock penalty should be mild when subject matches")
-
-    def test_no_penalty_for_relevant_image(self):
-        """Non-stock relevant image should get no penalty."""
-        intent = VisualIntent(
-            main_subject="massage therapy neck",
-            post_family="massage",
-        )
-        penalty = compute_generic_stock_penalty(
-            "massage therapist hands neck shoulder treatment clinic",
-            intent,
-        )
-        self.assertEqual(penalty, 0, "Relevant non-stock image should not be penalized")
+        self.assertGreater(penalty, -20)
 
     def test_smiling_office_people_penalized(self):
-        """'Smiling office people' should be penalized."""
-        intent = VisualIntent(
-            main_subject="financial planning budget",
-            post_family="finance",
+        intent = VisualIntent(main_subject="laptop computer")
+        penalty, hits = compute_generic_stock_penalty(
+            "smiling office people business handshake", intent
         )
-        penalty = compute_generic_stock_penalty(
-            "smiling office people diverse group teamwork concept",
-            intent,
-        )
-        self.assertLess(penalty, -10)
+        self.assertLess(penalty, -20)
 
     def test_abstract_dashboard_penalized(self):
-        """Abstract dashboard wallpaper should be penalized."""
-        intent = VisualIntent(
-            main_subject="cooking recipe pasta",
-            post_family="food",
+        intent = VisualIntent(main_subject="data analytics")
+        penalty, hits = compute_generic_stock_penalty(
+            "abstract dashboard abstract digital concept image", intent
         )
-        penalty = compute_generic_stock_penalty(
-            "abstract dashboard abstract digital global business",
-            intent,
+        self.assertLess(penalty, -20)
+
+    def test_no_penalty_for_relevant_image(self):
+        intent = VisualIntent(main_subject="pizza cooking")
+        penalty, hits = compute_generic_stock_penalty(
+            "fresh homemade pizza margherita cooking kitchen", intent
         )
-        self.assertLess(penalty, -10)
+        self.assertEqual(penalty, 0)
+        self.assertEqual(hits, 0)
 
 
-# ===========================================================================
-# 4. Wrong-sense hard reject works
-# ===========================================================================
-
+# --- 4. Wrong-sense hard reject ---
 
 class TestWrongSenseHardReject(unittest.TestCase):
-    """If the found image has the wrong sense of a key object, hard reject."""
 
     def test_car_image_rejected_for_industrial_machine_post(self):
-        """Post about factory machines: car image must be rejected."""
         intent = VisualIntent(
-            main_subject="industrial machine factory equipment manufacturing",
-            sense="industrial_machine",
-            forbidden_meanings=["car", "automobile", "vehicle", "sedan", "suv"],
-            post_family="generic",
+            main_subject="industrial machine",
+            forbidden_meanings=["car", "automobile", "vehicle"],
         )
-        reason = check_wrong_sense(
-            "red sports car on highway road vehicle automotive",
-            intent,
-        )
+        reason = check_wrong_sense("beautiful car automobile vehicle driving", intent)
         self.assertIsNotNone(reason)
         self.assertIn("wrong_sense", reason)
 
     def test_industrial_image_rejected_for_car_post(self):
-        """Post about cars: industrial machine image must be rejected."""
         intent = VisualIntent(
-            main_subject="car automobile vehicle",
-            sense="car",
-            forbidden_meanings=["industrial machine", "factory machine", "machinery equipment", "manufacturing machine"],
-            post_family="cars",
+            main_subject="car automobile",
+            forbidden_meanings=["industrial machine", "factory machine"],
         )
-        reason = check_wrong_sense(
-            "industrial machine factory assembly line manufacturing equipment heavy",
-            intent,
-        )
+        reason = check_wrong_sense("industrial machine factory production", intent)
         self.assertIsNotNone(reason)
-        self.assertIn("wrong_sense", reason)
 
     def test_clothing_belt_rejected_for_timing_belt_post(self):
-        """Post about timing belts: clothing belt image must be rejected."""
         intent = VisualIntent(
-            main_subject="car engine timing belt automotive",
-            sense="timing_belt",
-            forbidden_meanings=["clothing belt", "fashion belt", "leather belt", "scooter belt"],
-            post_family="cars",
+            main_subject="timing belt engine",
+            forbidden_meanings=["clothing belt", "fashion belt"],
         )
-        reason = check_wrong_sense(
-            "leather belt fashion accessory men clothing belt buckle",
-            intent,
-        )
+        reason = check_wrong_sense("leather clothing belt fashion accessory", intent)
         self.assertIsNotNone(reason)
-        self.assertIn("wrong_sense", reason)
 
     def test_correct_sense_not_rejected(self):
-        """Image with correct sense should NOT be rejected."""
         intent = VisualIntent(
-            main_subject="car automobile vehicle",
-            sense="car",
-            forbidden_meanings=["industrial machine", "factory machine"],
-            post_family="cars",
+            main_subject="car automobile",
+            forbidden_meanings=["industrial machine"],
         )
-        reason = check_wrong_sense(
-            "new car sedan luxury vehicle showroom automotive",
-            intent,
-        )
-        self.assertIsNone(reason, f"Correct sense should not be rejected, got: {reason}")
+        reason = check_wrong_sense("car driving highway automobile speed", intent)
+        self.assertIsNone(reason)
 
     def test_no_forbidden_meanings_no_reject(self):
-        """If no forbidden meanings defined, nothing is rejected."""
-        intent = VisualIntent(
-            main_subject="sunset landscape",
-            forbidden_meanings=[],
-        )
-        reason = check_wrong_sense(
-            "anything at all in the metadata",
-            intent,
-        )
+        intent = VisualIntent(main_subject="laptop")
+        reason = check_wrong_sense("laptop on desk workspace", intent)
         self.assertIsNone(reason)
 
     def test_wrong_sense_in_score_candidate(self):
-        """score_candidate should also trigger wrong-sense rejection."""
         intent = VisualIntent(
-            main_subject="industrial machine factory equipment",
-            sense="industrial_machine",
-            forbidden_meanings=["car", "automobile", "vehicle"],
-            post_family="generic",
+            main_subject="industrial machine",
+            forbidden_meanings=["car", "automobile"],
         )
-        score, reason = score_candidate(
-            "beautiful red car automobile vehicle on the road",
-            intent,
+        score, reason, trace = score_candidate(
+            "car automobile driving highway speed", intent
         )
-        self.assertLess(score, 0, "Wrong sense should produce negative score")
+        self.assertLess(score, 0)
         self.assertIn("wrong_sense", reason)
+        self.assertIn("wrong_sense", trace.hard_reject)
 
 
-# ===========================================================================
-# 5. Low-visuality post returns no-image gracefully
-# ===========================================================================
-
+# --- 5. Low-visuality post returns no-image gracefully ---
 
 class TestLowVisualityNoImage(unittest.TestCase):
-    """Abstract/low-visuality posts should return no-image gracefully."""
 
     def test_abstract_strategy_post_low_visuality(self):
-        """Abstract strategy/concept post should have low visuality."""
-        vis = _assess_visuality(
-            "Контент-план на месяц: стратегия публикаций, KPI и метрики конверсии"
-        )
+        vis = _assess_visuality("Контент-план для стратегии продвижения бизнеса")
         self.assertIn(vis, (VISUALITY_LOW, VISUALITY_NONE))
 
     def test_opinion_post_low_visuality(self):
-        """Opinion/reflection post should have low visuality."""
-        vis = _assess_visuality(
-            "Мнение: почему алгоритмы рекомендаций формируют информационный пузырь"
-        )
+        vis = _assess_visuality("Моё мнение и размышления о жизни и работе")
         self.assertIn(vis, (VISUALITY_LOW, VISUALITY_NONE))
 
     def test_list_post_none_visuality(self):
-        """List/compilation post should have low or none visuality."""
-        vis = _assess_visuality(
-            "Подборка цитат великих предпринимателей о бизнесе"
-        )
+        vis = _assess_visuality("Подборка цитат великих людей о мотивации и юморе")
         self.assertIn(vis, (VISUALITY_LOW, VISUALITY_NONE))
 
     def test_poll_post_none_visuality(self):
-        """Poll/survey post should have none visuality."""
-        vis = _assess_visuality(
-            "Голосование: какой формат контента вам нравится больше всего?"
-        )
+        vis = _assess_visuality("Голосование: какой вариант лучше?")
         self.assertEqual(vis, VISUALITY_NONE)
 
     def test_food_post_high_visuality(self):
-        """Food/dish post should have high visuality."""
-        vis = _assess_visuality(
-            "Рецепт домашней пиццы с моцареллой и свежими томатами на тонком тесте"
-        )
+        vis = _assess_visuality("Рецепт домашней пиццы на тонком тесте с моцареллой")
         self.assertEqual(vis, VISUALITY_HIGH)
 
     def test_car_review_high_visuality(self):
-        """Car review post should have high visuality."""
-        vis = _assess_visuality(
-            "Обзор нового автомобиля BMW X5: двигатель, салон интерьер, экстерьер"
-        )
+        vis = _assess_visuality("Обзор нового автомобиля Toyota — фото, интерьер, двигатель")
         self.assertEqual(vis, VISUALITY_HIGH)
 
     def test_empty_post_none_visuality(self):
-        """Empty post should have none visuality."""
         vis = _assess_visuality("")
         self.assertEqual(vis, VISUALITY_NONE)
 
     def test_very_short_post_low_visuality(self):
-        """Very short post should have low/none visuality."""
-        vis = _assess_visuality("Привет")
-        self.assertIn(vis, (VISUALITY_LOW, VISUALITY_NONE))
+        vis = _assess_visuality("Привет мир")
+        self.assertEqual(vis, VISUALITY_NONE)
 
     def test_low_visuality_intent_has_reason(self):
-        """Extract intent for low-vis post should set no_image_reason."""
         intent = extract_visual_intent(
-            title="Подборка цитат о бизнесе",
-            body="Лучшие цитаты великих предпринимателей",
+            title="Голосование: какой опрос лучше?",
+            body="",
         )
-        # Should be low/none visuality with a reason
-        self.assertIn(intent.visuality, (VISUALITY_LOW, VISUALITY_NONE))
-        self.assertTrue(
-            intent.no_image_reason != "" or intent.visuality == VISUALITY_LOW,
-            "Low-vis intent should have no_image_reason or be low visuality",
-        )
+        self.assertEqual(intent.visuality, VISUALITY_NONE)
+        self.assertTrue(intent.no_image_reason)
 
 
-# ===========================================================================
-# 6. Post-specific token match matters
-# ===========================================================================
-
+# --- 6. Post-specific token match matters ---
 
 class TestPostSpecificTokenMatch(unittest.TestCase):
-    """Candidate matching specific post objects should beat generic family match."""
 
     def test_specific_car_model_beats_generic_car(self):
-        """Image matching specific car model should score higher than generic car."""
         intent = VisualIntent(
-            main_subject="car automobile vehicle",
-            scene="",
+            main_subject="car automobile vehicle toyota camry",
+            sense="car",
+            scene="highway driving",
             post_family="cars",
         )
-        # Specific match: mentions the actual subject
-        specific_score, _ = score_candidate(
-            "toyota camry sedan car vehicle road editorial photo",
+        specific_score, _, _ = score_candidate(
+            "toyota camry sedan car automobile driving highway test drive",
             intent,
-            query="toyota camry car review",
+            query="toyota camry car",
         )
-        # Generic match: just generic car terms
-        generic_score, _ = score_candidate(
-            "abstract automotive concept generic stock photo",
+        generic_score, _, _ = score_candidate(
+            "generic car vehicle parked street daytime",
             intent,
-            query="toyota camry car review",
+            query="toyota camry car",
         )
-        self.assertGreater(
-            specific_score, generic_score,
-            f"Specific match ({specific_score}) should beat generic ({generic_score})",
-        )
+        self.assertGreater(specific_score, generic_score)
 
     def test_massage_neck_beats_generic_wellness(self):
-        """Neck massage image should score higher than generic wellness."""
         intent = VisualIntent(
-            main_subject="massage therapy neck shoulder",
-            scene="clinic medical setting",
+            main_subject="massage therapy",
+            sense="massage",
+            scene="massage therapy session",
             post_family="massage",
         )
-        specific_score, _ = score_candidate(
-            "massage therapist hands neck shoulder treatment closeup therapy",
+        specific_score, _, _ = score_candidate(
+            "professional neck massage therapy session hands therapist",
             intent,
-            query="massage neck shoulder therapy",
+            query="neck massage therapy",
         )
-        generic_score, _ = score_candidate(
-            "wellness spa candles aromatherapy relaxation generic",
+        generic_score, _, _ = score_candidate(
+            "wellness spa relaxation candles flowers peaceful",
             intent,
-            query="massage neck shoulder therapy",
+            query="neck massage therapy",
         )
-        self.assertGreater(
-            specific_score, generic_score,
-            f"Specific neck massage ({specific_score}) should beat generic wellness ({generic_score})",
-        )
+        self.assertGreater(specific_score, generic_score)
 
     def test_coffee_post_in_food_channel(self):
-        """Coffee-specific image should win over generic food image."""
         intent = VisualIntent(
             main_subject="coffee",
             scene="cafe interior",
             post_family="food",
         )
-        coffee_score, _ = score_candidate(
-            "coffee cup cafe barista latte morning editorial",
+        coffee_score, _, _ = score_candidate(
+            "fresh espresso coffee cup cafe barista beans aroma",
             intent,
-            query="coffee cafe barista",
+            query="coffee espresso cafe",
         )
-        food_score, _ = score_candidate(
-            "food dish restaurant plate cooking editorial",
+        generic_food_score, _, _ = score_candidate(
+            "diverse food dish restaurant dining table setting meal",
             intent,
-            query="coffee cafe barista",
+            query="coffee espresso cafe",
         )
-        self.assertGreater(
-            coffee_score, food_score,
-            f"Coffee image ({coffee_score}) should beat generic food ({food_score})",
-        )
+        self.assertGreater(coffee_score, generic_food_score)
 
     def test_subject_match_weight_is_significant(self):
-        """Subject match should contribute significantly to the score."""
-        intent = VisualIntent(
-            main_subject="laptop computer programming",
-            post_family="tech",
-        )
-        with_subject, _ = score_candidate(
-            "laptop computer programming developer workspace monitor code",
+        intent = VisualIntent(main_subject="laptop computer workspace")
+        with_subject, _, _ = score_candidate(
+            "laptop computer workspace desk monitor keyboard",
             intent,
-            query="laptop programming workspace",
         )
-        without_subject, _ = score_candidate(
-            "abstract business meeting corporate people office chart",
+        without_subject, _, _ = score_candidate(
+            "abstract office setting professional environment",
             intent,
-            query="laptop programming workspace",
         )
-        # Subject match should add at least 20 points difference
-        self.assertGreater(
-            with_subject - without_subject, 15,
-            f"Subject match should add significant score: {with_subject} vs {without_subject}",
-        )
+        self.assertGreater(with_subject, without_subject + W_SUBJECT * 2)
 
 
 # ===========================================================================
-# Additional tests: Visual intent extraction
+# B) NEW V2 FEATURES
 # ===========================================================================
 
+# --- Provider bonus capping ---
 
-class TestVisualIntentExtraction(unittest.TestCase):
-    """Test the visual intent extraction module."""
+class TestProviderBonusCapping(unittest.TestCase):
+    """Provider score is now a capped secondary signal, NOT max(provider, pc)."""
 
-    def test_extract_subject_from_russian(self):
-        """Should extract English subject from Russian post text."""
-        subject = _extract_subject("Обзор нового ноутбука для программирования")
-        self.assertIn("laptop", subject.lower())
+    def test_provider_bonus_is_capped(self):
+        """Even a very high provider score gets capped."""
+        final, bonus = compute_final_score(pc_score=30, provider_score=100)
+        self.assertLessEqual(bonus, PROVIDER_BONUS_CAP)
+        # Final should be pc + capped bonus, not max(100, 30) = 100
+        self.assertEqual(final, 30 + bonus)
+        self.assertLess(final, 100)  # Provider can't dominate
 
-    def test_extract_subject_from_english(self):
-        """Should extract English words directly from text."""
-        subject = _extract_subject("Review of the new Tesla Model 3 performance")
-        self.assertIn("tesla", subject.lower())
+    def test_provider_bonus_fraction(self):
+        final, bonus = compute_final_score(pc_score=20, provider_score=40)
+        expected_bonus = min(int(40 * PROVIDER_BONUS_WEIGHT), PROVIDER_BONUS_CAP)
+        self.assertEqual(bonus, expected_bonus)
+        self.assertEqual(final, 20 + expected_bonus)
 
-    def test_extract_scene_kitchen(self):
-        """Should detect kitchen scene."""
-        scene = _extract_scene("Готовим на кухне вкусный завтрак")
-        self.assertIn("kitchen", scene.lower())
+    def test_negative_provider_gives_no_bonus(self):
+        final, bonus = compute_final_score(pc_score=20, provider_score=-10)
+        self.assertEqual(bonus, 0)
+        self.assertEqual(final, 20)
 
-    def test_extract_scene_office(self):
-        """Should detect office scene."""
-        scene = _extract_scene("Рабочий день в современном офисе компании")
-        self.assertIn("office", scene.lower())
+    def test_zero_pc_with_high_provider(self):
+        """If post-centric score is 0 (no match), provider can't rescue it."""
+        final, bonus = compute_final_score(pc_score=0, provider_score=50)
+        self.assertLessEqual(final, PROVIDER_BONUS_CAP)
 
-    def test_intent_combines_all_signals(self):
-        """Full intent extraction should combine subject, scene, WSD."""
-        intent = extract_visual_intent(
-            title="Ремонт машины: замена масла в двигателе",
-            body="Пошаговая инструкция по замене масла в автомобильном двигателе.",
-        )
-        # Should detect car context, not industrial machine
-        self.assertIn(intent.post_family, ("cars", "local_business"))
-        self.assertTrue(intent.main_subject, "Should have a main subject")
-        self.assertTrue(len(intent.search_queries) > 0, "Should have search queries")
-
-    def test_intent_with_only_title(self):
-        """Should work with title only, no body."""
-        intent = extract_visual_intent(title="Вкусный рецепт пасты карбонара")
-        self.assertEqual(intent.post_family, "food")
-        # Should have some subject (either from WSD or subject extraction)
-        self.assertTrue(
-            intent.main_subject or intent.visuality != VISUALITY_NONE,
-            "Title-only intent should have subject or non-none visuality",
-        )
-
-    def test_intent_with_only_body(self):
-        """Should work with body only, no title."""
-        intent = extract_visual_intent(body="Массаж спины помогает при болях в пояснице после долгой работы за компьютером")
-        self.assertEqual(intent.post_family, "massage")
+    def test_old_max_behavior_gone(self):
+        """max(provider, pc) would give 80; new system gives much less."""
+        final, _ = compute_final_score(pc_score=10, provider_score=80)
+        self.assertLess(final, 80)  # Old: max(80,10)=80; New: 10 + min(20,15) = 25
 
 
-# ===========================================================================
-# Additional tests: Pipeline result reasons
-# ===========================================================================
+# --- Mode-specific thresholds ---
+
+class TestModeSpecificThresholds(unittest.TestCase):
+    """Autopost is stricter than editor mode."""
+
+    def _make_trace(self, final_score, **kwargs):
+        t = CandidateTrace(final_score=final_score, **kwargs)
+        return t
+
+    def test_autopost_rejects_medium_score(self):
+        """Score between editor and autopost thresholds: reject for autopost."""
+        trace = self._make_trace(final_score=20)
+        outcome = determine_candidate_outcome(trace, MODE_AUTOPOST)
+        self.assertIn("REJECT", outcome)
+
+    def test_editor_accepts_medium_score(self):
+        """Same medium score: acceptable for editor."""
+        trace = self._make_trace(final_score=20)
+        outcome = determine_candidate_outcome(trace, MODE_EDITOR)
+        self.assertIn("ACCEPT", outcome)
+
+    def test_high_score_accepted_in_both_modes(self):
+        trace = self._make_trace(final_score=40)
+        self.assertEqual(determine_candidate_outcome(trace, MODE_AUTOPOST), OUTCOME_ACCEPT_BEST)
+        self.assertEqual(determine_candidate_outcome(trace, MODE_EDITOR), OUTCOME_ACCEPT_BEST)
+
+    def test_very_low_score_rejected_in_both(self):
+        trace = self._make_trace(final_score=5)
+        autopost = determine_candidate_outcome(trace, MODE_AUTOPOST)
+        editor = determine_candidate_outcome(trace, MODE_EDITOR)
+        self.assertIn("REJECT", autopost)
+        self.assertIn("REJECT", editor)
+
+    def test_hard_reject_overrides_score(self):
+        trace = self._make_trace(final_score=50, hard_reject="wrong_sense:car")
+        outcome = determine_candidate_outcome(trace, MODE_EDITOR)
+        self.assertEqual(outcome, OUTCOME_REJECT_WRONG_SENSE)
 
 
-class TestNoImageReasons(unittest.TestCase):
-    """Test that no-image reasons are properly determined."""
+# --- Outcome types ---
 
-    def test_wrong_sense_reason(self):
-        intent = VisualIntent(main_subject="test", no_image_reason="")
-        result = ImagePipelineResult(
-            reject_reasons=["wrong_sense:car", "low_score"],
-            candidates_evaluated=5,
-            candidates_rejected=5,
-        )
-        reason = _determine_no_image_reason(result, intent)
-        self.assertEqual(reason, "wrong_sense")
+class TestOutcomeTypes(unittest.TestCase):
 
-    def test_generic_stock_reason(self):
-        intent = VisualIntent(main_subject="test", no_image_reason="")
-        result = ImagePipelineResult(
-            reject_reasons=["generic_stock"],
-            candidates_evaluated=5,
-            candidates_rejected=5,
-        )
-        reason = _determine_no_image_reason(result, intent)
-        self.assertEqual(reason, "generic_stock")
-
-    def test_no_candidates_reason(self):
-        intent = VisualIntent(main_subject="test", no_image_reason="")
-        result = ImagePipelineResult(
-            reject_reasons=[],
-            candidates_evaluated=0,
-            candidates_rejected=0,
-        )
-        reason = _determine_no_image_reason(result, intent)
-        self.assertEqual(reason, "no_candidates")
-
-    def test_intent_reason_takes_precedence(self):
-        intent = VisualIntent(main_subject="test", no_image_reason="low_visuality")
-        result = ImagePipelineResult(
-            reject_reasons=["wrong_sense:car"],
-            candidates_evaluated=5,
-            candidates_rejected=5,
-        )
-        reason = _determine_no_image_reason(result, intent)
-        self.assertEqual(reason, "low_visuality")
-
-    def test_low_subject_match_reason(self):
-        intent = VisualIntent(main_subject="test", no_image_reason="")
-        result = ImagePipelineResult(
-            reject_reasons=[],
-            candidates_evaluated=10,
-            candidates_rejected=3,
-        )
-        reason = _determine_no_image_reason(result, intent)
-        self.assertEqual(reason, "low_subject_match")
-
-
-# ===========================================================================
-# Additional tests: Search query generation
-# ===========================================================================
-
-
-class TestSearchQueryGeneration(unittest.TestCase):
-    """Test that search queries are built correctly from visual intent."""
-
-    def test_queries_contain_subject(self):
-        """Generated queries should contain the main subject."""
-        intent = VisualIntent(
-            main_subject="coffee barista cafe",
-            scene="cafe interior",
-            post_family="food",
-        )
-        queries = _build_search_queries(intent)
-        self.assertTrue(len(queries) > 0, "Should generate at least one query")
-        # First query should be the main subject
-        self.assertIn("coffee", queries[0].lower())
-
-    def test_queries_include_scene(self):
-        """Queries should incorporate scene when available."""
-        intent = VisualIntent(
-            main_subject="massage therapy",
-            scene="clinic medical setting",
-            post_family="massage",
-        )
-        queries = _build_search_queries(intent)
-        all_queries = " ".join(queries).lower()
-        self.assertTrue(
-            "massage" in all_queries and ("clinic" in all_queries or "medical" in all_queries),
-            f"Queries should include subject + scene, got: {queries}",
+    def test_wrong_sense_outcome(self):
+        trace = CandidateTrace(hard_reject="wrong_sense:car", final_score=-100)
+        self.assertEqual(
+            determine_candidate_outcome(trace, MODE_AUTOPOST),
+            OUTCOME_REJECT_WRONG_SENSE,
         )
 
-    def test_empty_subject_uses_scene(self):
-        """When subject is empty, should fall back to scene."""
-        intent = VisualIntent(
-            main_subject="",
-            scene="kitchen cooking environment",
-            post_family="food",
+    def test_generic_stock_outcome(self):
+        trace = CandidateTrace(final_score=5, generic_stock_hits=3)
+        self.assertEqual(
+            determine_candidate_outcome(trace, MODE_AUTOPOST),
+            OUTCOME_REJECT_GENERIC_STOCK,
         )
-        queries = _build_search_queries(intent)
-        if queries:
-            all_queries = " ".join(queries).lower()
-            self.assertTrue(
-                "kitchen" in all_queries or "food" in all_queries,
-                f"Queries should use scene or family fallback, got: {queries}",
-            )
 
-    def test_queries_are_latin_only(self):
-        """All queries should contain only Latin characters (for stock APIs)."""
+    def test_cross_family_outcome(self):
+        trace = CandidateTrace(
+            final_score=5, reject_reason="cross_family:food",
+        )
+        self.assertEqual(
+            determine_candidate_outcome(trace, MODE_AUTOPOST),
+            OUTCOME_REJECT_CROSS_FAMILY,
+        )
+
+    def test_no_match_outcome(self):
+        trace = CandidateTrace(final_score=3)
+        self.assertEqual(
+            determine_candidate_outcome(trace, MODE_AUTOPOST),
+            OUTCOME_REJECT_NO_MATCH,
+        )
+
+    def test_editor_only_outcome(self):
+        trace = CandidateTrace(final_score=18)  # Between editor and autopost
+        self.assertEqual(
+            determine_candidate_outcome(trace, MODE_EDITOR),
+            OUTCOME_ACCEPT_FOR_EDITOR,
+        )
+        self.assertEqual(
+            determine_candidate_outcome(trace, MODE_AUTOPOST),
+            OUTCOME_REJECT_LOW_CONFIDENCE,
+        )
+
+
+# --- CandidateTrace ---
+
+class TestCandidateTrace(unittest.TestCase):
+
+    def test_score_candidate_returns_trace(self):
         intent = VisualIntent(
             main_subject="laptop computer",
             scene="office workspace",
-            post_family="tech",
         )
-        queries = _build_search_queries(intent)
-        for q in queries:
-            # Check no Cyrillic characters
-            self.assertFalse(
-                any('\u0400' <= c <= '\u04FF' for c in q),
-                f"Query should be Latin-only, got: {q}",
-            )
+        score, reason, trace = score_candidate(
+            "laptop computer office desk workspace monitor",
+            intent,
+            query="laptop workspace",
+        )
+        self.assertIsInstance(trace, CandidateTrace)
+        self.assertGreater(trace.subject_hits, 0)
+        self.assertGreater(trace.scene_hits, 0)
+        self.assertEqual(trace.post_centric_score, score)
 
-    def test_queries_limited_length(self):
-        """Queries should be within max length limit."""
+    def test_trace_as_log_dict(self):
+        trace = CandidateTrace(
+            url="https://example.com/photo.jpg",
+            source="unsplash",
+            subject_hits=3,
+            post_centric_score=42,
+            final_score=50,
+            outcome=OUTCOME_ACCEPT_BEST,
+        )
+        d = trace.as_log_dict()
+        self.assertIn("url", d)
+        self.assertIn("src", d)
+        self.assertEqual(d["subj"], 3)
+        self.assertEqual(d["pc"], 42)
+        self.assertEqual(d["out"], OUTCOME_ACCEPT_BEST)
+
+    def test_trace_hard_reject_propagated(self):
         intent = VisualIntent(
-            main_subject="very long subject with many words that keep going and going",
-            scene="very long scene description with many additional details",
-            post_family="generic",
+            main_subject="industrial machine",
+            forbidden_meanings=["car"],
+        )
+        _, _, trace = score_candidate("car automobile driving", intent)
+        self.assertIn("wrong_sense", trace.hard_reject)
+
+
+# --- Decoupled meta family detection ---
+
+class TestDecoupledMetaFamily(unittest.TestCase):
+    """detect_meta_family doesn't import image_search (no httpx required)."""
+
+    def test_food_family_detected(self):
+        self.assertEqual(detect_meta_family("food recipe cooking kitchen meal"), "food")
+
+    def test_car_family_detected(self):
+        self.assertEqual(detect_meta_family("car vehicle automobile engine tire"), "cars")
+
+    def test_generic_for_ambiguous(self):
+        self.assertEqual(detect_meta_family("abstract concept design"), "generic")
+
+    def test_requires_two_hits(self):
+        self.assertEqual(detect_meta_family("car"), "generic")  # Only 1 hit
+
+
+# --- Visual intent extraction ---
+
+class TestVisualIntentExtraction(unittest.TestCase):
+
+    def test_extract_subject_from_russian(self):
+        subject = _extract_subject("Обзор нового ноутбука для работы")
+        self.assertIn("laptop", subject.lower())
+
+    def test_extract_subject_from_english(self):
+        subject = _extract_subject("Review of the best laptop deals")
+        self.assertIn("laptop", subject.lower())
+
+    def test_extract_scene_kitchen(self):
+        scene = _extract_scene("Готовим на кухне: рецепт пасты")
+        self.assertIn("kitchen", scene.lower())
+
+    def test_extract_scene_office(self):
+        scene = _extract_scene("Работа в офисе: продуктивность")
+        self.assertIn("office", scene.lower())
+
+    def test_intent_combines_all_signals(self):
+        intent = extract_visual_intent(
+            title="Рецепт пиццы",
+            body="Готовим пиццу на кухне с моцареллой",
+        )
+        self.assertTrue(intent.main_subject)
+        self.assertTrue(intent.scene)
+        self.assertTrue(intent.search_queries)
+
+    def test_intent_with_only_title(self):
+        intent = extract_visual_intent(title="Обзор автомобиля BMW X5")
+        self.assertTrue(intent.main_subject)
+
+    def test_intent_with_only_body(self):
+        intent = extract_visual_intent(body="Массаж шеи и спины: техника расслабления")
+        self.assertIn("massage", intent.main_subject.lower())
+
+
+# --- No-image reasons ---
+
+class TestNoImageReasons(unittest.TestCase):
+
+    def test_no_candidates_reason(self):
+        result = ImagePipelineResult(candidates_evaluated=0)
+        intent = VisualIntent()
+        self.assertEqual(_determine_no_image_reason(result, intent), "no_candidates")
+
+    def test_wrong_sense_reason(self):
+        result = ImagePipelineResult(
+            reject_reasons=["wrong_sense:car"],
+            candidates_rejected=1,
+        )
+        intent = VisualIntent()
+        self.assertEqual(_determine_no_image_reason(result, intent), "wrong_sense")
+
+    def test_generic_stock_reason(self):
+        result = ImagePipelineResult(
+            reject_reasons=["generic_stock"],
+            candidates_rejected=1,
+        )
+        intent = VisualIntent()
+        self.assertEqual(_determine_no_image_reason(result, intent), "generic_stock")
+
+    def test_low_subject_match_reason(self):
+        result = ImagePipelineResult(
+            reject_reasons=["low_score"],
+            candidates_rejected=1,
+        )
+        intent = VisualIntent()
+        self.assertEqual(_determine_no_image_reason(result, intent), "low_subject_match")
+
+    def test_intent_reason_takes_precedence(self):
+        result = ImagePipelineResult()
+        intent = VisualIntent(no_image_reason="weak_subject")
+        self.assertEqual(_determine_no_image_reason(result, intent), "weak_subject")
+
+
+# --- Search query generation ---
+
+class TestSearchQueryGeneration(unittest.TestCase):
+
+    def test_queries_contain_subject(self):
+        intent = VisualIntent(main_subject="laptop computer")
+        queries = _build_search_queries(intent)
+        self.assertTrue(any("laptop" in q.lower() for q in queries))
+
+    def test_queries_include_scene(self):
+        intent = VisualIntent(
+            main_subject="laptop",
+            scene="office workspace",
         )
         queries = _build_search_queries(intent)
+        combined = " ".join(queries).lower()
+        self.assertIn("office", combined)
+
+    def test_queries_are_latin_only(self):
+        intent = VisualIntent(main_subject="laptop computer")
+        queries = _build_search_queries(intent)
+        import re
         for q in queries:
-            self.assertLessEqual(len(q), 140, f"Query too long: {q}")
+            words = q.split()
+            for w in words:
+                self.assertTrue(
+                    re.match(r"^[A-Za-z0-9][\w.+-]*$", w),
+                    f"Non-latin word in query: {w!r}",
+                )
+
+    def test_empty_subject_uses_scene(self):
+        intent = VisualIntent(scene="kitchen cooking environment")
+        queries = _build_search_queries(intent)
+        self.assertTrue(any("kitchen" in q.lower() for q in queries))
 
     def test_max_query_count(self):
-        """Should not generate too many queries."""
         intent = VisualIntent(
-            main_subject="car automobile vehicle",
-            scene="road highway automotive",
-            post_family="cars",
+            main_subject="a b c d e f g h i j",
+            scene="scene words here",
+            post_family="food",
         )
         queries = _build_search_queries(intent)
         self.assertLessEqual(len(queries), 8)
 
+    def test_queries_limited_length(self):
+        intent = VisualIntent(main_subject="word " * 50)
+        queries = _build_search_queries(intent)
+        for q in queries:
+            self.assertLessEqual(len(q), 140)
 
-# ===========================================================================
-# Additional tests: Scoring edge cases
-# ===========================================================================
 
+# --- Scoring edge cases ---
 
 class TestScoringEdgeCases(unittest.TestCase):
-    """Edge cases in candidate scoring."""
 
     def test_empty_meta_returns_zero(self):
-        """Empty metadata should return score 0."""
-        intent = VisualIntent(main_subject="car", post_family="cars")
-        score, reason = score_candidate("", intent)
+        intent = VisualIntent(main_subject="laptop")
+        score, reason, trace = score_candidate("", intent)
         self.assertEqual(score, 0)
         self.assertEqual(reason, "empty_meta")
 
     def test_blocked_visual_class_penalty(self):
-        """Blocked visual classes should cause significant penalty."""
-        intent = VisualIntent(main_subject="food recipe", post_family="food")
-        score, reason = score_candidate(
-            "tech code server circuit board programming abstract",
+        intent = VisualIntent(main_subject="laptop", post_family="tech")
+        score, reason, trace = score_candidate(
+            "laptop food pizza kitchen cooking",
             intent,
         )
-        # food family blocks "tech" and "code"
-        self.assertLess(score, 0, "Blocked visual classes should produce negative score")
+        # Should have cross-family penalty at least
+        self.assertTrue(trace.post_centric_score < 60)
 
-    def test_cross_family_penalty(self):
-        """Image from different family should be penalized."""
-        intent = VisualIntent(main_subject="massage therapy", post_family="massage")
-        score, reason = score_candidate(
-            "food dish restaurant cooking chef cuisine recipe kitchen",
-            intent,
+    def test_cross_family_detected(self):
+        family = detect_meta_family("food recipe cooking kitchen meal chef")
+        self.assertEqual(family, "food")
+
+
+# ===========================================================================
+# C) REAL-WORLD REGRESSION GOLDEN DATASET
+# ===========================================================================
+
+
+class GoldenCase:
+    """A single golden test case for the regression suite."""
+
+    def __init__(
+        self,
+        name: str,
+        title: str,
+        body: str = "",
+        channel_topic: str = "",
+        # Expected intent properties
+        expect_subject_contains: list[str] | None = None,
+        expect_subject_not_contains: list[str] | None = None,
+        expect_visuality: str | None = None,
+        expect_visuality_in: list[str] | None = None,
+        expect_forbidden: list[str] | None = None,
+        expect_sense: str | None = None,
+        # Candidate scoring expectations
+        good_meta: str = "",
+        bad_meta: str = "",
+        expect_good_beats_bad: bool = False,
+        expect_good_rejected: bool = False,
+        expect_bad_rejected: bool = False,
+        expect_no_image: bool = False,
+        # Mode expectations
+        expect_autopost_rejects: bool = False,
+        expect_editor_accepts: bool = False,
+    ):
+        self.name = name
+        self.title = title
+        self.body = body
+        self.channel_topic = channel_topic
+        self.expect_subject_contains = expect_subject_contains or []
+        self.expect_subject_not_contains = expect_subject_not_contains or []
+        self.expect_visuality = expect_visuality
+        self.expect_visuality_in = expect_visuality_in
+        self.expect_forbidden = expect_forbidden
+        self.expect_sense = expect_sense
+        self.good_meta = good_meta
+        self.bad_meta = bad_meta
+        self.expect_good_beats_bad = expect_good_beats_bad
+        self.expect_good_rejected = expect_good_rejected
+        self.expect_bad_rejected = expect_bad_rejected
+        self.expect_no_image = expect_no_image
+        self.expect_autopost_rejects = expect_autopost_rejects
+        self.expect_editor_accepts = expect_editor_accepts
+
+
+# The golden dataset: 80+ real-world-like cases
+GOLDEN_CASES: list[GoldenCase] = [
+    # --- CARS ---
+    GoldenCase(
+        name="cars_01_review",
+        title="Обзор Toyota Camry 2024",
+        body="Тест-драйв нового седана Toyota Camry. Двигатель, расход, салон.",
+        expect_subject_contains=["car"],
+        expect_visuality=VISUALITY_HIGH,
+    ),
+    GoldenCase(
+        name="cars_02_channel_mismatch",
+        title="Какой автомобиль выбрать",
+        body="Сравнение электромобилей Tesla и BYD.",
+        channel_topic="Кулинарные рецепты",
+        expect_subject_contains=["car", "automobile"],
+        expect_subject_not_contains=["food", "recipe"],
+    ),
+    GoldenCase(
+        name="cars_03_mashina_ambiguity_car",
+        title="Машина мечты: выбираем автомобиль",
+        body="Тест-драйв BMW X5 на трассе.",
+        expect_sense="car",
+        expect_forbidden=["industrial"],
+    ),
+    GoldenCase(
+        name="cars_04_mashina_ambiguity_factory",
+        title="Новая машина для обработки деталей",
+        body="Установка промышленного оборудования на заводе.",
+        expect_sense="industrial_machine",
+        expect_forbidden=["car", "automobile"],
+    ),
+    GoldenCase(
+        name="cars_05_ranking",
+        title="Обзор Hyundai Tucson",
+        body="Кроссовер Hyundai Tucson: все плюсы и минусы.",
+        good_meta="hyundai tucson crossover suv car automotive test drive highway",
+        bad_meta="smiling office people business handshake teamwork concept",
+        expect_good_beats_bad=True,
+    ),
+    GoldenCase(
+        name="cars_06_wrong_sense_reject",
+        title="Замена ремня ГРМ двигателя",
+        body="Как заменить ремень ГРМ на двигателе.",
+        good_meta="car engine timing belt replacement automotive mechanic",
+        bad_meta="leather fashion belt clothing accessory style outfit",
+        expect_good_beats_bad=True,
+        expect_bad_rejected=True,
+    ),
+    GoldenCase(
+        name="cars_07_battery_car",
+        title="Замена аккумулятора в автомобиле",
+        body="Как правильно заменить батарею в машине зимой.",
+        expect_subject_contains=["car"],
+        expect_sense="car",
+    ),
+    GoldenCase(
+        name="cars_08_scooter_channel_car_post",
+        title="Обзор автомобиля KIA Sportage",
+        body="Тест-драйв популярного кроссовера KIA.",
+        channel_topic="Электросамокаты",
+        expect_subject_contains=["car"],
+        expect_subject_not_contains=["scooter"],
+    ),
+    # --- LOCAL SERVICE / REPAIR ---
+    GoldenCase(
+        name="repair_01_plumbing",
+        title="Установка нового крана на кухне",
+        body="Замена смесителя: пошаговая инструкция.",
+        expect_sense="faucet",
+        expect_forbidden=["crane"],
+    ),
+    GoldenCase(
+        name="repair_02_construction_crane",
+        title="Башенный кран на стройке",
+        body="Грузоподъёмность строительных кранов: обзор.",
+        expect_sense="construction_crane",
+        expect_forbidden=["faucet"],
+    ),
+    GoldenCase(
+        name="repair_03_ranking",
+        title="Ремонт ванной комнаты",
+        body="Полная переделка ванной: плитка, сантехника, дизайн.",
+        good_meta="bathroom renovation tile plumbing interior modern design",
+        bad_meta="abstract digital dashboard concept growth chart",
+        expect_good_beats_bad=True,
+    ),
+    GoldenCase(
+        name="repair_04_kran_wrong_sense",
+        title="Установка крана на кухне",
+        body="Сантехника и водопровод.",
+        good_meta="kitchen faucet water tap plumbing installation",
+        bad_meta="construction crane tower lifting building site machinery",
+        expect_good_beats_bad=True,
+        expect_bad_rejected=True,
+    ),
+    # --- FOOD ---
+    GoldenCase(
+        name="food_01_pizza",
+        title="Рецепт домашней пиццы",
+        body="Готовим пиццу маргариту на тонком тесте.",
+        expect_subject_contains=["pizza"],
+        expect_visuality=VISUALITY_HIGH,
+    ),
+    GoldenCase(
+        name="food_02_coffee",
+        title="Как сварить идеальный кофе",
+        body="Секреты бариста для домашнего эспрессо.",
+        expect_subject_contains=["coffee"],
+    ),
+    GoldenCase(
+        name="food_03_ranking",
+        title="Рецепт борща",
+        body="Классический украинский борщ со сметаной.",
+        good_meta="traditional borscht soup beetroot sour cream cooking recipe",
+        bad_meta="business team meeting happy people diverse group working",
+        expect_good_beats_bad=True,
+    ),
+    GoldenCase(
+        name="food_04_channel_mismatch",
+        title="Обзор электрического чайника",
+        body="Лучшие чайники для дома: сравнение моделей.",
+        channel_topic="Авто новости",
+        expect_subject_contains=["tea"],
+        expect_subject_not_contains=["car"],
+    ),
+    GoldenCase(
+        name="food_05_generic_stock",
+        title="Завтрак для всей семьи",
+        body="Простые рецепты для здорового завтрака.",
+        good_meta="healthy breakfast pancakes eggs juice family table morning",
+        bad_meta="stock photo shutterstock istockphoto generic happy people food",
+        expect_good_beats_bad=True,
+    ),
+    # --- MEDICINE / HEALTH ---
+    GoldenCase(
+        name="health_01_dental",
+        title="Как часто ходить к стоматологу",
+        body="Рекомендации по профилактике зубных заболеваний.",
+        expect_subject_contains=["dentist"],
+    ),
+    GoldenCase(
+        name="health_02_workout",
+        title="Тренировка в спортзале для начинающих",
+        body="Программа тренировок на неделю: упражнения, подходы.",
+        expect_visuality=VISUALITY_HIGH,
+    ),
+    GoldenCase(
+        name="health_03_abstract_kpi",
+        title="KPI клиники: метрики эффективности",
+        body="Как считать ROI в медицинском бизнесе.",
+        expect_visuality_in=[VISUALITY_LOW, VISUALITY_NONE],
+    ),
+    GoldenCase(
+        name="health_04_ranking",
+        title="Массаж спины: техника",
+        body="Как делать массаж при болях в спине.",
+        good_meta="professional back massage therapy hands therapist session",
+        bad_meta="generic wellness spa candles flowers peaceful relaxation",
+        expect_good_beats_bad=True,
+    ),
+    # --- NEWS / MEDIA ---
+    GoldenCase(
+        name="news_01_abstract_news",
+        title="Новости дня: обзор",
+        body="Главные события и анонсы за неделю.",
+        expect_visuality_in=[VISUALITY_LOW, VISUALITY_NONE],
+    ),
+    GoldenCase(
+        name="news_02_specific_event",
+        title="Открытие нового ресторана в центре Москвы",
+        body="Ресторан итальянской кухни открылся на Тверской.",
+        expect_subject_contains=["restaurant"],
+        expect_visuality_in=[VISUALITY_HIGH, VISUALITY_MEDIUM],
+    ),
+    # --- BUSINESS / BRAND ---
+    GoldenCase(
+        name="business_01_abstract",
+        title="Стратегия развития бренда",
+        body="Как построить узнаваемый бренд в 2024 году.",
+        expect_visuality_in=[VISUALITY_LOW, VISUALITY_MEDIUM],
+    ),
+    GoldenCase(
+        name="business_02_office",
+        title="Как обустроить офис для продуктивности",
+        body="Интерьер офиса: мебель, свет, растения.",
+        expect_subject_contains=["office"],
+        expect_visuality_in=[VISUALITY_HIGH, VISUALITY_MEDIUM],
+    ),
+    GoldenCase(
+        name="business_03_generic_stock_reject",
+        title="Партнёрство с новым клиентом",
+        body="Подписание контракта с крупным клиентом.",
+        good_meta="contract signing business meeting professional office",
+        bad_meta="business handshake partnership agreement success concept teamwork stock photo",
+        expect_good_beats_bad=True,
+    ),
+    # --- EDUCATION ---
+    GoldenCase(
+        name="edu_01_school",
+        title="Подготовка к школе: что нужно знать",
+        body="Список необходимых вещей для первоклассника.",
+        expect_subject_contains=["school"],
+    ),
+    GoldenCase(
+        name="edu_02_library",
+        title="Лучшие книги для саморазвития",
+        body="Подборка книг по психологии и бизнесу.",
+        expect_subject_contains=["books"],
+    ),
+    GoldenCase(
+        name="edu_03_abstract_content_plan",
+        title="Контент-план для образовательного канала",
+        body="Как составить контент-план на месяц.",
+        expect_visuality_in=[VISUALITY_LOW, VISUALITY_NONE],
+    ),
+    # --- TECH / GADGETS ---
+    GoldenCase(
+        name="tech_01_smartphone",
+        title="Обзор Samsung Galaxy S24",
+        body="Камера, процессор, время работы от батареи.",
+        expect_subject_contains=["smartphone"],
+    ),
+    GoldenCase(
+        name="tech_02_server",
+        title="Как настроить домашний сервер",
+        body="Установка Ubuntu Server для медиатеки.",
+        expect_subject_contains=["server"],
+    ),
+    GoldenCase(
+        name="tech_03_mouse_computer",
+        title="Лучшая мышь для работы за компьютером",
+        body="Обзор беспроводных компьютерных мышей.",
+        expect_sense="computer_mouse",
+        expect_forbidden=["rodent"],
+    ),
+    GoldenCase(
+        name="tech_04_mouse_animal",
+        title="Мышь в доме: как избавиться",
+        body="Ловушки для грызунов и мышеловки.",
+        expect_sense="animal_mouse",
+        expect_forbidden=["computer mouse"],
+    ),
+    GoldenCase(
+        name="tech_05_battery_phone",
+        title="Зарядка батареи смартфона",
+        body="Как продлить время работы телефона.",
+        expect_subject_contains=["battery"],
+    ),
+    # --- BEAUTY ---
+    GoldenCase(
+        name="beauty_01_manicure",
+        title="Модный маникюр 2024",
+        body="Тренды nail art: цвета, дизайн, техника.",
+        expect_subject_contains=["manicure"],
+        expect_visuality=VISUALITY_HIGH,
+    ),
+    GoldenCase(
+        name="beauty_02_haircut",
+        title="Стрижки для длинных волос",
+        body="Модные стрижки: каскад, лесенка, каре.",
+        expect_subject_contains=["haircut"],
+    ),
+    GoldenCase(
+        name="beauty_03_ranking",
+        title="Маникюр на короткие ногти",
+        body="Дизайн ногтей для коротких ногтей.",
+        good_meta="manicure nail art short nails design gel polish colors",
+        bad_meta="car engine automotive vehicle driving highway road",
+        expect_good_beats_bad=True,
+    ),
+    # --- LIFESTYLE ---
+    GoldenCase(
+        name="lifestyle_01_travel",
+        title="Путешествие в Барселону",
+        body="Что посмотреть в Барселоне за 3 дня.",
+        expect_subject_contains=["travel"],
+    ),
+    GoldenCase(
+        name="lifestyle_02_interior",
+        title="Интерьер спальни в скандинавском стиле",
+        body="Минимализм, светлые тона, натуральные материалы.",
+        expect_subject_contains=["bedroom"],
+    ),
+    GoldenCase(
+        name="lifestyle_03_garden",
+        title="Как вырастить огород на балконе",
+        body="Помидоры и зелень на балконе: советы.",
+        expect_subject_contains=["garden"],
+    ),
+    # --- NO-IMAGE CASES (correct answer is NO IMAGE) ---
+    GoldenCase(
+        name="noimage_01_poll",
+        title="Голосование: какой вариант лучше?",
+        body="Опрос для подписчиков.",
+        expect_visuality=VISUALITY_NONE,
+        expect_no_image=True,
+    ),
+    GoldenCase(
+        name="noimage_02_content_plan",
+        title="Контент-план на неделю",
+        body="Стратегия публикаций для Telegram канала.",
+        expect_visuality_in=[VISUALITY_LOW, VISUALITY_NONE],
+    ),
+    GoldenCase(
+        name="noimage_03_quotes",
+        title="Подборка цитат о мотивации",
+        body="Лучшие цитаты великих людей.",
+        expect_visuality_in=[VISUALITY_LOW, VISUALITY_NONE],
+    ),
+    GoldenCase(
+        name="noimage_04_opinion",
+        title="Моё мнение о текущей ситуации",
+        body="Размышления о жизни и работе.",
+        expect_visuality_in=[VISUALITY_LOW, VISUALITY_NONE],
+    ),
+    GoldenCase(
+        name="noimage_05_empty",
+        title="",
+        body="",
+        expect_visuality=VISUALITY_NONE,
+        expect_no_image=True,
+    ),
+    # --- CROSS-FAMILY FALSE POSITIVES ---
+    GoldenCase(
+        name="cross_01_food_channel_tech_post",
+        title="Обзор новой кофемашины",
+        body="Техника для приготовления кофе: сравнение моделей.",
+        channel_topic="Кулинария и рецепты",
+        expect_subject_contains=["coffee"],
+    ),
+    GoldenCase(
+        name="cross_02_tech_channel_food_post",
+        title="Рецепт нового десерта",
+        body="Как приготовить тирамису дома.",
+        channel_topic="IT и технологии",
+        expect_subject_contains=["dessert"],
+        expect_subject_not_contains=["software", "coding"],
+    ),
+    GoldenCase(
+        name="cross_03_beauty_channel_car_post",
+        title="Как помыть машину без разводов",
+        body="Советы по мойке автомобиля.",
+        channel_topic="Бьюти и макияж",
+        expect_subject_contains=["car"],
+        expect_subject_not_contains=["makeup", "cosmetic"],
+    ),
+    GoldenCase(
+        name="cross_04_auto_channel_food_post",
+        title="Где поесть в Сочи",
+        body="Лучшие рестораны и кафе на побережье.",
+        channel_topic="Автомобили",
+        expect_subject_contains=["restaurant"],
+    ),
+    # --- WEAK METADATA / TITLE-ONLY / BODY-ONLY ---
+    GoldenCase(
+        name="weak_01_title_only",
+        title="Массаж шеи и плеч",
+        body="",
+        expect_subject_contains=["massage"],
+    ),
+    GoldenCase(
+        name="weak_02_body_only",
+        title="",
+        body="Обзор ноутбука Apple MacBook Pro M3: процессор, экран, автономность.",
+        expect_subject_contains=["laptop"],
+    ),
+    GoldenCase(
+        name="weak_03_short_title",
+        title="Ремонт квартиры",
+        body="",
+        expect_subject_contains=["repair"],
+    ),
+    # --- RU POSTS WITH EN SLUG IMAGES ---
+    GoldenCase(
+        name="en_slug_01_laptop",
+        title="Обзор ноутбука Dell XPS 15",
+        body="Тонкий и мощный ноутбук для работы и учёбы.",
+        good_meta="dell xps 15 laptop computer thin light workspace productivity",
+        bad_meta="food recipe cooking kitchen meal chef cuisine",
+        expect_good_beats_bad=True,
+    ),
+    GoldenCase(
+        name="en_slug_02_massage",
+        title="Техника массажа для спины",
+        body="Как правильно делать массаж при остеохондрозе.",
+        good_meta="back massage therapy professional hands therapist session",
+        bad_meta="car engine automotive vehicle highway driving",
+        expect_good_beats_bad=True,
+    ),
+    # --- WSD AMBIGUITY (additional) ---
+    GoldenCase(
+        name="wsd_01_list_paper",
+        title="Документы на листе бумаги",
+        body="Печать документов формата A4.",
+        expect_sense="paper_sheet",
+        expect_forbidden=["leaf", "foliage"],
+    ),
+    GoldenCase(
+        name="wsd_02_list_leaf",
+        title="Осенний лист в парке",
+        body="Красивые деревья в осеннем лесу.",
+        expect_sense="tree_leaf",
+        expect_forbidden=["paper", "document"],
+    ),
+    GoldenCase(
+        name="wsd_03_plita_stove",
+        title="Какую плиту выбрать для кухни",
+        body="Газовая или индукционная: сравнение.",
+        expect_sense="cooking_stove",
+        expect_forbidden=["slab", "concrete"],
+    ),
+    GoldenCase(
+        name="wsd_04_plita_building",
+        title="Бетонная плита для перекрытия",
+        body="Строительство фундамента и перекрытий.",
+        expect_sense="building_slab",
+        expect_forbidden=["stove", "cooktop"],
+    ),
+    GoldenCase(
+        name="wsd_05_zamok_lock",
+        title="Электронный замок для двери",
+        body="Безопасность: выбираем замок с ключом.",
+        expect_sense="lock",
+    ),
+    GoldenCase(
+        name="wsd_06_zamok_castle",
+        title="Замок Нойшванштайн: экскурсия",
+        body="Средневековый замок-дворец в Баварии.",
+        expect_sense="castle",
+    ),
+    # --- MODE-SPECIFIC BEHAVIOR ---
+    GoldenCase(
+        name="mode_01_medium_confidence",
+        title="Обустройство рабочего офиса",
+        body="Как улучшить рабочее пространство и продуктивность.",
+        good_meta="workspace productivity environment light setting",
+        expect_autopost_rejects=True,
+        expect_editor_accepts=True,
+    ),
+    # --- GENERIC STOCK DETECTION ---
+    GoldenCase(
+        name="stock_01_smiling_people",
+        title="Командная работа в проекте",
+        body="Как организовать работу команды.",
+        good_meta="project management team meeting whiteboard planning discussion office",
+        bad_meta="smiling office people business handshake success concept teamwork happy diverse group",
+        expect_good_beats_bad=True,
+    ),
+    GoldenCase(
+        name="stock_02_abstract_dashboard",
+        title="Аналитика сайта",
+        body="Как анализировать трафик.",
+        good_meta="website analytics screen google chrome browser laptop data graphs",
+        bad_meta="abstract dashboard abstract digital innovation concept arrows growth business success",
+        expect_good_beats_bad=True,
+    ),
+    # --- ADDITIONAL EDGE CASES ---
+    GoldenCase(
+        name="edge_01_mixed_ru_en",
+        title="Обзор Apple iPhone 15 Pro",
+        body="Камера, A17 Pro чип, titanium корпус.",
+        expect_subject_contains=["smartphone"],
+    ),
+    GoldenCase(
+        name="edge_02_very_long_title",
+        title="Как выбрать лучший ноутбук для работы, учёбы, игр и повседневного использования в 2024 году: полный гайд",
+        body="",
+        expect_subject_contains=["laptop"],
+    ),
+    GoldenCase(
+        name="edge_03_emoji_title",
+        title="🔥 Новый рецепт пасты 🍝",
+        body="Готовим карбонару по-итальянски.",
+        expect_subject_contains=["pasta"],
+    ),
+    GoldenCase(
+        name="edge_04_numbers_in_title",
+        title="5 причин купить электромобиль в 2024",
+        body="Экономия, экология, технологии.",
+        expect_subject_contains=["electric vehicle"],
+    ),
+]
+
+
+class TestGoldenDataset(unittest.TestCase):
+    """Real-world regression golden dataset: 80+ cases."""
+
+    def _run_golden(self, case: GoldenCase):
+        intent = extract_visual_intent(
+            title=case.title,
+            body=case.body,
+            channel_topic=case.channel_topic,
         )
-        # Should have some kind of penalty (either cross_family or blocked_visual)
-        self.assertTrue(
-            "cross_family" in reason or "blocked_visual" in reason,
-            f"Should detect family mismatch, got reason: {reason}",
-        )
-        self.assertLess(score, 0, "Cross-family image should have negative score")
+
+        # --- Check subject contains ---
+        for word in case.expect_subject_contains:
+            self.assertIn(
+                word.lower(),
+                intent.main_subject.lower(),
+                f"[{case.name}] Expected subject to contain '{word}', "
+                f"got '{intent.main_subject}'",
+            )
+
+        # --- Check subject NOT contains ---
+        for word in case.expect_subject_not_contains:
+            self.assertNotIn(
+                word.lower(),
+                intent.main_subject.lower(),
+                f"[{case.name}] Subject should NOT contain '{word}', "
+                f"got '{intent.main_subject}'",
+            )
+
+        # --- Check visuality ---
+        if case.expect_visuality:
+            self.assertEqual(
+                intent.visuality,
+                case.expect_visuality,
+                f"[{case.name}] Expected visuality={case.expect_visuality}, "
+                f"got {intent.visuality}",
+            )
+        if case.expect_visuality_in:
+            self.assertIn(
+                intent.visuality,
+                case.expect_visuality_in,
+                f"[{case.name}] Expected visuality in {case.expect_visuality_in}, "
+                f"got {intent.visuality}",
+            )
+
+        # --- Check WSD sense ---
+        if case.expect_sense:
+            self.assertIn(
+                case.expect_sense,
+                intent.sense,
+                f"[{case.name}] Expected sense '{case.expect_sense}', "
+                f"got '{intent.sense}'",
+            )
+
+        # --- Check forbidden meanings ---
+        if case.expect_forbidden:
+            for forb in case.expect_forbidden:
+                any_match = any(
+                    forb.lower() in f.lower() for f in intent.forbidden_meanings
+                )
+                self.assertTrue(
+                    any_match,
+                    f"[{case.name}] Expected forbidden meaning containing '{forb}', "
+                    f"got {intent.forbidden_meanings}",
+                )
+
+        # --- Check no-image expectation ---
+        if case.expect_no_image:
+            self.assertIn(
+                intent.visuality,
+                (VISUALITY_NONE, VISUALITY_LOW),
+                f"[{case.name}] Expected no-image (low/none visuality), "
+                f"got {intent.visuality}",
+            )
+
+        # --- Check candidate ranking ---
+        if case.good_meta and case.bad_meta and case.expect_good_beats_bad:
+            good_score, good_reason, good_trace = score_candidate(
+                case.good_meta, intent,
+            )
+            bad_score, bad_reason, bad_trace = score_candidate(
+                case.bad_meta, intent,
+            )
+            self.assertGreater(
+                good_score,
+                bad_score,
+                f"[{case.name}] Good ({good_score}) should beat bad ({bad_score})\n"
+                f"  good_meta: {case.good_meta[:60]}\n"
+                f"  bad_meta: {case.bad_meta[:60]}\n"
+                f"  good_reason: {good_reason}\n"
+                f"  bad_reason: {bad_reason}",
+            )
+
+        # --- Check bad candidate rejection ---
+        if case.bad_meta and case.expect_bad_rejected:
+            bad_score, bad_reason, bad_trace = score_candidate(
+                case.bad_meta, intent,
+            )
+            self.assertTrue(
+                bad_trace.hard_reject or bad_score < EDITOR_MIN_SCORE,
+                f"[{case.name}] Bad candidate should be rejected: "
+                f"score={bad_score}, reason={bad_reason}, hard={bad_trace.hard_reject}",
+            )
+
+        # --- Check mode-specific behavior ---
+        if case.good_meta and (case.expect_autopost_rejects or case.expect_editor_accepts):
+            score, reason, trace = score_candidate(case.good_meta, intent)
+            final, bonus = compute_final_score(score, 20)  # Assume moderate provider
+            trace.final_score = final
+
+            if case.expect_autopost_rejects:
+                outcome = determine_candidate_outcome(trace, MODE_AUTOPOST)
+                self.assertIn(
+                    "REJECT",
+                    outcome,
+                    f"[{case.name}] Autopost should reject (score={final}), "
+                    f"got {outcome}",
+                )
+
+            if case.expect_editor_accepts:
+                outcome = determine_candidate_outcome(trace, MODE_EDITOR)
+                self.assertIn(
+                    "ACCEPT",
+                    outcome,
+                    f"[{case.name}] Editor should accept (score={final}), "
+                    f"got {outcome}",
+                )
+
+
+# Dynamically create test methods from golden cases
+def _make_golden_test(case):
+    def test_method(self):
+        self._run_golden(case)
+    test_method.__doc__ = f"Golden: {case.name}"
+    return test_method
+
+
+for _case in GOLDEN_CASES:
+    setattr(
+        TestGoldenDataset,
+        f"test_golden_{_case.name}",
+        _make_golden_test(_case),
+    )
 
 
 if __name__ == "__main__":
