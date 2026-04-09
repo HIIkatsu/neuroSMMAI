@@ -182,8 +182,7 @@ class TestHfDeprecatedProviderSkipped(unittest.TestCase):
                     result = loop.run_until_complete(
                         generate_ai_image("topic", "prompt", "text")
                     )
-                    self.assertTrue(mock_instance.post.called or mock_client.called,
-                                    "Custom model should attempt API call, not skip")
+                    mock_instance.post.assert_called()
         finally:
             loop.close()
 

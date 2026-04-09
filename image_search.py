@@ -1174,7 +1174,7 @@ async def find_image(
         if result.has_image:
             logger.info(
                 "IMAGE_V3_ACCEPT url=%r score=%d source=%s mode=%s query=%r",
-                result.image_url[:80], result.score, result.source_provider,
+                (result.image_url or "")[:80], result.score, result.source_provider,
                 pipeline_mode, (result.matched_query or "")[:60],
             )
             return result.image_url
@@ -1318,14 +1318,14 @@ async def trigger_unsplash_download(download_location: str) -> bool:
 
 # Known CDN/asset URL patterns where the path is a hash/ID, not a semantic filename.
 # These URLs never contain topic keywords and must not be rejected by URL keyword matching.
-_CDN_ASSET_PATTERNS: list[re.Pattern] = [
+_CDN_ASSET_PATTERNS: tuple[re.Pattern, ...] = (
     re.compile(r"pixabay\.com/get/", re.I),
     re.compile(r"images\.pexels\.com/photos/\d+/", re.I),
     re.compile(r"cdn\.pixabay\.com/", re.I),
     re.compile(r"images\.unsplash\.com/photo-", re.I),
     re.compile(r"live\.staticflickr\.com/", re.I),
     re.compile(r"openverse\.org/.*/thumb/", re.I),
-]
+)
 
 
 def _is_cdn_asset_url(url: str) -> bool:
