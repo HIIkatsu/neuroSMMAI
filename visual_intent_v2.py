@@ -170,7 +170,7 @@ _WSD_RULES: dict[str, list[WordSense]] = {
             forbidden_subjects=["faucet", "water tap", "kitchen tap"],
         ),
     ],
-    "мышь": [
+    "мыш": [
         WordSense(
             name="computer_mouse",
             context_keywords=[
@@ -231,6 +231,26 @@ _WSD_RULES: dict[str, list[WordSense]] = {
         ),
     ],
     "замок": [
+        WordSense(
+            name="lock",
+            context_keywords=[
+                "дверн", "ключ", "безопасност", "охран", "сейф",
+                "замочн", "кодов", "электронн",
+            ],
+            english_subject="door lock security key",
+            forbidden_subjects=["castle", "medieval castle", "fortress"],
+        ),
+        WordSense(
+            name="castle",
+            context_keywords=[
+                "средневеков", "истори", "крепост", "башн", "рыцар",
+                "замок-дворец", "дворец", "туризм", "экскурс",
+            ],
+            english_subject="castle medieval fortress architecture",
+            forbidden_subjects=["door lock", "padlock", "security lock"],
+        ),
+    ],
+    "замк": [
         WordSense(
             name="lock",
             context_keywords=[
@@ -323,6 +343,7 @@ _SUBJECT_TRANSLATIONS: list[tuple[str, str]] = [
     # Beauty
     ("маникюр", "manicure nail art"), ("педикюр", "pedicure"),
     ("стриж", "haircut hairstyle"), ("окраш", "hair coloring"),
+    ("кож", "skincare skin face"),
     # Home/building
     ("кухн", "kitchen"), ("ванн", "bathroom"), ("спальн", "bedroom"),
     ("гостин", "living room"), ("балкон", "balcony"),
@@ -340,14 +361,22 @@ _SUBJECT_TRANSLATIONS: list[tuple[str, str]] = [
     # Education
     ("школ", "school"), ("университет", "university"),
     ("библиотек", "library"), ("книг", "books"),
+    # Sport
+    ("спорт", "sport athletics"), ("футбол", "football soccer"),
+    ("баскетбол", "basketball"), ("теннис", "tennis"),
+    ("хоккей", "hockey"), ("бокс", "boxing"),
+    ("чемпионат", "championship competition sport"),
     # Other
-    ("свадьб", "wedding"), ("детск", "children kids"),
+    ("свадьб", "wedding ceremony"), ("детск", "children kids"),
+    ("ребен", "children kids"), ("дет", "children kids"),
     ("животн", "animals"), ("собак", "dog"), ("кошк", "cat"),
     ("путешеств", "travel"), ("туризм", "tourism"),
     ("недвижимост", "real estate"), ("ипотек", "mortgage"),
     ("спортзал", "gym fitness"), ("фитнес", "fitness workout"),
     ("телефон", "phone smartphone"), ("iphone", "iphone smartphone"),
     ("galaxy", "galaxy smartphone"), ("samsung", "samsung smartphone"),
+    ("учител", "teacher education"), ("преподав", "teacher lecturer"),
+    ("педагог", "teacher educator"),
 ]
 
 
