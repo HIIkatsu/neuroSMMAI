@@ -177,6 +177,8 @@ def _record_selection(
     visual_class = detect_meta_family(cs.meta_snippet)
     # Scene class is the coarse visual bucket for scene dedup
     scene_class = intent.scene or visual_class
+    # Coarse pattern combines visual class + subject for pattern-level dedup
+    coarse_pattern = f"{visual_class}_{intent.subject or 'generic'}".lower().replace(" ", "_")
     history.record(
         url=cs.url,
         content_hash=url_content_hash(cs.url),
@@ -184,6 +186,7 @@ def _record_selection(
         subject_bucket=intent.subject or "",
         domain=domain,
         scene_class=scene_class,
+        coarse_pattern=coarse_pattern,
     )
 
 

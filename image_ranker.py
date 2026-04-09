@@ -142,6 +142,34 @@ _SUBJECT_SCENE_RULES: dict[str, dict[str, list[str]]] = {
         "reject": ["hiking", "nature", "lifestyle", "portrait", "fashion",
                     "beach", "scenic"],
     },
+    "kitchen": {
+        "accept": ["kitchen", "cabinet", "countertop", "facade", "kitchen set",
+                    "kitchen interior", "installed kitchen", "measuring", "install",
+                    "kitchen design", "modern kitchen", "kitchen furniture",
+                    "kitchen renovation", "cupboard", "sink", "faucet",
+                    "kitchen appliance", "kitchen island"],
+        "reject": ["children eating", "family breakfast", "family dinner",
+                    "kids at table", "children at table", "family meal",
+                    "birthday party", "baby eating", "toddler", "school lunch",
+                    "playground", "daycare"],
+    },
+    "furniture": {
+        "accept": ["furniture", "cabinet", "wardrobe", "shelf", "desk",
+                    "interior", "room design", "wood", "crafted", "assembled",
+                    "showroom", "workshop", "upholstery"],
+        "reject": ["children eating", "family breakfast", "kids playing",
+                    "playground", "birthday", "pet", "animal"],
+    },
+    "chinese car": {
+        "accept": ["modern car", "new car", "sedan", "suv", "crossover",
+                    "dealership", "showroom", "dashboard", "car interior",
+                    "test drive", "chinese automobile", "chinese brand",
+                    "geely", "chery", "haval", "byd", "changan", "great wall"],
+        "deprioritize": ["retro car", "vintage car", "classic car", "antique car",
+                         "old car", "postcard car", "beach car", "decorative car",
+                         "car photography art", "rustic car"],
+        "reject": ["bicycle", "motorcycle", "horse cart", "train", "airplane"],
+    },
 }
 
 # Scene mismatch rules: if post-family + subject indicate one context,
@@ -176,6 +204,25 @@ _SCENE_MISMATCH_RULES: list[tuple[list[str], list[str], int]] = [
         ["news", "report", "fact", "statistics", "data", "study", "research"],
         ["abstract concept", "idea concept", "motivation concept",
          "creativity concept", "innovation concept"],
+        P_SCENE_MISMATCH,
+    ),
+    # Children/family when topic is furniture/kitchen/interior
+    (
+        ["kitchen", "furniture", "cabinet", "countertop", "interior",
+         "facade", "wardrobe", "shelf", "renovation"],
+        ["children eating", "family breakfast", "family dinner",
+         "kids at table", "children at table", "family meal",
+         "birthday party", "baby eating", "toddler", "school lunch",
+         "playground", "daycare", "kids playing"],
+        P_SCENE_MISMATCH,
+    ),
+    # Retro/vintage when topic is modern/chinese cars
+    (
+        ["chinese car", "new car", "modern car", "crossover", "suv",
+         "electric car", "chinese brand", "chinese automobile"],
+        ["retro car", "vintage car", "classic car", "antique car",
+         "old car", "postcard car", "rustic car", "decorative car",
+         "car photography art"],
         P_SCENE_MISMATCH,
     ),
 ]
@@ -419,6 +466,11 @@ def _check_subject_scene_rules(
             if term in meta_lower:
                 total_adjustment += P_SCENE_MISMATCH
                 reject_hits += 1
+        # Check deprioritize terms (softer than reject, but still penalised)
+        for term in rules.get("deprioritize", ()):
+            if term in meta_lower:
+                total_adjustment += P_SCENE_MISMATCH // 2  # Half penalty
+                weak_accept_hits += 1
         # Check weak_accept (reduce score for ingredients-only matches)
         for term in rules.get("weak_accept", ()):
             if term in meta_lower:
@@ -633,6 +685,10 @@ def score_candidate(
         # Family-only match: reduce score significantly for specific subjects
         if intent.subject:
             score = min(score, MAX_SCORE_WITHOUT_AFFIRMATION + 5)
+            # Stronger penalty: if exact candidates exist for this subject,
+            # broad family should not win
+            if subj_reject_hits > 0 or scene_mis_hits > 0:
+                score = min(score, MAX_SCORE_WITHOUT_AFFIRMATION)
     if fb_level == "weak":
         score = min(score, MAX_SCORE_WITHOUT_AFFIRMATION)
 
@@ -738,6 +794,8 @@ def rank_candidates(
         visual_class = detect_meta_family(cs.meta_snippet)
         # Compute scene_class from metadata for dedup
         scene_class = visual_class
+        # Coarse pattern for visual pattern-level dedup
+        coarse_pattern = f"{visual_class}_{intent.subject or 'generic'}".lower().replace(" ", "_")
         cs.repeat_penalty = history.compute_penalty(
             url=cs.url,
             content_hash=url_content_hash(cs.url),
@@ -745,6 +803,7 @@ def rank_candidates(
             subject_bucket=intent.subject or "",
             domain=domain,
             scene_class=scene_class,
+            coarse_pattern=coarse_pattern,
         )
         cs.final_score += cs.repeat_penalty
 
@@ -764,6 +823,32 @@ def rank_candidates(
                 reasons.append(f"family_term={cs.family_term_hits}")
             reasons.append(f"level={cs.fallback_level}")
             cs.final_accept_reason = "; ".join(reasons)
+
+            # Production accept log
+            logger.info(
+                "IMAGE_ACCEPT_REASON url=%s score=%d reason=%s",
+                cs.url[:80], cs.final_score, cs.final_accept_reason,
+            )
+            logger.info(
+                "IMAGE_SUBJECT=%s IMAGE_SCENE=%s IMAGE_FALLBACK_LEVEL=%s",
+                (intent.subject or "")[:40], (intent.scene or "")[:40], cs.fallback_level,
+            )
+        else:
+            # Production reject log
+            logger.info(
+                "IMAGE_REJECT_REASON url=%s score=%d reason=%s outcome=%s",
+                cs.url[:80], cs.final_score, cs.reject_reason or cs.hard_reject, cs.outcome,
+            )
+            if cs.scene_mismatch_hits > 0:
+                logger.info(
+                    "IMAGE_SCENE_MISMATCH url=%s hits=%d",
+                    cs.url[:80], cs.scene_mismatch_hits,
+                )
+            if cs.repeat_penalty < 0:
+                logger.info(
+                    "IMAGE_REPEAT_PENALTY url=%s penalty=%d",
+                    cs.url[:80], cs.repeat_penalty,
+                )
 
     # Sort by final score descending
     candidates.sort(key=lambda c: c.final_score, reverse=True)

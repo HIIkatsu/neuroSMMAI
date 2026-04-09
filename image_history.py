@@ -37,6 +37,7 @@ P_REPEAT_SUBJECT_BUCKET = -12   # Same subject bucket recently
 P_REPEAT_DOMAIN = -10           # Same provider domain recently
 P_REPEAT_DOMAIN_FREQUENT = -20  # Same domain used very frequently
 P_REPEAT_SCENE_CLASS = -15      # Same scene class recently
+P_REPEAT_COARSE_PATTERN = -10   # Same coarse visual pattern (e.g., "food_plated", "car_exterior")
 
 
 # ---------------------------------------------------------------------------
@@ -60,6 +61,8 @@ class ImageHistory:
     - Visual classes (e.g., "food", "tech" — penalizes same type)
     - Subject buckets (e.g., "coffee" — penalizes same subject)
     - Provider domains (penalizes over-reliance on one source)
+    - Scene classes (e.g., "kitchen cooking" — penalizes same scene)
+    - Coarse patterns (e.g., "food_plated" — penalizes same visual pattern)
     """
 
     def __init__(
@@ -74,6 +77,7 @@ class ImageHistory:
         self.subject_buckets: deque[_HistoryEntry] = deque(maxlen=maxlen)
         self.domains: deque[_HistoryEntry] = deque(maxlen=maxlen)
         self.scene_classes: deque[_HistoryEntry] = deque(maxlen=maxlen)
+        self.coarse_patterns: deque[_HistoryEntry] = deque(maxlen=maxlen)
 
     # -- Internal helpers --
 
@@ -100,6 +104,7 @@ class ImageHistory:
         subject_bucket: str = "",
         domain: str = "",
         scene_class: str = "",
+        coarse_pattern: str = "",
     ) -> int:
         """Compute total anti-repeat penalty for a candidate.
 
@@ -141,6 +146,12 @@ class ImageHistory:
             if sc_count > 0:
                 penalty += P_REPEAT_SCENE_CLASS * min(sc_count, 2)
 
+        cp = (coarse_pattern or "").strip().lower()
+        if cp:
+            cp_count = self._count(self.coarse_patterns, cp)
+            if cp_count > 0:
+                penalty += P_REPEAT_COARSE_PATTERN * min(cp_count, 2)
+
         return penalty
 
     def record(
@@ -152,6 +163,7 @@ class ImageHistory:
         subject_bucket: str = "",
         domain: str = "",
         scene_class: str = "",
+        coarse_pattern: str = "",
     ) -> None:
         """Record a selected image into history."""
         self._append(self.urls, (url or "").strip().lower())
@@ -160,12 +172,14 @@ class ImageHistory:
         self._append(self.subject_buckets, (subject_bucket or "").strip().lower())
         self._append(self.domains, (domain or "").strip().lower())
         self._append(self.scene_classes, (scene_class or "").strip().lower())
+        self._append(self.coarse_patterns, (coarse_pattern or "").strip().lower())
 
     def prune(self) -> None:
         """Remove expired entries from all queues."""
         now = _time.monotonic()
         for q in (self.urls, self.hashes, self.visual_classes,
-                  self.subject_buckets, self.domains, self.scene_classes):
+                  self.subject_buckets, self.domains, self.scene_classes,
+                  self.coarse_patterns):
             while q and (now - q[0].ts) >= self._ttl:
                 q.popleft()
 
