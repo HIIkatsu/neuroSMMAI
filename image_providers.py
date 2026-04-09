@@ -124,9 +124,12 @@ def _image_fingerprint(url: str) -> str:
     m = re.search(r"/photos/(\d+)/", raw)
     if m and "pexels" in raw:
         return f"pexels:{m.group(1)}"
-    m = re.search(r"pixabay\.com[^?#]*[_/](\d{6,})", raw)
-    if m:
-        return f"pixabay:{m.group(1)}"
+    if "pixabay" in raw:
+        # Extract numeric ID from pixabay URLs without backtracking-prone regex
+        # Typical URL: pixabay.com/photos/coffee-cup-1234567/
+        m = re.search(r"[_/](\d{6,})", raw)
+        if m:
+            return f"pixabay:{m.group(1)}"
     return raw.split("?", 1)[0]
 
 
