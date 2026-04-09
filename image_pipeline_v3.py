@@ -175,12 +175,15 @@ def _record_selection(
     """Record accepted image into anti-repeat history."""
     domain = extract_domain(cs.url)
     visual_class = detect_meta_family(cs.meta_snippet)
+    # Scene class is the coarse visual bucket for scene dedup
+    scene_class = intent.scene or visual_class
     history.record(
         url=cs.url,
         content_hash=url_content_hash(cs.url),
         visual_class=visual_class,
         subject_bucket=intent.subject or "",
         domain=domain,
+        scene_class=scene_class,
     )
 
 

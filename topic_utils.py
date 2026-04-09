@@ -298,16 +298,21 @@ TOPIC_FAMILY_TERMS: dict[str, dict] = {
         ),
     },
     "cars": {
-        "ru": ["машин", "авто", "автомоб", "электромоб", "тесла", "двигател"],
-        "en": ["car", "cars", "automotive", "vehicle", "dashboard", "interior"],
+        "ru": ["машин", "авто", "автомоб", "электромоб", "тесла", "двигател",
+               "самокат", "тормоз", "бензин", "дизел", "колес", "шин"],
+        "en": ["car", "cars", "automotive", "vehicle", "dashboard", "interior",
+               "scooter", "brake", "fuel", "engine", "tire", "wheel"],
         "image_queries": [
             "cars automotive exterior editorial photo",
             "cars automotive dashboard interior editorial photo",
             "electric cars automotive industry editorial",
             "modern car interior steering wheel dashboard",
         ],
-        "allowed_visual_classes": ["car", "automotive", "vehicle", "road", "transport"],
-        "blocked_visual_classes": ["fashion", "food", "tech circuit", "medical"],
+        "allowed_visual_classes": ["car", "automotive", "vehicle", "road", "transport",
+                                   "scooter", "wheel", "tire", "brake", "mechanic",
+                                   "fuel", "engine", "repair"],
+        "blocked_visual_classes": ["fashion", "food", "tech circuit", "medical",
+                                   "hiking", "backpack", "forest trail", "camping"],
         "news_angle": (
             "Раскрой эту новость через призму автомобильного рынка и водителей. "
             "Что меняется для покупателей, автовладельцев или автоиндустрии?"

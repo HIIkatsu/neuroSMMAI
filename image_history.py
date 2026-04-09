@@ -36,6 +36,7 @@ P_REPEAT_VISUAL_CLASS = -18     # Same visual class recently
 P_REPEAT_SUBJECT_BUCKET = -12   # Same subject bucket recently
 P_REPEAT_DOMAIN = -10           # Same provider domain recently
 P_REPEAT_DOMAIN_FREQUENT = -20  # Same domain used very frequently
+P_REPEAT_SCENE_CLASS = -15      # Same scene class recently
 
 
 # ---------------------------------------------------------------------------
@@ -72,6 +73,7 @@ class ImageHistory:
         self.visual_classes: deque[_HistoryEntry] = deque(maxlen=maxlen)
         self.subject_buckets: deque[_HistoryEntry] = deque(maxlen=maxlen)
         self.domains: deque[_HistoryEntry] = deque(maxlen=maxlen)
+        self.scene_classes: deque[_HistoryEntry] = deque(maxlen=maxlen)
 
     # -- Internal helpers --
 
@@ -97,6 +99,7 @@ class ImageHistory:
         visual_class: str = "",
         subject_bucket: str = "",
         domain: str = "",
+        scene_class: str = "",
     ) -> int:
         """Compute total anti-repeat penalty for a candidate.
 
@@ -132,6 +135,12 @@ class ImageHistory:
             elif dom_count >= 1:
                 penalty += P_REPEAT_DOMAIN
 
+        sc = (scene_class or "").strip().lower()
+        if sc:
+            sc_count = self._count(self.scene_classes, sc)
+            if sc_count > 0:
+                penalty += P_REPEAT_SCENE_CLASS * min(sc_count, 2)
+
         return penalty
 
     def record(
@@ -142,6 +151,7 @@ class ImageHistory:
         visual_class: str = "",
         subject_bucket: str = "",
         domain: str = "",
+        scene_class: str = "",
     ) -> None:
         """Record a selected image into history."""
         self._append(self.urls, (url or "").strip().lower())
@@ -149,12 +159,13 @@ class ImageHistory:
         self._append(self.visual_classes, (visual_class or "").strip().lower())
         self._append(self.subject_buckets, (subject_bucket or "").strip().lower())
         self._append(self.domains, (domain or "").strip().lower())
+        self._append(self.scene_classes, (scene_class or "").strip().lower())
 
     def prune(self) -> None:
         """Remove expired entries from all queues."""
         now = _time.monotonic()
         for q in (self.urls, self.hashes, self.visual_classes,
-                  self.subject_buckets, self.domains):
+                  self.subject_buckets, self.domains, self.scene_classes):
             while q and (now - q[0].ts) >= self._ttl:
                 q.popleft()
 

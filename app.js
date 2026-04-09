@@ -980,14 +980,26 @@ function handleMediaLoadError(img) {
   } else {
     img.dataset.retried = '1';
     // On first retry, rebuild the auth URL in case init data was not available
-    // at the time of original rendering. base is always the URL without query params.
-    const base = img.src.split('?')[0];
-    const hadAuth = img.src.includes('tgWebAppData=');
+    // at the time of original rendering.
+    const fullSrc = img.src || '';
+    const hadAuth = fullSrc.includes('tgWebAppData=');
     const initData = !hadAuth ? extractTelegramInitData() : null;
-    if (initData && base.includes('/api/')) {
+    // Check if this is a local media path that needs auth (not just /api/)
+    const needsAuth = fullSrc.includes('/api/') || fullSrc.includes('/uploads/') || fullSrc.includes('/generated-images/');
+    if (initData && needsAuth) {
+      // Strip query params and rebuild with auth + cache bust
+      const base = fullSrc.split('?')[0];
       img.src = `${base}?tgWebAppData=${encodeURIComponent(initData)}&t=${Date.now()}`;
+    } else if (needsAuth && hadAuth) {
+      // Already has auth, just cache-bust
+      const base = fullSrc.split('?')[0];
+      const existingAuth = fullSrc.match(/tgWebAppData=([^&]*)/);
+      const authParam = existingAuth ? `tgWebAppData=${existingAuth[1]}` : '';
+      img.src = base + '?' + (authParam ? authParam + '&' : '') + 't=' + Date.now();
     } else {
-      img.src = base + '?t=' + Date.now();
+      // External URL: preserve original query params, only append cache bust
+      const separator = fullSrc.includes('?') ? '&' : '?';
+      img.src = fullSrc + separator + 't=' + Date.now();
     }
   }
 }
