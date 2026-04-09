@@ -29,7 +29,10 @@ from __future__ import annotations
 
 import logging
 import re
+import time as _time
+from collections import deque
 from dataclasses import dataclass, field
+from urllib.parse import urlparse as _urlparse
 
 from visual_intent import (
     VisualIntent,
@@ -115,8 +118,6 @@ MODE_EDITOR = "editor"
 # ---------------------------------------------------------------------------
 # Image diversity / anti-repeat memory (B)
 # ---------------------------------------------------------------------------
-import time as _time
-from collections import deque
 
 # Maximum items to remember
 _DIVERSITY_CACHE_SIZE = 50
@@ -863,7 +864,6 @@ async def run_image_pipeline(
         url_domain = ""
         if c.url:
             try:
-                from urllib.parse import urlparse as _urlparse
                 url_domain = _urlparse(c.url).netloc
             except Exception:
                 pass
@@ -999,7 +999,6 @@ def _record_selection(trace: CandidateTrace, intent: VisualIntent) -> None:
     url_domain = ""
     if trace.url:
         try:
-            from urllib.parse import urlparse as _urlparse
             url_domain = _urlparse(trace.url).netloc
         except Exception:
             pass

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -258,7 +259,6 @@ def build_generation_spec(
     # --- Opener dedup ---
     recent_openers = recent_opener_types or []
     # Forbid archetypes used in last 3 posts
-    from collections import Counter
     archetype_counts = Counter(recent_openers[-6:])
     forbidden_openers = [a for a, c in archetype_counts.items() if c >= 2]
 
@@ -755,7 +755,6 @@ def compute_archetype_balance(
 
     Returns dict mapping archetype -> fraction (0.0-1.0).
     """
-    from collections import Counter
     recent = recent_archetypes[-window:] if len(recent_archetypes) >= window else recent_archetypes
     if not recent:
         return {}
@@ -876,7 +875,6 @@ def compute_opener_penalty(
     # 2. Check if the same bucket was used recently
     if recent_openers:
         current_bucket = classify_opener_bucket(text)
-        from collections import Counter
         recent_buckets = [classify_opener_bucket(o) for o in recent_openers[-window:]]
         bucket_counts = Counter(recent_buckets)
         count = bucket_counts.get(current_bucket, 0)

@@ -648,8 +648,6 @@ async def fetch_news_candidates(owner_id: int = 0, limit: int = 5, *, channel_ta
     )
     return result
 
-    return candidates[:limit]
-
 
 async def fetch_latest_news(owner_id: int = 0, *, channel_target: str = "", channel_profile_id: int | None = None) -> dict | None:
     items = await fetch_news_candidates(owner_id=owner_id, limit=1, channel_target=channel_target, channel_profile_id=channel_profile_id)
