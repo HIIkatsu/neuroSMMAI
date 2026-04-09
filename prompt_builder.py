@@ -162,15 +162,28 @@ def _build_must_not_force_block(spec: GenerationSpec) -> str:
 
 
 def _build_opener_dedup_block(spec: GenerationSpec) -> str:
-    """Opener novelty instructions."""
-    if not spec.forbidden_opener_types:
-        return ""
-    forbidden = ", ".join(spec.forbidden_opener_types)
-    return (
-        f"НАЧАЛО ТЕКСТА — РАЗНООБРАЗИЕ:\n"
-        f"- Недавно использованные типы начала (ИЗБЕГАЙ): {forbidden}\n"
-        f"- Выбери другой тип: один из [{', '.join(a for a in OPENING_ARCHETYPES if a not in spec.forbidden_opener_types)}]"
+    """Opener novelty instructions with diversity rotation guidance."""
+    parts = []
+
+    if spec.forbidden_opener_types:
+        forbidden = ", ".join(spec.forbidden_opener_types)
+        available = [a for a in OPENING_ARCHETYPES if a not in spec.forbidden_opener_types]
+        parts.append(
+            f"НАЧАЛО ТЕКСТА — РАЗНООБРАЗИЕ:\n"
+            f"- Недавно использованные типы начала (ИЗБЕГАЙ): {forbidden}\n"
+            f"- Выбери другой тип: один из [{', '.join(available)}]"
+        )
+
+    # Always add anti-crutch pattern guidance
+    parts.append(
+        "ЗАПРЕЩЁННЫЕ ШАБЛОНЫ НАЧАЛА (клише, которые повторяются слишком часто):\n"
+        "- НЕ начинай с: «клиент пришёл...», «ко мне обратились...», «в моём сервисе...»\n"
+        "- НЕ начинай с: «машина не заводится...», «сразу думаешь...», «из практики...»\n"
+        "- Если тема НЕ требует личного кейса — используй другой вход:\n"
+        "  факт/тренд, наблюдение, контраст, вопрос, цифра/статистика, новостной вывод"
     )
+
+    return "\n\n".join(parts)
 
 
 # ---------------------------------------------------------------------------
