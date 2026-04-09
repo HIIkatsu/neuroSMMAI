@@ -319,6 +319,7 @@ _NONE_IMAGEABILITY_SIGNALS = [
 # ---------------------------------------------------------------------------
 _SUBJECT_TRANSLATIONS: list[tuple[str, str]] = [
     # Food
+    ("карбонар", "carbonara pasta spaghetti"),
     ("кофе", "coffee"), ("чай", "tea"), ("торт", "cake"), ("пицц", "pizza"),
     ("суш", "sushi"), ("бургер", "burger"), ("салат", "salad"), ("паст", "pasta"),
     ("рецепт", "recipe food dish"),
@@ -327,6 +328,15 @@ _SUBJECT_TRANSLATIONS: list[tuple[str, str]] = [
     ("десерт", "dessert"), ("мороженое", "ice cream"),
     ("гриб", "mushrooms"), ("ягод", "berries"), ("мясо", "meat"),
     ("рыб", "fish seafood"), ("овощ", "vegetables"), ("фрукт", "fruits"),
+    # Transport / micro-mobility (BEFORE vehicles to catch specific terms)
+    ("самокат", "scooter electric scooter kick scooter"),
+    ("велосипед", "bicycle bike cycling"),
+    ("тормоз", "brake braking"),
+    ("колодк", "brake pad"),
+    ("колес", "wheel tire"),
+    ("бензин", "gasoline fuel petrol"),
+    ("дизел", "diesel fuel"),
+    ("двигател", "engine motor"),
     # Vehicles
     ("автомобил", "automobile car"), ("авто ", "car automotive"),
     ("грузовик", "truck"), ("мотоцикл", "motorcycle"),
@@ -350,7 +360,10 @@ _SUBJECT_TRANSLATIONS: list[tuple[str, str]] = [
     ("ремонт", "repair renovation"), ("строительств", "construction"),
     # Nature
     ("сад", "garden"), ("огород", "vegetable garden"),
-    ("парк", "park"), ("лес", "forest"), ("озер", "lake"),
+    ("парк", "park"),
+    (" лес ", "forest"), (" лесу", "forest"), (" лесн", "forest"),
+    (" леса", "forest"), (" лесом", "forest"), (" лесе", "forest"),
+    ("озер", "lake"),
     # Business
     ("офис", "office"), ("склад", "warehouse"), ("магазин", "shop store"),
     ("ресторан", "restaurant dining"),

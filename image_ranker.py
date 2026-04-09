@@ -74,6 +74,113 @@ TOP_N_AUTOPOST = 8
 TOP_N_EDITOR = 10
 
 
+# Scene mismatch penalty
+P_SCENE_MISMATCH = -22          # Per scene mismatch hit
+P_SCENE_MISMATCH_STRONG = -30   # Strong mismatch (completely wrong context)
+
+
+# ---------------------------------------------------------------------------
+# Subject-specific accept/reject rules (scene-level precision)
+# ---------------------------------------------------------------------------
+_SUBJECT_SCENE_RULES: dict[str, dict[str, list[str]]] = {
+    "scooter": {
+        "accept": ["scooter", "kick scooter", "electric scooter", "wheel", "tire",
+                    "brake", "repair", "urban", "riding", "rider", "sidewalk",
+                    "handlebar", "deck", "folding"],
+        "reject": ["hiking", "backpack", "forest", "mountain trail", "camping",
+                    "trekking", "wilderness", "hiker", "nature walk"],
+    },
+    "car": {
+        "accept": ["car", "engine", "fuel", "gasoline", "petrol", "diesel",
+                    "dashboard", "mechanic", "garage", "traffic", "highway",
+                    "motor", "automotive", "vehicle", "sedan", "tire", "brake",
+                    "transmission", "exhaust", "oil change", "repair shop"],
+        "reject": ["beach postcard", "seaside retro", "vintage postcard",
+                    "tropical car", "sunset car scenic"],
+    },
+    "carbonara": {
+        "accept": ["carbonara", "spaghetti carbonara", "pasta carbonara",
+                    "plated pasta", "creamy pasta", "guanciale", "pecorino",
+                    "italian pasta dish"],
+        "weak_accept": ["eggs", "flour", "ingredient", "raw pasta"],
+        "reject": ["bakery", "deli", "food market", "grocery store",
+                    "food shop", "supermarket", "food stall", "market stand"],
+    },
+    "pasta": {
+        "accept": ["pasta", "spaghetti", "penne", "fettuccine", "plated dish",
+                    "italian food", "sauce", "bolognese", "alfredo"],
+        "weak_accept": ["flour", "dough", "ingredient"],
+        "reject": ["bakery shop", "grocery", "food market", "supermarket"],
+    },
+    "fuel": {
+        "accept": ["fuel", "gasoline", "petrol", "gas station", "pump",
+                    "diesel", "engine", "car", "vehicle", "tank"],
+        "reject": ["beach", "seaside", "ocean", "scenic road trip",
+                    "vintage car postcard"],
+    },
+    "engine": {
+        "accept": ["engine", "motor", "cylinder", "piston", "mechanical",
+                    "car engine", "automotive", "repair", "mechanic", "garage",
+                    "under hood", "oil", "spark plug"],
+        "reject": ["beach", "scenic", "landscape", "fashion", "portrait",
+                    "lifestyle outdoor", "hiking"],
+    },
+    "brake": {
+        "accept": ["brake", "braking", "brake pad", "disc brake", "caliper",
+                    "brake fluid", "repair", "mechanic", "wheel", "rotor"],
+        "reject": ["hiking", "forest", "nature", "backpack", "lifestyle",
+                    "portrait", "fashion"],
+    },
+    "massage": {
+        "accept": ["massage", "spa", "therapy", "hands", "bodywork",
+                    "relaxation", "wellness", "treatment table", "oil massage"],
+        "reject": ["tech", "code", "server", "gaming", "car", "food"],
+    },
+    "repair": {
+        "accept": ["repair", "tool", "wrench", "screwdriver", "workshop",
+                    "mechanic", "fixing", "maintenance", "broken", "service"],
+        "reject": ["hiking", "nature", "lifestyle", "portrait", "fashion",
+                    "beach", "scenic"],
+    },
+}
+
+# Scene mismatch rules: if post-family + subject indicate one context,
+# penalise images from a completely different scene
+_SCENE_MISMATCH_RULES: list[tuple[list[str], list[str], int]] = [
+    # (post_signals, image_reject_signals, penalty)
+    # Person/lifestyle when post is about mechanics/object/repair
+    (
+        ["repair", "engine", "brake", "mechanic", "tool", "fix", "maintenance"],
+        ["person outdoor", "lifestyle", "girl", "boy", "woman walking",
+         "man walking", "portrait outdoor", "casual person", "people park"],
+        P_SCENE_MISMATCH,
+    ),
+    # Nature/hiking when topic is urban transport
+    (
+        ["scooter", "car", "vehicle", "transport", "traffic", "urban",
+         "driving", "fuel", "gasoline", "highway"],
+        ["hiking", "forest trail", "mountain", "camping", "backpack",
+         "trekking", "wilderness", "nature walk", "countryside"],
+        P_SCENE_MISMATCH_STRONG,
+    ),
+    # Shop/market when topic is specific dish
+    (
+        ["carbonara", "pasta dish", "spaghetti", "plated", "bolognese",
+         "risotto", "lasagna", "ramen", "pho", "sushi plate"],
+        ["food market", "grocery", "supermarket", "food shop", "deli counter",
+         "market stall", "bakery shop", "food stand"],
+        P_SCENE_MISMATCH,
+    ),
+    # Concept/abstract when post is factual/news
+    (
+        ["news", "report", "fact", "statistics", "data", "study", "research"],
+        ["abstract concept", "idea concept", "motivation concept",
+         "creativity concept", "innovation concept"],
+        P_SCENE_MISMATCH,
+    ),
+]
+
+
 # ---------------------------------------------------------------------------
 # Generic filler patterns
 # ---------------------------------------------------------------------------
@@ -193,9 +300,13 @@ class CandidateScore:
     allowed_visual_hits: int = 0
     generic_stock_hits: int = 0
     generic_filler_hits: int = 0
+    scene_mismatch_hits: int = 0
+    subject_scene_reject_hits: int = 0
 
     # Aggregate scores
     post_centric_score: int = 0
+    exact_subject_score: int = 0
+    scene_match_score: int = 0
     provider_bonus: int = 0
     repeat_penalty: int = 0
     final_score: int = 0
@@ -204,6 +315,8 @@ class CandidateScore:
     hard_reject: str = ""
     reject_reason: str = ""
     outcome: str = ""
+    fallback_level: str = ""     # "exact", "near", "family", "weak"
+    final_accept_reason: str = ""
 
     def as_log_dict(self) -> dict:
         """Compact dict for structured logging."""
@@ -217,6 +330,10 @@ class CandidateScore:
             "qtok": self.query_token_hits,
             "stock": self.generic_stock_hits,
             "filler": self.generic_filler_hits,
+            "scene_mis": self.scene_mismatch_hits,
+            "subj_rej": self.subject_scene_reject_hits,
+            "exact_subj": self.exact_subject_score,
+            "scene_sc": self.scene_match_score,
             "pc": self.post_centric_score,
             "bonus": self.provider_bonus,
             "repeat": self.repeat_penalty,
@@ -224,6 +341,8 @@ class CandidateScore:
             "hard": self.hard_reject[:40] if self.hard_reject else "",
             "rej": self.reject_reason[:40] if self.reject_reason else "",
             "out": self.outcome,
+            "fb_level": self.fallback_level,
+            "accept_reason": self.final_accept_reason[:40] if self.final_accept_reason else "",
         }
 
 
@@ -273,6 +392,101 @@ def compute_generic_stock_penalty(
 
 
 # ---------------------------------------------------------------------------
+# Subject-specific hard filter check
+# ---------------------------------------------------------------------------
+def _check_subject_scene_rules(
+    meta_text: str,
+    intent: VisualIntentV2,
+) -> tuple[int, int, int]:
+    """Check subject-specific accept/reject rules.
+
+    Returns (score_adjustment, reject_hits, weak_accept_hits).
+    """
+    if not intent.subject or not meta_text:
+        return 0, 0, 0
+
+    subject_lower = intent.subject.lower()
+    meta_lower = meta_text.lower()
+    total_adjustment = 0
+    reject_hits = 0
+    weak_accept_hits = 0
+
+    for subj_key, rules in _SUBJECT_SCENE_RULES.items():
+        if subj_key not in subject_lower:
+            continue
+        # Check reject terms
+        for term in rules.get("reject", ()):
+            if term in meta_lower:
+                total_adjustment += P_SCENE_MISMATCH
+                reject_hits += 1
+        # Check weak_accept (reduce score for ingredients-only matches)
+        for term in rules.get("weak_accept", ()):
+            if term in meta_lower:
+                weak_accept_hits += 1
+        # Check accept terms (bonus for exact subject match)
+        accept_hits = sum(1 for t in rules.get("accept", ()) if t in meta_lower)
+        if accept_hits > 0:
+            total_adjustment += accept_hits * 3  # Small bonus for subject-rule match
+
+    return total_adjustment, reject_hits, weak_accept_hits
+
+
+# ---------------------------------------------------------------------------
+# Scene mismatch penalty check
+# ---------------------------------------------------------------------------
+def _check_scene_mismatch(
+    meta_text: str,
+    intent: VisualIntentV2,
+) -> tuple[int, int]:
+    """Check for scene mismatch using global rules.
+
+    Returns (penalty, hit_count).
+    """
+    if not meta_text:
+        return 0, 0
+    meta_lower = meta_text.lower()
+    subject_lower = (intent.subject or "").lower()
+    scene_lower = (intent.scene or "").lower()
+    combined = f"{subject_lower} {scene_lower}"
+
+    total_penalty = 0
+    total_hits = 0
+    for post_signals, image_reject_signals, penalty in _SCENE_MISMATCH_RULES:
+        # Check if any post signal matches the intent
+        post_match = any(sig in combined for sig in post_signals)
+        if not post_match:
+            continue
+        # Check if any reject signal matches the image metadata
+        for rej_sig in image_reject_signals:
+            if rej_sig in meta_lower:
+                total_penalty += penalty
+                total_hits += 1
+    return total_penalty, total_hits
+
+
+# ---------------------------------------------------------------------------
+# Determine fallback level for scoring hierarchy
+# ---------------------------------------------------------------------------
+def _determine_fallback_level(
+    subject_hits: int,
+    scene_hits: int,
+    family_term_hits: int,
+    allowed_visual_hits: int,
+) -> str:
+    """Classify match quality into hierarchical level.
+
+    Returns one of: "exact", "near", "family", "weak".
+    """
+    if subject_hits >= 2 and scene_hits >= 1:
+        return "exact"
+    if subject_hits >= 1:
+        return "near"
+    if family_term_hits >= 2 or allowed_visual_hits >= 1:
+        return "family"
+    return "weak"
+
+
+# ---------------------------------------------------------------------------
 # Score a single candidate (post-centric, no provider influence)
 # ---------------------------------------------------------------------------
 def score_candidate(
@@ -314,6 +528,7 @@ def score_candidate(
         if subject_hits >= 3:
             score += W_SUBJECT_STRONG
     cs.subject_match = subject_hits
+    cs.exact_subject_score = subject_hits * W_SUBJECT
 
     # --- 2. Sense match ---
     sense_hits = 0
@@ -330,6 +545,7 @@ def score_candidate(
         scene_hits = sum(1 for w in scene_words if w in text)
         score += scene_hits * W_SCENE
     cs.scene_match = scene_hits
+    cs.scene_match_score = scene_hits * W_SCENE
 
     # --- 4. Query token match ---
     query_token_hits = 0
@@ -391,7 +607,42 @@ def score_candidate(
         if not reject_reason:
             reject_reason = "generic_filler"
 
-    # --- 11. Positive affirmation requirement ---
+    # --- 11. Subject-specific scene rules (B: hard filters) ---
+    subj_adj, subj_reject_hits, weak_accept_hits = _check_subject_scene_rules(text, intent)
+    score += subj_adj
+    cs.subject_scene_reject_hits = subj_reject_hits
+    if subj_reject_hits > 0 and not reject_reason:
+        reject_reason = "subject_scene_reject"
+
+    # --- 12. Scene mismatch penalties (D) ---
+    scene_penalty, scene_mis_hits = _check_scene_mismatch(text, intent)
+    score += scene_penalty
+    cs.scene_mismatch_hits = scene_mis_hits
+    if scene_mis_hits > 0 and not reject_reason:
+        reject_reason = "scene_mismatch"
+
+    # --- 13. Determine fallback level (C: scoring hierarchy) ---
+    fb_level = _determine_fallback_level(
+        subject_hits, scene_hits, family_term_hits, allowed_hits,
+    )
+    cs.fallback_level = fb_level
+
+    # Apply hierarchy penalty: generic family match gets reduced score
+    # for dish/object-specific posts
+    if fb_level == "family" and subject_hits == 0:
+        # Family-only match: reduce score significantly for specific subjects
+        if intent.subject:
+            score = min(score, MAX_SCORE_WITHOUT_AFFIRMATION + 5)
+    if fb_level == "weak":
+        score = min(score, MAX_SCORE_WITHOUT_AFFIRMATION)
+
+    # Weak-accept penalty: ingredients-only for dish posts
+    if weak_accept_hits > 0 and subject_hits == 0:
+        score = min(score, MAX_SCORE_WITHOUT_AFFIRMATION + 3)
+        if not reject_reason:
+            reject_reason = "weak_accept_only"
+
+    # --- 14. Positive affirmation requirement ---
     has_affirmation = (
         (subject_hits >= AFFIRMATION_MIN_SUBJECT_HITS)
         or (allowed_hits >= AFFIRMATION_MIN_ALLOWED_HITS)
@@ -482,20 +733,37 @@ def rank_candidates(
         cs.provider_bonus = compute_provider_bonus(cs.post_centric_score)
         cs.final_score = cs.post_centric_score + cs.provider_bonus
 
-        # Apply anti-repeat penalty from history
+        # Apply anti-repeat penalty from history (E: strengthened)
         domain = extract_domain(cs.url)
         visual_class = detect_meta_family(cs.meta_snippet)
+        # Compute scene_class from metadata for dedup
+        scene_class = visual_class
         cs.repeat_penalty = history.compute_penalty(
             url=cs.url,
             content_hash=url_content_hash(cs.url),
             visual_class=visual_class,
             subject_bucket=intent.subject or "",
             domain=domain,
+            scene_class=scene_class,
         )
         cs.final_score += cs.repeat_penalty
 
         # Determine outcome
         cs.outcome = determine_outcome(cs, mode)
+
+        # Set final_accept_reason for traceable logs (F)
+        if not cs.outcome.startswith("REJECT"):
+            reasons = []
+            if cs.subject_match > 0:
+                reasons.append(f"subject_hit={cs.subject_match}")
+            if cs.scene_match > 0:
+                reasons.append(f"scene_hit={cs.scene_match}")
+            if cs.allowed_visual_hits > 0:
+                reasons.append(f"allowed_visual={cs.allowed_visual_hits}")
+            if cs.family_term_hits > 0:
+                reasons.append(f"family_term={cs.family_term_hits}")
+            reasons.append(f"level={cs.fallback_level}")
+            cs.final_accept_reason = "; ".join(reasons)
 
     # Sort by final score descending
     candidates.sort(key=lambda c: c.final_score, reverse=True)
