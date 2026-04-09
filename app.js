@@ -940,17 +940,46 @@ function buildAuthenticatedMediaUrl(url = '') {
 function normalizeMediaRef(ref = '') {
   const raw = String(ref || '').trim();
   if (!raw) return '';
+  // Log resolution path for debugging
+  const logPath = (path, src) => {
+    if (window._PREVIEW_DEBUG) console.log(`PREVIEW_MEDIA_RENDER_PATH=${path} src=${src.substring(0, 60)}`);
+  };
   if (raw.startsWith('tgfile:')) {
     const parts = raw.split(':');
     const kind = parts[1] || 'photo';
     const fileId = parts.slice(2).join(':');
-    return buildAuthenticatedMediaUrl(`/api/media/telegram?kind=${encodeURIComponent(kind)}&file_id=${encodeURIComponent(fileId)}`);
+    const url = buildAuthenticatedMediaUrl(`/api/media/telegram?kind=${encodeURIComponent(kind)}&file_id=${encodeURIComponent(fileId)}`);
+    logPath('telegram', url);
+    return url;
   }
-  if (raw.startsWith('/uploads/')) return buildAuthenticatedMediaUrl(raw);
-  if (raw.includes('/uploads/')) return buildAuthenticatedMediaUrl('/uploads/' + raw.split('/uploads/').pop());
-  if (raw.includes('/generated_images/')) return buildAuthenticatedMediaUrl('/generated-images/' + raw.split('/generated_images/').pop());
-  if (raw.includes('/generated-images/')) return buildAuthenticatedMediaUrl('/generated-images/' + raw.split('/generated-images/').pop());
-  if (raw.startsWith('/api/media/telegram')) return buildAuthenticatedMediaUrl(raw);
+  // /uploads/ paths — strip stale query params, re-auth
+  if (raw.startsWith('/uploads/') || raw.includes('/uploads/')) {
+    const cleanPath = raw.includes('/uploads/') ? '/uploads/' + raw.split('/uploads/').pop().split('?')[0] : raw.split('?')[0];
+    const url = buildAuthenticatedMediaUrl(cleanPath);
+    logPath('upload', url);
+    return url;
+  }
+  // /generated_images/ (legacy underscore) → normalize to /generated-images/
+  if (raw.includes('/generated_images/')) {
+    const cleanPath = '/generated-images/' + raw.split('/generated_images/').pop().split('?')[0];
+    const url = buildAuthenticatedMediaUrl(cleanPath);
+    logPath('generated_legacy', url);
+    return url;
+  }
+  // /generated-images/ paths — strip stale query params, re-auth
+  if (raw.includes('/generated-images/')) {
+    const cleanPath = '/generated-images/' + raw.split('/generated-images/').pop().split('?')[0];
+    const url = buildAuthenticatedMediaUrl(cleanPath);
+    logPath('generated', url);
+    return url;
+  }
+  if (raw.startsWith('/api/media/telegram')) {
+    const url = buildAuthenticatedMediaUrl(raw);
+    logPath('telegram_api', url);
+    return url;
+  }
+  // External URL: preserve all query params (CDN auth tokens, etc.)
+  logPath('external', raw);
   return raw;
 }
 
@@ -961,7 +990,7 @@ function guessMediaType(ref = '') {
   if (value.startsWith('tgfile:photo:')) return 'photo';
   if (/\.(mp4|mov|webm|mkv)$/i.test(value)) return 'video';
   if (/\.(jpg|jpeg|png|gif|webp)$/i.test(value)) return 'photo';
-  if (value.startsWith('/uploads/') || value.startsWith('/generated-images/') || value.startsWith('/api/media/telegram')) return 'photo';
+  if (value.startsWith('/uploads/') || value.startsWith('/generated-images/') || value.includes('/generated_images/') || value.startsWith('/api/media/telegram')) return 'photo';
   return 'photo';
 }
 
@@ -974,33 +1003,43 @@ function renderMediaNode(ref = '', explicitType = '') {
 }
 
 function handleMediaLoadError(img) {
-  if (img.dataset.retried) {
+  const retryCount = parseInt(img.dataset.retryCount || '0', 10) || 0;
+  const maxRetries = 2; // Allow 2 retries (3 total attempts)
+
+  if (retryCount >= maxRetries) {
     img.closest('.editor-media-preview,.preview-media')?.classList.add('is-broken');
     img.outerHTML = '<div class="editor-media-empty">Не удалось загрузить медиа</div>';
-  } else {
-    img.dataset.retried = '1';
-    // On first retry, rebuild the auth URL in case init data was not available
-    // at the time of original rendering.
-    const fullSrc = img.src || '';
-    const hadAuth = fullSrc.includes('tgWebAppData=');
-    const initData = !hadAuth ? extractTelegramInitData() : null;
-    // Check if this is a local media path that needs auth (not just /api/)
-    const needsAuth = fullSrc.includes('/api/') || fullSrc.includes('/uploads/') || fullSrc.includes('/generated-images/') || fullSrc.includes('/generated_images/');
-    if (initData && needsAuth) {
-      // Strip query params and rebuild with auth + cache bust
-      const base = fullSrc.split('?')[0];
-      img.src = `${base}?tgWebAppData=${encodeURIComponent(initData)}&t=${Date.now()}`;
-    } else if (needsAuth && hadAuth) {
-      // Already has auth, just cache-bust
-      const base = fullSrc.split('?')[0];
-      const existingAuth = fullSrc.match(/tgWebAppData=([^&]*)/);
-      const authParam = existingAuth ? `tgWebAppData=${existingAuth[1]}` : '';
-      img.src = base + '?' + (authParam ? authParam + '&' : '') + 't=' + Date.now();
+    if (window._PREVIEW_DEBUG) console.log('PREVIEW_MEDIA_RESOLVE_FAIL reason=max_retries_exceeded');
+    return;
+  }
+
+  img.dataset.retryCount = String(retryCount + 1);
+  const fullSrc = img.src || '';
+  const hadAuth = fullSrc.includes('tgWebAppData=');
+  const initData = !hadAuth ? extractTelegramInitData() : null;
+  // Check if this is a local media path that needs auth
+  const needsAuth = fullSrc.includes('/api/') || fullSrc.includes('/uploads/') || fullSrc.includes('/generated-images/') || fullSrc.includes('/generated_images/');
+
+  if (needsAuth) {
+    // Strip ALL old query params and rebuild clean auth URL
+    const base = fullSrc.split('?')[0];
+    // Normalize legacy underscore path
+    const normalizedBase = base.includes('/generated_images/')
+      ? base.replace('/generated_images/', '/generated-images/')
+      : base;
+    const freshAuth = initData || (fullSrc.match(/tgWebAppData=([^&]*)/) || [])[1] || '';
+    if (freshAuth) {
+      img.src = `${normalizedBase}?tgWebAppData=${encodeURIComponent(freshAuth)}&t=${Date.now()}`;
+      if (window._PREVIEW_DEBUG) console.log(`PREVIEW_MEDIA_RESOLVE_OK retry=${retryCount + 1} path=${normalizedBase.substring(0, 60)}`);
     } else {
-      // External URL: preserve original query params, only append cache bust
-      const separator = fullSrc.includes('?') ? '&' : '?';
-      img.src = fullSrc + separator + 't=' + Date.now();
+      // No auth available — try bare URL with cache bust
+      img.src = `${normalizedBase}?t=${Date.now()}`;
+      if (window._PREVIEW_DEBUG) console.log(`PREVIEW_MEDIA_AUTH_FAIL retry=${retryCount + 1} path=${normalizedBase.substring(0, 60)}`);
     }
+  } else {
+    // External URL: preserve original query params, only append cache bust
+    const separator = fullSrc.includes('?') ? '&' : '?';
+    img.src = fullSrc + separator + 't=' + Date.now();
   }
 }
 

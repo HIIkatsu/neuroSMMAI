@@ -237,3 +237,95 @@ def _fmt(d: dict[str, Any]) -> str:
             continue
         parts.append(f"{k}={v!r}" if isinstance(v, str) else f"{k}={v}")
     return " ".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Preview media trace
+# ---------------------------------------------------------------------------
+
+def trace_preview_media(
+    *,
+    trace_id: str,
+    media_ref: str = "",
+    render_path: str = "",
+    resolved_url: str = "",
+    is_stale: bool = False,
+    needs_auth: bool = False,
+    error: str = "",
+) -> dict[str, Any]:
+    """Log a structured preview media resolution trace event."""
+    payload: dict[str, Any] = {
+        "trace_id": trace_id,
+        "event": "preview_media",
+        "media_ref": (media_ref or "")[:120],
+        "render_path": render_path,
+        "resolved_url": (resolved_url or "")[:120],
+        "is_stale": is_stale,
+        "needs_auth": needs_auth,
+        "error": error,
+    }
+
+    if error:
+        logger.warning(
+            "PREVIEW_MEDIA_RESOLVE_FAIL tid=%s ref=%s error=%s",
+            trace_id, (media_ref or "")[:60], error,
+        )
+    else:
+        logger.info(
+            "PREVIEW_MEDIA_RESOLVE_OK tid=%s path=%s ref=%s",
+            trace_id, render_path, (media_ref or "")[:60],
+        )
+
+    if is_stale:
+        logger.warning("PREVIEW_MEDIA_STALE_REF tid=%s ref=%s", trace_id, (media_ref or "")[:60])
+
+    return payload
+
+
+# ---------------------------------------------------------------------------
+# Text validation trace
+# ---------------------------------------------------------------------------
+
+def trace_text_validation(
+    *,
+    trace_id: str,
+    source_fit_score: int = 10,
+    request_fit_score: int = 10,
+    fake_numeric_count: int = 0,
+    fake_personal_count: int = 0,
+    template_repeat_count: int = 0,
+    drift_reasons: list[str] | None = None,
+    total_risk: int = 0,
+    rejected: bool = False,
+) -> dict[str, Any]:
+    """Log a structured text validation trace event."""
+    payload: dict[str, Any] = {
+        "trace_id": trace_id,
+        "event": "text_validation",
+        "source_fit_score": source_fit_score,
+        "request_fit_score": request_fit_score,
+        "fake_numeric_count": fake_numeric_count,
+        "fake_personal_count": fake_personal_count,
+        "template_repeat_count": template_repeat_count,
+        "drift_reasons": drift_reasons or [],
+        "total_risk": total_risk,
+        "rejected": rejected,
+    }
+
+    logger.info(
+        "TEXT_SOURCE_FIT_SCORE=%d TEXT_REQUEST_FIT_SCORE=%d "
+        "fake_numeric=%d fake_personal=%d template_repeat=%d risk=%d rejected=%s",
+        source_fit_score, request_fit_score,
+        fake_numeric_count, fake_personal_count, template_repeat_count,
+        total_risk, rejected,
+    )
+
+    if fake_numeric_count > 0:
+        logger.warning("TEXT_FAKE_NUMERIC_CLAIM_REJECT count=%d", fake_numeric_count)
+    if fake_personal_count > 0:
+        logger.warning("TEXT_FAKE_PERSONAL_CLAIM_REJECT count=%d", fake_personal_count)
+    if drift_reasons:
+        for reason in drift_reasons:
+            logger.warning("TEXT_DRIFT_REJECT reason=%s", reason)
+
+    return payload

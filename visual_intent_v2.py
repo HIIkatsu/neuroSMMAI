@@ -338,6 +338,7 @@ _SUBJECT_TRANSLATIONS: list[tuple[str, str]] = [
     ("дизел", "diesel fuel"),
     ("двигател", "engine motor"),
     # Vehicles
+    ("китайск", "chinese car modern car chinese automobile"),
     ("автомобил", "automobile car"), ("авто ", "car automotive"),
     ("грузовик", "truck"), ("мотоцикл", "motorcycle"),
     ("электромоб", "electric vehicle"),
@@ -358,6 +359,15 @@ _SUBJECT_TRANSLATIONS: list[tuple[str, str]] = [
     ("кухн", "kitchen"), ("ванн", "bathroom"), ("спальн", "bedroom"),
     ("гостин", "living room"), ("балкон", "balcony"),
     ("ремонт", "repair renovation"), ("строительств", "construction"),
+    ("гарнитур", "kitchen furniture cabinet kitchen set"),
+    ("фасад", "facade kitchen furniture"),
+    ("столешниц", "countertop kitchen"),
+    ("шкаф", "cabinet wardrobe furniture"),
+    ("мебел", "furniture interior"),
+    ("диван", "sofa couch furniture"),
+    ("стол ", "table furniture"),
+    ("стул", "chair furniture"),
+    ("полк", "shelf furniture"),
     # Nature
     ("сад", "garden"), ("огород", "vegetable garden"),
     ("парк", "park"),
