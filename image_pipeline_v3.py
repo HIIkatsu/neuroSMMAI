@@ -28,6 +28,7 @@ Provider strategy:
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from urllib.parse import urlparse as _urlparse
 
@@ -41,6 +42,7 @@ from visual_intent_v2 import (
 )
 from image_ranker import (
     CandidateScore,
+    check_wrong_sense,
     score_candidate,
     rank_candidates,
     detect_meta_family,
@@ -66,6 +68,7 @@ from image_history import (
     extract_domain,
     url_content_hash,
 )
+from topic_utils import get_family_blocked_visuals
 
 logger = logging.getLogger(__name__)
 
@@ -258,17 +261,15 @@ def validate_image_post_centric_v3(
         return True, ""
 
     if image_meta:
-        from image_ranker import check_wrong_sense as _check_ws
-        wrong_sense = _check_ws(image_meta, intent)
+        wrong_sense = check_wrong_sense(image_meta, intent)
         if wrong_sense:
             return False, wrong_sense
 
         blocked = get_family_blocked_visuals(intent.post_family)
         meta_lower = image_meta.lower()
         if blocked:
-            import re as _re
             for cls in blocked:
-                if _re.search(rf"\b{_re.escape(cls)}\b", meta_lower, _re.I):
+                if re.search(rf"\b{re.escape(cls)}\b", meta_lower, re.I):
                     return False, f"blocked_visual:{cls}"
 
         min_score = AUTOPOST_MIN_SCORE if mode == MODE_AUTOPOST else EDITOR_MIN_SCORE
@@ -277,10 +278,6 @@ def validate_image_post_centric_v3(
             return False, reason or "low_score"
 
     return True, ""
-
-
-# Need to import here to avoid circular at module level
-from topic_utils import get_family_blocked_visuals  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -342,7 +339,8 @@ async def run_pipeline_v3(
         return result
 
     # --- Step 4: Collect candidates from providers ---
-    from image_providers import collect_candidates, RawCandidate
+    # Lazy import: image_providers requires httpx (runtime dependency)
+    from image_providers import collect_candidates
 
     raw_candidates = await collect_candidates(
         queries=queries,
