@@ -73,7 +73,8 @@ PROVIDER_BONUS_CAP = 15        # Max points provider can add
 
 # Mode-specific thresholds
 AUTOPOST_MIN_SCORE = 25        # Strict: must have real confidence
-EDITOR_MIN_SCORE = 8           # Lenient: tolerable for user to pick from
+EDITOR_MIN_SCORE = 4           # Very lenient: show weak-but-relevant candidates
+EDITOR_SOFT_MIN = 8            # Preferred editor score; below = marked tolerable
 
 # Affirmation thresholds — at least one must be met
 AFFIRMATION_MIN_SUBJECT_HITS = 1
@@ -86,6 +87,22 @@ MAX_SCORE_WITHOUT_AFFIRMATION = 10
 
 # Top-N reranking
 TOP_N_CANDIDATES = 8    # Collect up to N candidates before final pick
+EDITOR_TOP_N = 10       # Editor returns more candidates for user to pick from
+
+# ---------------------------------------------------------------------------
+# Generic filler patterns — autopost rejects these unless post explicitly
+# matches the visual subject (e.g. "AI chip" image only for AI chip posts)
+# ---------------------------------------------------------------------------
+_AUTOPOST_GENERIC_FILLER = [
+    "ai chip", "ai processor", "artificial intelligence chip",
+    "code screen", "code on screen", "programming code",
+    "binary code", "matrix code", "circuit board abstract",
+    "random stock product", "generic product photo",
+    "abstract technology", "digital transformation",
+    "futuristic city", "robot hand", "robot face",
+    "hologram", "virtual reality abstract",
+    "neon lights abstract", "cyber background",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -93,6 +110,100 @@ TOP_N_CANDIDATES = 8    # Collect up to N candidates before final pick
 # ---------------------------------------------------------------------------
 MODE_AUTOPOST = "autopost"
 MODE_EDITOR = "editor"
+
+
+# ---------------------------------------------------------------------------
+# Image diversity / anti-repeat memory (B)
+# ---------------------------------------------------------------------------
+import time as _time
+from collections import deque
+
+# Maximum items to remember
+_DIVERSITY_CACHE_SIZE = 50
+_DIVERSITY_TTL_SECONDS = 3600 * 6  # 6 hours
+
+# Penalty weights for diversity
+P_REPEAT_URL = -200          # same exact URL → hard reject
+P_REPEAT_VISUAL_CLASS = -15  # same visual class recently
+P_REPEAT_DOMAIN = -8         # same provider domain recently
+P_REPEAT_SUBJECT = -10       # same subject template recently
+
+
+class _DiversityEntry:
+    __slots__ = ("value", "ts")
+
+    def __init__(self, value: str):
+        self.value = value
+        self.ts = _time.monotonic()
+
+
+class ImageDiversityCache:
+    """In-memory cache for recent image selections to prevent repetition.
+
+    Thread-safe enough for single-process asyncio usage.
+    """
+
+    def __init__(self, maxlen: int = _DIVERSITY_CACHE_SIZE, ttl: float = _DIVERSITY_TTL_SECONDS):
+        self.recent_urls: deque[_DiversityEntry] = deque(maxlen=maxlen)
+        self.recent_visual_classes: deque[_DiversityEntry] = deque(maxlen=maxlen)
+        self.recent_domains: deque[_DiversityEntry] = deque(maxlen=maxlen)
+        self.recent_subjects: deque[_DiversityEntry] = deque(maxlen=maxlen)
+        self._ttl = ttl
+
+    def _alive(self, entry: _DiversityEntry) -> bool:
+        return (_time.monotonic() - entry.ts) < self._ttl
+
+    def _has(self, q: deque[_DiversityEntry], val: str) -> int:
+        """Count how many alive entries match val."""
+        return sum(1 for e in q if self._alive(e) and e.value == val)
+
+    def compute_penalty(self, url: str, visual_class: str, domain: str, subject: str) -> int:
+        """Compute diversity penalty for a candidate image."""
+        penalty = 0
+        url_norm = (url or "").strip().lower()
+        if url_norm and self._has(self.recent_urls, url_norm) > 0:
+            penalty += P_REPEAT_URL
+        vc = (visual_class or "").strip().lower()
+        if vc and self._has(self.recent_visual_classes, vc) > 0:
+            penalty += P_REPEAT_VISUAL_CLASS
+        dom = (domain or "").strip().lower()
+        if dom:
+            dom_count = self._has(self.recent_domains, dom)
+            if dom_count >= 2:
+                penalty += P_REPEAT_DOMAIN * 2
+            elif dom_count >= 1:
+                penalty += P_REPEAT_DOMAIN
+        subj = (subject or "").strip().lower()
+        if subj and self._has(self.recent_subjects, subj) > 0:
+            penalty += P_REPEAT_SUBJECT
+        return penalty
+
+    def record(self, url: str, visual_class: str, domain: str, subject: str) -> None:
+        """Record a selected image into the diversity cache."""
+        if url:
+            self.recent_urls.append(_DiversityEntry(url.strip().lower()))
+        if visual_class:
+            self.recent_visual_classes.append(_DiversityEntry(visual_class.strip().lower()))
+        if domain:
+            self.recent_domains.append(_DiversityEntry(domain.strip().lower()))
+        if subject:
+            self.recent_subjects.append(_DiversityEntry(subject.strip().lower()))
+
+    def prune(self) -> None:
+        """Remove expired entries."""
+        now = _time.monotonic()
+        for q in (self.recent_urls, self.recent_visual_classes, self.recent_domains, self.recent_subjects):
+            while q and (now - q[0].ts) >= self._ttl:
+                q.popleft()
+
+
+# Global singleton diversity cache
+_diversity_cache = ImageDiversityCache()
+
+
+def get_diversity_cache() -> ImageDiversityCache:
+    """Return the global image diversity cache."""
+    return _diversity_cache
 
 
 # ---------------------------------------------------------------------------
@@ -105,6 +216,8 @@ OUTCOME_REJECT_WRONG_SENSE = "REJECT_WRONG_SENSE"
 OUTCOME_REJECT_GENERIC_STOCK = "REJECT_GENERIC_STOCK"
 OUTCOME_REJECT_CROSS_FAMILY = "REJECT_CROSS_FAMILY"
 OUTCOME_REJECT_LOW_CONFIDENCE = "REJECT_LOW_CONFIDENCE"
+OUTCOME_REJECT_REPEAT = "REJECT_REPEAT_IMAGE"
+OUTCOME_REJECT_GENERIC_FILLER = "REJECT_GENERIC_FILLER"
 OUTCOME_NO_IMAGE_SAFE = "NO_IMAGE_SAFE_FALLBACK"
 OUTCOME_NO_IMAGE_LOW_VISUALITY = "NO_IMAGE_LOW_VISUALITY"
 OUTCOME_NO_IMAGE_NO_CANDIDATES = "NO_IMAGE_NO_CANDIDATES"
@@ -134,6 +247,7 @@ class CandidateTrace:
     post_centric_score: int = 0
     provider_score: int = 0
     provider_bonus: int = 0
+    diversity_penalty: int = 0      # Penalty from anti-repeat cache
     final_score: int = 0
     # Decision
     hard_reject: str = ""           # Non-empty if hard-rejected
@@ -154,6 +268,7 @@ class CandidateTrace:
             "pc": self.post_centric_score,
             "prov": self.provider_score,
             "bonus": self.provider_bonus,
+            "div": self.diversity_penalty,
             "final": self.final_score,
             "hard": self.hard_reject[:40] if self.hard_reject else "",
             "rej": self.reject_reason[:40] if self.reject_reason else "",
@@ -482,6 +597,15 @@ def score_candidate(
         if not reject_reason:
             reject_reason = "no_positive_affirmation"
 
+    # --- 11. Autopost generic filler detection ---
+    # Detect generic tech/AI filler images (ai chip, code screen, etc.)
+    # These are only penalized if the post subject does NOT explicitly match.
+    filler_hits = sum(1 for f in _AUTOPOST_GENERIC_FILLER if f in text)
+    if filler_hits > 0 and subject_hits < 2:
+        score -= filler_hits * 15
+        if not reject_reason:
+            reject_reason = "generic_filler"
+
     trace.post_centric_score = score
     trace.reject_reason = reject_reason
     return score, reject_reason, trace
@@ -518,11 +642,17 @@ def determine_candidate_outcome(
     """Determine the outcome type for a scored candidate.
 
     Uses mode-specific thresholds.
+    Editor mode: high recall — show weak-but-tolerable candidates.
+    Autopost mode: high precision — reject generic filler, repeats.
     """
     if trace.hard_reject:
         if "wrong_sense" in trace.hard_reject:
             return OUTCOME_REJECT_WRONG_SENSE
         return OUTCOME_REJECT_CROSS_FAMILY
+
+    # Hard reject repeated images in autopost
+    if mode == MODE_AUTOPOST and trace.diversity_penalty <= P_REPEAT_URL:
+        return OUTCOME_REJECT_REPEAT
 
     min_score = AUTOPOST_MIN_SCORE if mode == MODE_AUTOPOST else EDITOR_MIN_SCORE
     score = trace.final_score
@@ -534,6 +664,8 @@ def determine_candidate_outcome(
             return OUTCOME_REJECT_CROSS_FAMILY
         if trace.reject_reason and "wrong_sense" in trace.reject_reason:
             return OUTCOME_REJECT_WRONG_SENSE
+        if trace.reject_reason and "generic_filler" in trace.reject_reason:
+            return OUTCOME_REJECT_GENERIC_FILLER
         if score < EDITOR_MIN_SCORE:
             return OUTCOME_REJECT_NO_MATCH
         if mode == MODE_AUTOPOST:
@@ -722,15 +854,48 @@ async def run_image_pipeline(
 
     result.traces = candidates
 
-    # --- Step 7: Top-N reranking ---
+    # --- Step 7: Apply diversity penalties from anti-repeat cache ---
+    div_cache = get_diversity_cache()
+    for c in candidates:
+        if c.hard_reject:
+            continue
+        # Extract domain from URL
+        url_domain = ""
+        if c.url:
+            try:
+                from urllib.parse import urlparse as _urlparse
+                url_domain = _urlparse(c.url).netloc
+            except Exception:
+                pass
+        # Detect visual class from meta snippet
+        vc = detect_meta_family(c.meta_snippet)
+        div_penalty = div_cache.compute_penalty(
+            url=c.url,
+            visual_class=vc,
+            domain=url_domain,
+            subject=intent.main_subject or "",
+        )
+        if div_penalty != 0:
+            c.diversity_penalty = div_penalty
+            c.final_score += div_penalty
+            # Re-determine outcome with updated score
+            c.outcome = determine_candidate_outcome(c, mode)
+            if c.outcome.startswith("REJECT"):
+                result.candidates_rejected += 1
+                if not c.reject_reason:
+                    c.reject_reason = "repeat_image"
+                result.reject_reasons.append(c.reject_reason)
+
+    # --- Step 8: Top-N reranking ---
     accepted = [
         c for c in candidates
         if not c.hard_reject and not c.outcome.startswith("REJECT")
     ]
     accepted.sort(key=lambda c: c.final_score, reverse=True)
-    top_n = accepted[:TOP_N_CANDIDATES]
+    top_n_limit = EDITOR_TOP_N if mode == MODE_EDITOR else TOP_N_CANDIDATES
+    top_n = accepted[:top_n_limit]
 
-    # --- Step 8: Mode-specific final decision ---
+    # --- Step 9: Mode-specific final decision ---
     if top_n:
         best = top_n[0]
         min_score = AUTOPOST_MIN_SCORE if mode == MODE_AUTOPOST else EDITOR_MIN_SCORE
@@ -744,18 +909,22 @@ async def run_image_pipeline(
 
             if mode == MODE_EDITOR:
                 result.editor_candidates = [
-                    (c.url, c.final_score) for c in top_n[:4]
+                    (c.url, c.final_score) for c in top_n[:10]
                     if c.final_score >= EDITOR_MIN_SCORE
                 ]
 
+            # Record selection in diversity cache
+            _record_selection(best, intent)
+
             logger.info(
                 "IMAGE_PIPELINE_SELECTED outcome=%s mode=%s source=%s "
-                "final_score=%d pc=%d prov=%d+%d query=%r "
+                "final_score=%d pc=%d prov=%d+%d div=%d query=%r "
                 "subject=%r subj_hits=%d sense_hits=%d scene_hits=%d "
                 "stock_hits=%d url=%r",
                 result.outcome, mode, best.source,
                 best.final_score, best.post_centric_score,
                 best.provider_score, best.provider_bonus,
+                best.diversity_penalty,
                 best.query[:40],
                 (intent.main_subject or "")[:40],
                 best.subject_hits, best.sense_hits, best.scene_hits,
@@ -770,9 +939,10 @@ async def run_image_pipeline(
             result.source_provider = best.source
             result.matched_query = best.query
             result.editor_candidates = [
-                (c.url, c.final_score) for c in top_n[:4]
+                (c.url, c.final_score) for c in top_n[:10]
                 if c.final_score >= EDITOR_MIN_SCORE
             ]
+            _record_selection(best, intent)
             return result
 
     # --- No acceptable candidate found ---
@@ -794,8 +964,9 @@ async def run_image_pipeline(
             result.matched_query = best_soft.query
             result.outcome = OUTCOME_ACCEPT_FOR_EDITOR
             result.editor_candidates = [
-                (c.url, c.final_score) for c in soft_rejected[:4]
+                (c.url, c.final_score) for c in soft_rejected[:10]
             ]
+            _record_selection(best_soft, intent)
             logger.info(
                 "IMAGE_PIPELINE_EDITOR_FALLBACK score=%d source=%s query=%r url=%r",
                 best_soft.final_score, best_soft.source,
@@ -822,6 +993,25 @@ async def run_image_pipeline(
     return result
 
 
+def _record_selection(trace: CandidateTrace, intent: VisualIntent) -> None:
+    """Record an accepted image in the diversity cache to prevent repetition."""
+    cache = get_diversity_cache()
+    url_domain = ""
+    if trace.url:
+        try:
+            from urllib.parse import urlparse as _urlparse
+            url_domain = _urlparse(trace.url).netloc
+        except Exception:
+            pass
+    vc = detect_meta_family(trace.meta_snippet)
+    cache.record(
+        url=trace.url,
+        visual_class=vc,
+        domain=url_domain,
+        subject=intent.main_subject or "",
+    )
+
+
 def _determine_no_image_reason(result: ImagePipelineResult, intent: VisualIntent) -> str:
     """Determine the most specific no-image reason from pipeline state."""
     if intent.no_image_reason:
@@ -835,9 +1025,15 @@ def _determine_no_image_reason(result: ImagePipelineResult, intent: VisualIntent
     generic_stock_count = sum(1 for r in reasons if r == "generic_stock")
     blocked_count = sum(1 for r in reasons if r.startswith("blocked_visual"))
     cross_family_count = sum(1 for r in reasons if r.startswith("cross_family"))
+    repeat_count = sum(1 for r in reasons if r == "repeat_image")
+    filler_count = sum(1 for r in reasons if r == "generic_filler")
 
     if wrong_sense_count > 0:
         return "wrong_sense"
+    if repeat_count > 0:
+        return "repeat_image"
+    if filler_count > 0:
+        return "generic_filler"
     if generic_stock_count > 0:
         return "generic_stock"
     if blocked_count > 0:
@@ -858,6 +1054,8 @@ def _no_image_reason_to_outcome(reason: str) -> str:
         "no_candidates": OUTCOME_NO_IMAGE_NO_CANDIDATES,
         "wrong_sense": OUTCOME_REJECT_WRONG_SENSE,
         "generic_stock": OUTCOME_REJECT_GENERIC_STOCK,
+        "generic_filler": OUTCOME_REJECT_GENERIC_FILLER,
+        "repeat_image": OUTCOME_REJECT_REPEAT,
         "blocked_visual": OUTCOME_REJECT_CROSS_FAMILY,
         "cross_family": OUTCOME_REJECT_CROSS_FAMILY,
         "low_subject_match": OUTCOME_REJECT_LOW_CONFIDENCE,

@@ -488,11 +488,20 @@ class TestModeSpecificThresholds(unittest.TestCase):
         self.assertEqual(determine_candidate_outcome(trace, MODE_EDITOR), OUTCOME_ACCEPT_BEST)
 
     def test_very_low_score_rejected_in_both(self):
-        trace = self._make_trace(final_score=5)
+        """Score below both thresholds is rejected in both modes."""
+        trace = self._make_trace(final_score=2)
         autopost = determine_candidate_outcome(trace, MODE_AUTOPOST)
         editor = determine_candidate_outcome(trace, MODE_EDITOR)
         self.assertIn("REJECT", autopost)
         self.assertIn("REJECT", editor)
+
+    def test_weak_score_accepted_in_editor_rejected_in_autopost(self):
+        """Score between editor and autopost thresholds: editor accepts, autopost rejects."""
+        trace = self._make_trace(final_score=5)
+        autopost = determine_candidate_outcome(trace, MODE_AUTOPOST)
+        editor = determine_candidate_outcome(trace, MODE_EDITOR)
+        self.assertIn("REJECT", autopost)
+        self.assertEqual(editor, OUTCOME_ACCEPT_FOR_EDITOR)
 
     def test_hard_reject_overrides_score(self):
         trace = self._make_trace(final_score=50, hard_reject="wrong_sense:car")
