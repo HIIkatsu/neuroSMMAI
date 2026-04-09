@@ -179,6 +179,18 @@ async def generate_ai_image(
         logger.info("HF_API_KEY is not configured, AI image generation skipped")
         return None
 
+    # --- HF provider deprecation guard ---
+    # The default SDXL model on hf-inference is deprecated (returns 410).
+    # Skip immediately instead of burning retries against a dead endpoint.
+    if hf_model == DEFAULT_MODEL:
+        logger.info(
+            "HF_IMAGE_SKIP_DEPRECATED model=%s — default hf-inference model is "
+            "deprecated, skipping AI image generation. Set HF_IMAGE_MODEL to a "
+            "supported model to re-enable.",
+            hf_model,
+        )
+        return None
+
     if prebuilt_prompt:
         image_prompt = _clean_text(prebuilt_prompt)[:600]
     else:
@@ -213,6 +225,14 @@ async def generate_ai_image(
             async with httpx.AsyncClient(timeout=timeout, trust_env=False, follow_redirects=True, proxy=proxy, transport=transport) as client:
                 r = await client.post(url, headers=headers, json=payload)
             ctype = (r.headers.get("content-type") or "").lower()
+
+            if r.status_code == 410:
+                logger.warning(
+                    "HF_IMAGE_PROVIDER_DEPRECATED model=%s code=410 — "
+                    "model is no longer supported, not retrying",
+                    hf_model,
+                )
+                return None
 
             if r.status_code == 429:
                 logger.warning("HF image rate-limited (429) attempt=%d/%d", attempt, max_attempts)

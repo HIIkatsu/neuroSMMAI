@@ -1172,16 +1172,30 @@ async def find_image(
             mode=pipeline_mode,
         )
         if result.has_image:
+            logger.info(
+                "IMAGE_V3_ACCEPT url=%r score=%d source=%s mode=%s query=%r",
+                (result.image_url or "")[:80], result.score, result.source_provider,
+                pipeline_mode, (result.matched_query or "")[:60],
+            )
             return result.image_url
         if result.no_image_reason:
             logger.info(
-                "IMAGE_V3_NO_IMAGE reason=%s outcome=%s mode=%s query=%r",
+                "IMAGE_V3_NO_MATCH reason=%s outcome=%s mode=%s query=%r",
                 result.no_image_reason, result.outcome, pipeline_mode, query[:60],
+            )
+        else:
+            logger.info(
+                "IMAGE_V3_REJECT mode=%s query=%r reasons=%s",
+                pipeline_mode, query[:60], result.reject_reasons[:5],
             )
         # If v3 pipeline found nothing, try legacy as last resort
         # but only if there's query text distinct from post text
         if not query or query == actual_title:
             return ""
+        logger.info(
+            "IMAGE_LEGACY_FALLBACK_USED reason=v3_no_result mode=%s query=%r",
+            pipeline_mode, query[:60],
+        )
 
     # --- LEGACY: Query-based flow (backward-compatible fallback) ---
     queries = build_best_visual_queries(query)
@@ -1302,6 +1316,72 @@ async def trigger_unsplash_download(download_location: str) -> bool:
         return False
 
 
+# Known CDN/asset URL patterns where the path is a hash/ID, not a semantic filename.
+# These URLs never contain topic keywords and must not be rejected by URL keyword matching.
+_CDN_ASSET_PATTERNS: tuple[re.Pattern, ...] = (
+    re.compile(r"pixabay\.com/get/", re.I),
+    re.compile(r"images\.pexels\.com/photos/\d+/", re.I),
+    re.compile(r"cdn\.pixabay\.com/", re.I),
+    re.compile(r"images\.unsplash\.com/photo-", re.I),
+    re.compile(r"live\.staticflickr\.com/", re.I),
+    re.compile(r"openverse\.org/.*/thumb/", re.I),
+)
+
+
+def _is_cdn_asset_url(url: str) -> bool:
+    """Return True if the URL is a known CDN/asset URL with non-semantic path."""
+    for pattern in _CDN_ASSET_PATTERNS:
+        if pattern.search(url):
+            return True
+    return False
+
+
+def _provider_from_url(url: str) -> str:
+    """Extract a short provider name from the image URL."""
+    u = (url or "").lower()
+    if "pixabay" in u:
+        return "pixabay"
+    if "pexels" in u:
+        return "pexels"
+    if "unsplash" in u:
+        return "unsplash"
+    if "openverse" in u:
+        return "openverse"
+    if "flickr" in u:
+        return "flickr"
+    return "unknown"
+
+
+def _log_image_decision_trace(
+    *,
+    url: str,
+    mode: str,
+    subject: str,
+    family: str,
+    provider: str,
+    has_meta: bool,
+    has_page_url: bool,
+    reject_reason: str,
+    accept_reason: str,
+    final_score: int,
+    legacy_fallback_used: bool,
+) -> None:
+    """Log a compact decision trace for each image candidate evaluation."""
+    logger.info(
+        "IMAGE_DECISION_TRACE mode=%s subject=%r family=%s provider=%s "
+        "meta=%s page_url=%s reject=%s accept=%s score=%d "
+        "legacy_fallback=%s url=%r",
+        mode, (subject or "")[:40], family, provider,
+        "yes" if has_meta else "no",
+        "yes" if has_page_url else "no",
+        reject_reason or "-",
+        accept_reason or "-",
+        final_score,
+        "yes" if legacy_fallback_used else "no",
+        (url or "")[:80],
+    )
+
+
 def validate_image_for_autopost(
     image_ref: str,
     *,
@@ -1357,7 +1437,16 @@ def validate_image_for_autopost(
             return False
 
     # --- LEGACY: Channel-based checks (always run for safety) ---
-    family = detect_topic_family(topic + " " + prompt)
+    # Prioritize post subject for family detection: post_text/title contain the
+    # actual subject, while channel topic is only a weak prior.
+    _family_source = ""
+    if post_text:
+        _family_source = post_text[:400]
+    if title:
+        _family_source = (title + " " + _family_source).strip()
+    if not _family_source:
+        _family_source = topic + " " + prompt
+    family = detect_topic_family(_family_source)
 
     # Check 1: URL-based off-topic signals
     if family in STRICT_IMAGE_FAMILIES:
@@ -1406,23 +1495,32 @@ def validate_image_for_autopost(
             return False
 
     # Check 4: URL-path keyword sanity for images WITHOUT metadata.
+    # SKIP for CDN/asset URLs where path is a hash/ID and never contains topic words.
     if not image_meta and (topic or prompt):
-        url_path = urlparse(image_ref).path.lower().replace("-", " ").replace("_", " ")
-        _check_tokens = set()
-        for src in (topic, prompt):
-            for tok in re.findall(r"[a-z]{4,}", (src or "").lower()):
-                _check_tokens.add(tok)
-        if post_text:
-            for tok in re.findall(r"[a-z]{4,}", post_text.lower()):
-                _check_tokens.add(tok)
-        if len(_check_tokens) >= 2:
-            url_hits = sum(1 for tok in _check_tokens if tok in url_path)
-            if url_hits == 0 and family in STRICT_IMAGE_FAMILIES:
-                logger.warning(
-                    "VALIDATE_REJECT_NO_META_URL family=%s url=%r topic=%r — no keyword match in URL for strict family",
-                    family, image_ref[:80], topic[:40],
-                )
-                return False
+        if _is_cdn_asset_url(image_ref):
+            logger.debug(
+                "VALIDATE_SKIP_CDN_URL family=%s url=%r topic=%r — "
+                "CDN/asset URL has no semantic path, skipping URL keyword check",
+                family, image_ref[:80], (topic or "")[:40],
+            )
+        else:
+            url_path = urlparse(image_ref).path.lower().replace("-", " ").replace("_", " ")
+            _check_tokens = set()
+            for src in (topic, prompt):
+                for tok in re.findall(r"[a-z]{4,}", (src or "").lower()):
+                    _check_tokens.add(tok)
+            if post_text:
+                for tok in re.findall(r"[a-z]{4,}", post_text.lower()):
+                    _check_tokens.add(tok)
+            if len(_check_tokens) >= 2:
+                url_hits = sum(1 for tok in _check_tokens if tok in url_path)
+                if url_hits == 0 and family in STRICT_IMAGE_FAMILIES:
+                    logger.warning(
+                        "VALIDATE_REJECT_NO_META_URL family=%s url=%r topic=%r — "
+                        "no keyword match in URL for strict family",
+                        family, image_ref[:80], (topic or "")[:40],
+                    )
+                    return False
 
     logger.debug(
         "VALIDATE_ACCEPT family=%s url=%r meta=%r",
