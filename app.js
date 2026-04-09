@@ -1003,7 +1003,7 @@ function renderMediaNode(ref = '', explicitType = '') {
 }
 
 function handleMediaLoadError(img) {
-  const retryCount = parseInt(img.dataset.retryCount || '0', 10);
+  const retryCount = parseInt(img.dataset.retryCount || '0', 10) || 0;
   const maxRetries = 2; // Allow 2 retries (3 total attempts)
 
   if (retryCount >= maxRetries) {

@@ -2,15 +2,16 @@
 test_production_hardening.py — Comprehensive regression tests for production PR.
 
 Tests cover:
-  A. Preview media resolution (5 tests)
+  A. Preview media resolution (7 tests)
   B. Image precision / subject-scene rules (6 tests)
   C. Text anti-fabrication validator (7 tests)
   D. Cross-pipeline subject alignment (2 tests)
   E. Anti-repeat coarse pattern (1 test)
   F. Runtime trace new events (2 tests)
-  G. Template repetition detection (1 test)
+  G. Template repetition detection (2 tests)
+  H. Edge cases (5 tests)
 
-Total: 24 regression tests
+Total: 32 regression tests
 """
 from __future__ import annotations
 
