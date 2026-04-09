@@ -262,12 +262,23 @@ def build_generation_spec(
     archetype_counts = Counter(recent_openers[-6:])
     forbidden_openers = [a for a, c in archetype_counts.items() if c >= 2]
 
+    # Also forbid mini_case if service/master persona is being overused
+    # and the request doesn't explicitly need a personal repair case
+    if is_service_case_overused(recent_openers) and "mini_case" not in forbidden_openers:
+        forbidden_openers.append("mini_case")
+
     # --- Must not force ---
     must_not_force = []
     if generation_mode == "manual" and rq and rq.lower() != ct.lower():
         # When manual request differs from channel topic, don't force channel elements
         must_not_force.append(f"тема канала «{ct}» как основной предмет текста")
         must_not_force.append("клиентские кейсы и истории из практики автора")
+
+    # Don't force service/master persona unless request explicitly needs it
+    input_text = f"{rq} {ct}".lower()
+    has_personal_case_request = any(kw in input_text for kw in _PERSONAL_INPUT_KEYWORDS)
+    if not has_personal_case_request and generation_mode != "news":
+        must_not_force.append("личные истории из практики и кейсы клиентов (если не запрошены явно)")
 
     # --- Source facts and forbidden facts (populated by caller for news mode) ---
     source_facts = list(settings.get("source_facts") or [])
@@ -760,6 +771,130 @@ def is_service_case_overused(
     """Check if mini_case/service_case archetype is overused in recent outputs."""
     balance = compute_archetype_balance(recent_archetypes, window)
     return balance.get("mini_case", 0.0) > MAX_SERVICE_CASE_RATIO
+
+
+# ---------------------------------------------------------------------------
+# Overused opener pattern detection and diversity scoring
+# ---------------------------------------------------------------------------
+
+# Repetitive opener patterns that should be penalized when overused.
+# These are common "crutch" patterns that AI tends to fall back on.
+_OVERUSED_OPENER_PATTERNS: list[tuple[str, str]] = [
+    # (pattern_substring, bucket_name)
+    ("клиент пришёл", "client_came"),
+    ("клиент пришел", "client_came"),
+    ("ко мне обратил", "client_came"),
+    ("ко мне пришёл", "client_came"),
+    ("ко мне пришел", "client_came"),
+    ("в моём сервисе", "my_service"),
+    ("в моем сервисе", "my_service"),
+    ("в нашем сервисе", "my_service"),
+    ("в моей мастерской", "my_service"),
+    ("в нашей мастерской", "my_service"),
+    ("машина не заводится", "car_wont_start"),
+    ("машина не завелась", "car_wont_start"),
+    ("не заводится", "car_wont_start"),
+    ("сразу думаешь", "immediate_thought"),
+    ("первая мысль", "immediate_thought"),
+    ("из практики", "from_practice"),
+    ("из моей практики", "from_practice"),
+    ("из нашей практики", "from_practice"),
+    ("случай из", "from_practice"),
+    ("недавно ко мне", "recent_visit"),
+    ("недавно к нам", "recent_visit"),
+    ("приехал клиент", "client_came"),
+    ("звонит клиент", "client_came"),
+    ("пишет клиент", "client_came"),
+    ("мой последний клиент", "client_came"),
+]
+
+# Ideal opener type rotation — used to suggest alternatives
+OPENER_DIVERSITY_BUCKETS = [
+    "fact_trend",       # fact or trend opener
+    "observation",      # concrete observation
+    "contrast",         # comparison / contrast
+    "question",         # reader question
+    "mini_case",        # case study (should be rare)
+    "stat_number",      # number / statistic angle
+    "news_takeaway",    # concise news takeaway
+]
+
+
+def classify_opener_bucket(text: str) -> str:
+    """Classify the opener of a text into a diversity bucket.
+
+    Returns one of OPENER_DIVERSITY_BUCKETS or 'other'.
+    """
+    if not text:
+        return "other"
+    opener = text.split("\n", 1)[0].strip().lower()[:200]
+
+    # Check for overused patterns first
+    for pattern, bucket in _OVERUSED_OPENER_PATTERNS:
+        if pattern in opener:
+            return "mini_case"  # All client/service patterns map to mini_case
+
+    if "?" in opener:
+        return "question"
+    if any(w in opener for w in ["тренд", "всё чаще", "набирает", "в последнее время"]):
+        return "fact_trend"
+    if any(w in opener for w in ["%", "процент", "цифр", "миллион", "тысяч"]):
+        return "stat_number"
+    if any(w in opener for w in ["в отличие", "однако", "но ", "зато", "если сравн"]):
+        return "contrast"
+    if any(w in opener for w in ["замеч", "наблюд", "вижу", "обратил"]):
+        return "observation"
+    if any(w in opener for w in ["новост", "анонс", "релиз", "запуск", "объявил"]):
+        return "news_takeaway"
+    return "other"
+
+
+def compute_opener_penalty(
+    text: str,
+    recent_openers: list[str],
+    window: int = 8,
+) -> int:
+    """Compute a penalty score for repetitive opener patterns.
+
+    Checks if the text's opener matches overused patterns and
+    if the opener bucket was recently used.
+
+    Returns penalty (0 or negative). More negative = more repetitive.
+    """
+    if not text:
+        return 0
+
+    penalty = 0
+    opener_lower = text.split("\n", 1)[0].strip().lower()[:200]
+
+    # 1. Check for overused opener patterns (crutch patterns)
+    for pattern, _bucket in _OVERUSED_OPENER_PATTERNS:
+        if pattern in opener_lower:
+            penalty -= 3  # Each hit gets a small penalty
+            break  # One is enough
+
+    # 2. Check if the same bucket was used recently
+    if recent_openers:
+        current_bucket = classify_opener_bucket(text)
+        from collections import Counter
+        recent_buckets = [classify_opener_bucket(o) for o in recent_openers[-window:]]
+        bucket_counts = Counter(recent_buckets)
+        count = bucket_counts.get(current_bucket, 0)
+        if count >= 3:
+            penalty -= 5  # Very overused
+        elif count >= 2:
+            penalty -= 3  # Getting repetitive
+
+    return penalty
+
+
+def is_opener_repetitive(
+    text: str,
+    recent_openers: list[str],
+    threshold: int = -3,
+) -> bool:
+    """Return True if the opener is considered repetitive based on recent history."""
+    return compute_opener_penalty(text, recent_openers) <= threshold
 
 
 # ---------------------------------------------------------------------------

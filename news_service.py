@@ -113,6 +113,11 @@ logger = logging.getLogger(__name__)
 NEWS_MAX_AGE_DAYS = 3  # Enforce strict recency; articles older than 3 days are stale for an active channel
 MIN_NEWS_RELEVANCE = 18
 
+# Stage-1 (broad recall) uses a much lower threshold to avoid discarding
+# candidates too early. Stage-2 reranking picks the best from the broader pool.
+_STAGE1_MIN_RELEVANCE = 6
+_STAGE1_MIN_HITS = 1  # at least 1 relevance term hit to survive stage-1
+
 
 def _clean(text: str) -> str:
     text = html.unescape(text or "")
@@ -465,7 +470,10 @@ def _candidate_score(topic: str, title: str, description: str, article_text: str
 
 
 async def fetch_news_candidates(owner_id: int = 0, limit: int = 5, *, channel_target: str = "", channel_profile_id: int | None = None) -> list[dict]:
-    """Fetch news candidates using channel-scoped settings.
+    """Fetch news candidates using 2-stage pipeline: broad recall → rerank.
+
+    Stage 1: Gather many raw candidates with a loose relevance threshold.
+    Stage 2: Rerank by freshness, relevance, source quality, dedup.
 
     When *channel_profile_id* is provided, settings are read from that specific
     channel profile — not the active channel and not the owner-level flat table.
@@ -489,9 +497,16 @@ async def fetch_news_candidates(owner_id: int = 0, limit: int = 5, *, channel_ta
     queries = _topic_query_variants(topic, settings)
     exclusions_raw = (settings.get("content_exclusions") or "").strip()
     exclusion_terms = [_normalize(t) for t in re.split(r"[,\n]+", exclusions_raw) if t.strip()] if exclusions_raw else []
-    candidates: list[dict] = []
+
+    # ── Stage 1: broad recall ──────────────────────────────────────────
+    raw_candidates: list[dict] = []
+    stage1_filtered = 0
+    stage1_exclusion_filtered = 0
+    stage1_dedup_filtered = 0
+    stage1_used_filtered = 0
     seen_links: set[str] = set()
     seen_title_tokens: list[set[str]] = []  # For near-duplicate detection
+    max_raw = max(30, limit * 6)  # Gather more raw candidates
 
     for query in queries:
         for scoped in (_build_rss_url(query, sources), _build_rss_url(query, [])):
@@ -515,11 +530,13 @@ async def fetch_news_candidates(owner_id: int = 0, limit: int = 5, *, channel_ta
                     continue
                 seen_links.add(link)
                 if await db.is_news_used(link, owner_id=owner_id, channel_target=channel_target):
+                    stage1_used_filtered += 1
                     continue
                 # Filter out news matching content exclusions
                 if exclusion_terms:
                     body_check = _normalize(f"{title} {description}")
                     if any(term in body_check for term in exclusion_terms):
+                        stage1_exclusion_filtered += 1
                         continue
                 # Near-duplicate detection: skip articles with >70% title overlap
                 title_tokens = set(_normalize(title).split())
@@ -527,19 +544,24 @@ async def fetch_news_candidates(owner_id: int = 0, limit: int = 5, *, channel_ta
                     len(title_tokens & prev) / max(len(title_tokens | prev), 1) > 0.7
                     for prev in seen_title_tokens
                 ):
+                    stage1_dedup_filtered += 1
                     continue
                 seen_title_tokens.append(title_tokens)
 
                 article_text, image_url = await _extract_article_text_and_image(link)
                 domain = urlparse(link).netloc
                 score, relevance_hits = _candidate_score(topic, title, description, article_text, domain, pub_date, settings)
-                if relevance_hits < 2 or score < MIN_NEWS_RELEVANCE:
+
+                # Stage-1: loose threshold — keep candidates with minimal relevance
+                if relevance_hits < _STAGE1_MIN_HITS or score < _STAGE1_MIN_RELEVANCE:
+                    stage1_filtered += 1
                     continue
-                # Source confidence check: news without article body get a score penalty
+
+                # Source confidence check
                 _source_conf = bool(article_text and len(article_text.strip()) >= 100)
                 if not _source_conf:
                     score -= 8  # Weak source — headline + snippet only
-                candidates.append({
+                raw_candidates.append({
                     "title": title,
                     "link": link,
                     "description": description[:400],
@@ -552,14 +574,46 @@ async def fetch_news_candidates(owner_id: int = 0, limit: int = 5, *, channel_ta
                     "pub_date": pub_date.isoformat() if pub_date else "",
                     "relevance_hits": relevance_hits,
                 })
-                if len(candidates) >= max(12, limit * 4):
+                if len(raw_candidates) >= max_raw:
                     break
-            if len(candidates) >= max(12, limit * 4):
+            if len(raw_candidates) >= max_raw:
                 break
-        if len(candidates) >= max(12, limit * 4):
+        if len(raw_candidates) >= max_raw:
             break
 
-    candidates.sort(key=lambda x: (x.get("score", 0), x.get("pub_date", "")), reverse=True)
+    logger.info(
+        "NEWS_STAGE1 raw_collected=%d filtered_score=%d filtered_exclusion=%d "
+        "filtered_dedup=%d filtered_used=%d topic=%r queries=%d",
+        len(raw_candidates), stage1_filtered, stage1_exclusion_filtered,
+        stage1_dedup_filtered, stage1_used_filtered,
+        (topic or "")[:60], len(queries),
+    )
+
+    if not raw_candidates:
+        logger.info("NEWS_STAGE1_EMPTY topic=%r — no candidates survived broad recall", (topic or "")[:60])
+        return []
+
+    # ── Stage 2: rerank ────────────────────────────────────────────────
+    # Separate into strong (passes original threshold) and weak candidates
+    strong: list[dict] = []
+    weak: list[dict] = []
+    for c in raw_candidates:
+        if c.get("relevance_hits", 0) >= 2 and c.get("score", 0) >= MIN_NEWS_RELEVANCE:
+            strong.append(c)
+        else:
+            weak.append(c)
+
+    # Sort strong by score desc, weak by score desc
+    strong.sort(key=lambda x: (x.get("score", 0), x.get("pub_date", "")), reverse=True)
+    weak.sort(key=lambda x: (x.get("score", 0), x.get("pub_date", "")), reverse=True)
+
+    # Merge: strong first, then weak as fallback
+    candidates = strong + weak
+
+    logger.info(
+        "NEWS_STAGE2 strong=%d weak=%d total=%d",
+        len(strong), len(weak), len(candidates),
+    )
 
     # Diversity pass: avoid returning candidates from the same domain/story cluster.
     # The top-scoring candidate is always kept regardless of domain limits,
@@ -582,7 +636,17 @@ async def fetch_news_candidates(owner_id: int = 0, limit: int = 5, *, channel_ta
                     diverse.append(c)
                     if len(diverse) >= limit:
                         break
-        return diverse[:limit]
+        result = diverse[:limit]
+    else:
+        result = candidates[:limit]
+
+    logger.info(
+        "NEWS_FINAL returned=%d best_score=%d best_title=%r",
+        len(result),
+        result[0].get("score", 0) if result else 0,
+        (result[0].get("title", "")[:60]) if result else "",
+    )
+    return result
 
     return candidates[:limit]
 
