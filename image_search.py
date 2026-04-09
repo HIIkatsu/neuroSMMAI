@@ -1157,14 +1157,14 @@ async def find_image(
     Legacy flow (backward-compatible):
     Uses family detection from query + topic, build_best_visual_queries, _meta_score.
     """
-    from image_pipeline import run_image_pipeline, MODE_AUTOPOST, MODE_EDITOR
-    pipeline_mode = mode if mode in (MODE_AUTOPOST, MODE_EDITOR) else MODE_AUTOPOST
+    # --- Pipeline v3 (new core) ---
+    from image_pipeline_v3 import run_pipeline_v3, MODE_AUTOPOST as V3_AUTOPOST, MODE_EDITOR as V3_EDITOR
+    pipeline_mode = mode if mode in (V3_AUTOPOST, V3_EDITOR) else V3_AUTOPOST
 
-    # --- NEW: Post-centric pipeline ---
     actual_post_text = post_text or ""
     actual_title = title or query or ""
     if actual_post_text or actual_title:
-        result = await run_image_pipeline(
+        result = await run_pipeline_v3(
             title=actual_title,
             body=actual_post_text,
             channel_topic=topic,
@@ -1175,10 +1175,10 @@ async def find_image(
             return result.image_url
         if result.no_image_reason:
             logger.info(
-                "IMAGE_POSTCENTRIC_NO_IMAGE reason=%s outcome=%s mode=%s query=%r",
+                "IMAGE_V3_NO_IMAGE reason=%s outcome=%s mode=%s query=%r",
                 result.no_image_reason, result.outcome, pipeline_mode, query[:60],
             )
-        # If post-centric pipeline found nothing, try legacy as last resort
+        # If v3 pipeline found nothing, try legacy as last resort
         # but only if there's query text distinct from post text
         if not query or query == actual_title:
             return ""
@@ -1334,24 +1334,24 @@ def validate_image_for_autopost(
 
     url_lower = image_ref.lower()
 
-    # --- Post-centric validation ---
+    # --- Post-centric validation (v3) ---
     actual_post_text = post_text or ""
     actual_title = title or prompt or ""
     if (actual_post_text or actual_title) and image_meta:
-        from image_pipeline import validate_image_post_centric, MODE_AUTOPOST, MODE_EDITOR
-        from visual_intent import extract_visual_intent
-        pipeline_mode = mode if mode in (MODE_AUTOPOST, MODE_EDITOR) else MODE_AUTOPOST
-        intent = extract_visual_intent(
+        from image_pipeline_v3 import validate_image_post_centric_v3, MODE_AUTOPOST as V3_AUTO, MODE_EDITOR as V3_ED
+        from visual_intent_v2 import extract_visual_intent_v2
+        pipeline_mode = mode if mode in (V3_AUTO, V3_ED) else V3_AUTO
+        intent = extract_visual_intent_v2(
             title=actual_title,
             body=actual_post_text,
             channel_topic=topic,
         )
-        is_valid, reject_reason = validate_image_post_centric(
+        is_valid, reject_reason = validate_image_post_centric_v3(
             image_ref, intent=intent, image_meta=image_meta, mode=pipeline_mode,
         )
         if not is_valid:
             logger.warning(
-                "VALIDATE_POSTCENTRIC_REJECT reason=%s mode=%s url=%r",
+                "VALIDATE_V3_REJECT reason=%s mode=%s url=%r",
                 reject_reason, pipeline_mode, image_ref[:80],
             )
             return False
