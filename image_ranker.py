@@ -631,7 +631,7 @@ def score_candidate(
     # for dish/object-specific posts
     if fb_level == "family" and subject_hits == 0:
         # Family-only match: reduce score significantly for specific subjects
-        if intent.subject and len(intent.subject.split()) >= 1:
+        if intent.subject:
             score = min(score, MAX_SCORE_WITHOUT_AFFIRMATION + 5)
     if fb_level == "weak":
         score = min(score, MAX_SCORE_WITHOUT_AFFIRMATION)

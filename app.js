@@ -985,7 +985,7 @@ function handleMediaLoadError(img) {
     const hadAuth = fullSrc.includes('tgWebAppData=');
     const initData = !hadAuth ? extractTelegramInitData() : null;
     // Check if this is a local media path that needs auth (not just /api/)
-    const needsAuth = fullSrc.includes('/api/') || fullSrc.includes('/uploads/') || fullSrc.includes('/generated-images/');
+    const needsAuth = fullSrc.includes('/api/') || fullSrc.includes('/uploads/') || fullSrc.includes('/generated-images/') || fullSrc.includes('/generated_images/');
     if (initData && needsAuth) {
       // Strip query params and rebuild with auth + cache bust
       const base = fullSrc.split('?')[0];

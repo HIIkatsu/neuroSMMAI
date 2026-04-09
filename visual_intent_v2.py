@@ -362,6 +362,7 @@ _SUBJECT_TRANSLATIONS: list[tuple[str, str]] = [
     ("сад", "garden"), ("огород", "vegetable garden"),
     ("парк", "park"),
     (" лес ", "forest"), (" лесу", "forest"), (" лесн", "forest"),
+    (" леса", "forest"), (" лесом", "forest"), (" лесе", "forest"),
     ("озер", "lake"),
     # Business
     ("офис", "office"), ("склад", "warehouse"), ("магазин", "shop store"),
