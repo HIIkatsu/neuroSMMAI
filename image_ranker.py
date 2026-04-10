@@ -749,6 +749,7 @@ def score_candidate(
             reject_reason = "no_positive_affirmation"
 
     cs.post_centric_score = score
+    cs.final_score = score  # Also set final_score for direct determine_outcome() calls
     cs.reject_reason = reject_reason
     return score, reject_reason, cs
 
@@ -872,6 +873,10 @@ def determine_outcome(cs: CandidateScore, mode: str = "autopost") -> str:
             return OUTCOME_REJECT_WRONG_SENSE
         return OUTCOME_REJECT_CROSS_FAMILY
 
+    # Repeat penalty overrides even high score — a repeated image is never OK
+    if cs.repeat_penalty <= -200:
+        return OUTCOME_REJECT_REPEAT
+
     score = cs.final_score
 
     if score >= ACCEPT_MIN_SCORE:
@@ -886,7 +891,5 @@ def determine_outcome(cs: CandidateScore, mode: str = "autopost") -> str:
         return OUTCOME_REJECT_WRONG_SENSE
     if cs.reject_reason and "generic_filler" in cs.reject_reason:
         return OUTCOME_REJECT_GENERIC_FILLER
-    if cs.repeat_penalty <= -200:
-        return OUTCOME_REJECT_REPEAT
 
     return OUTCOME_REJECT_LOW_CONFIDENCE

@@ -498,18 +498,19 @@ class TestCandidateReranking(unittest.TestCase):
 # 10. Mode-specific threshold tests
 # ===========================================================================
 class TestModeSpecificThresholds(unittest.TestCase):
-    """Autopost and editor modes must have different thresholds."""
+    """Unified threshold: editor and autopost share the same ACCEPT_MIN_SCORE."""
 
     def test_autopost_threshold_is_strict(self):
-        """Autopost threshold should be significantly higher than editor."""
-        self.assertGreater(AUTOPOST_MIN_SCORE, EDITOR_MIN_SCORE * 3)
+        """Unified threshold: AUTOPOST_MIN_SCORE == EDITOR_MIN_SCORE == 25."""
+        self.assertEqual(AUTOPOST_MIN_SCORE, EDITOR_MIN_SCORE)
+        self.assertGreaterEqual(AUTOPOST_MIN_SCORE, 25)
 
-    def test_same_score_different_outcome_by_mode(self):
-        """Score of 15 → accepted in editor, rejected in autopost."""
+    def test_same_score_same_outcome_by_mode(self):
+        """Score of 15 → rejected in both modes (unified threshold)."""
         cs = CandidateScore(final_score=15)
         editor_out = determine_outcome(cs, "editor")
         autopost_out = determine_outcome(cs, "autopost")
-        self.assertIn("ACCEPT", editor_out)
+        self.assertIn("REJECT", editor_out)
         self.assertIn("REJECT", autopost_out)
 
 

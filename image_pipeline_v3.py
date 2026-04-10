@@ -124,6 +124,7 @@ class PipelineResult:
             "visual_sense": (intent.sense if intent else "")[:30],
             "imageability": intent.imageability if intent else "",
             "search_queries": [q[:40] for q in (intent.query_terms if intent else [])[:3]],
+            "negative_terms": [t[:30] for t in (intent.negative_terms if intent else [])[:5]],
             "editor_candidates_count": len(self.editor_candidates),
         }
 
