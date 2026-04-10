@@ -789,8 +789,8 @@ class GoldenCase:
         # Expected intent properties
         expect_subject_contains: list[str] | None = None,
         expect_subject_not_contains: list[str] | None = None,
-        expect_visuality: str | None = None,
-        expect_visuality_in: list[str] | None = None,
+        expect_imageability: str | None = None,
+        expect_imageability_in: list[str] | None = None,
         expect_forbidden: list[str] | None = None,
         expect_sense: str | None = None,
         # Candidate scoring expectations
@@ -810,8 +810,8 @@ class GoldenCase:
         self.channel_topic = channel_topic
         self.expect_subject_contains = expect_subject_contains or []
         self.expect_subject_not_contains = expect_subject_not_contains or []
-        self.expect_visuality = expect_visuality
-        self.expect_visuality_in = expect_visuality_in
+        self.expect_imageability = expect_imageability
+        self.expect_imageability_in = expect_imageability_in
         self.expect_forbidden = expect_forbidden
         self.expect_sense = expect_sense
         self.good_meta = good_meta
@@ -832,7 +832,7 @@ GOLDEN_CASES: list[GoldenCase] = [
         title="Обзор Toyota Camry 2024",
         body="Тест-драйв нового седана Toyota Camry. Двигатель, расход, салон.",
         expect_subject_contains=["car"],
-        expect_visuality=IMAGEABILITY_HIGH,
+        expect_imageability=IMAGEABILITY_HIGH,
     ),
     GoldenCase(
         name="cars_02_channel_mismatch",
@@ -926,7 +926,7 @@ GOLDEN_CASES: list[GoldenCase] = [
         title="Рецепт домашней пиццы",
         body="Готовим пиццу маргариту на тонком тесте.",
         expect_subject_contains=["pizza"],
-        expect_visuality=IMAGEABILITY_HIGH,
+        expect_imageability=IMAGEABILITY_HIGH,
     ),
     GoldenCase(
         name="food_02_coffee",
@@ -969,13 +969,13 @@ GOLDEN_CASES: list[GoldenCase] = [
         name="health_02_workout",
         title="Тренировка в спортзале для начинающих",
         body="Программа тренировок на неделю: упражнения, подходы.",
-        expect_visuality=IMAGEABILITY_HIGH,
+        expect_imageability=IMAGEABILITY_HIGH,
     ),
     GoldenCase(
         name="health_03_abstract_kpi",
         title="KPI клиники: метрики эффективности",
         body="Как считать ROI в медицинском бизнесе.",
-        expect_visuality_in=[IMAGEABILITY_LOW, IMAGEABILITY_NONE],
+        expect_imageability_in=[IMAGEABILITY_LOW, IMAGEABILITY_NONE],
     ),
     GoldenCase(
         name="health_04_ranking",
@@ -990,28 +990,28 @@ GOLDEN_CASES: list[GoldenCase] = [
         name="news_01_abstract_news",
         title="Новости дня: обзор",
         body="Главные события и анонсы за неделю.",
-        expect_visuality_in=[IMAGEABILITY_LOW, IMAGEABILITY_NONE],
+        expect_imageability_in=[IMAGEABILITY_LOW, IMAGEABILITY_NONE],
     ),
     GoldenCase(
         name="news_02_specific_event",
         title="Открытие нового ресторана в центре Москвы",
         body="Ресторан итальянской кухни открылся на Тверской.",
         expect_subject_contains=["restaurant"],
-        expect_visuality_in=[IMAGEABILITY_HIGH, IMAGEABILITY_MEDIUM],
+        expect_imageability_in=[IMAGEABILITY_HIGH, IMAGEABILITY_MEDIUM],
     ),
     # --- BUSINESS / BRAND ---
     GoldenCase(
         name="business_01_abstract",
         title="Стратегия развития бренда",
         body="Как построить узнаваемый бренд в 2024 году.",
-        expect_visuality_in=[IMAGEABILITY_LOW, IMAGEABILITY_MEDIUM],
+        expect_imageability_in=[IMAGEABILITY_LOW, IMAGEABILITY_MEDIUM],
     ),
     GoldenCase(
         name="business_02_office",
         title="Как обустроить офис для продуктивности",
         body="Интерьер офиса: мебель, свет, растения.",
         expect_subject_contains=["office"],
-        expect_visuality_in=[IMAGEABILITY_HIGH, IMAGEABILITY_MEDIUM],
+        expect_imageability_in=[IMAGEABILITY_HIGH, IMAGEABILITY_MEDIUM],
     ),
     GoldenCase(
         name="business_03_generic_stock_reject",
@@ -1038,7 +1038,7 @@ GOLDEN_CASES: list[GoldenCase] = [
         name="edu_03_abstract_content_plan",
         title="Контент-план для образовательного канала",
         body="Как составить контент-план на месяц.",
-        expect_visuality_in=[IMAGEABILITY_LOW, IMAGEABILITY_NONE],
+        expect_imageability_in=[IMAGEABILITY_LOW, IMAGEABILITY_NONE],
     ),
     # --- TECH / GADGETS ---
     GoldenCase(
@@ -1079,7 +1079,7 @@ GOLDEN_CASES: list[GoldenCase] = [
         title="Модный маникюр 2024",
         body="Тренды nail art: цвета, дизайн, техника.",
         expect_subject_contains=["manicure"],
-        expect_visuality=IMAGEABILITY_HIGH,
+        expect_imageability=IMAGEABILITY_HIGH,
     ),
     GoldenCase(
         name="beauty_02_haircut",
@@ -1119,32 +1119,32 @@ GOLDEN_CASES: list[GoldenCase] = [
         name="noimage_01_poll",
         title="Голосование: какой вариант лучше?",
         body="Опрос для подписчиков.",
-        expect_visuality=IMAGEABILITY_NONE,
+        expect_imageability=IMAGEABILITY_NONE,
         expect_no_image=True,
     ),
     GoldenCase(
         name="noimage_02_content_plan",
         title="Контент-план на неделю",
         body="Стратегия публикаций для Telegram канала.",
-        expect_visuality_in=[IMAGEABILITY_LOW, IMAGEABILITY_NONE],
+        expect_imageability_in=[IMAGEABILITY_LOW, IMAGEABILITY_NONE],
     ),
     GoldenCase(
         name="noimage_03_quotes",
         title="Подборка цитат о мотивации",
         body="Лучшие цитаты великих людей.",
-        expect_visuality_in=[IMAGEABILITY_LOW, IMAGEABILITY_NONE],
+        expect_imageability_in=[IMAGEABILITY_LOW, IMAGEABILITY_NONE],
     ),
     GoldenCase(
         name="noimage_04_opinion",
         title="Моё мнение о текущей ситуации",
         body="Размышления о жизни и работе.",
-        expect_visuality_in=[IMAGEABILITY_LOW, IMAGEABILITY_NONE],
+        expect_imageability_in=[IMAGEABILITY_LOW, IMAGEABILITY_NONE],
     ),
     GoldenCase(
         name="noimage_05_empty",
         title="",
         body="",
-        expect_visuality=IMAGEABILITY_NONE,
+        expect_imageability=IMAGEABILITY_NONE,
         expect_no_image=True,
     ),
     # --- CROSS-FAMILY FALSE POSITIVES ---
@@ -1338,18 +1338,18 @@ class TestGoldenDataset(unittest.TestCase):
             )
 
         # --- Check visuality ---
-        if case.expect_visuality:
+        if case.expect_imageability:
             self.assertEqual(
                 intent.imageability,
-                case.expect_visuality,
-                f"[{case.name}] Expected visuality={case.expect_visuality}, "
+                case.expect_imageability,
+                f"[{case.name}] Expected visuality={case.expect_imageability}, "
                 f"got {intent.imageability}",
             )
-        if case.expect_visuality_in:
+        if case.expect_imageability_in:
             self.assertIn(
                 intent.imageability,
-                case.expect_visuality_in,
-                f"[{case.name}] Expected visuality in {case.expect_visuality_in}, "
+                case.expect_imageability_in,
+                f"[{case.name}] Expected visuality in {case.expect_imageability_in}, "
                 f"got {intent.imageability}",
             )
 
