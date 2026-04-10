@@ -3960,7 +3960,7 @@ async function runEditorAIGeneration() {
       mediaEl.value = newMediaRef;
     } else if (mediaEl && previousMediaRef && !newMediaRef) {
       // Detect stale ref reset: server returned empty media but we had one before
-      if (window._PREVIEW_DEBUG) console.log(`PREVIEW_SRC_RESET_AFTER_REFRESH prev=${previousMediaRef.substring(0, 60)} new=empty`);
+      if (window._PREVIEW_DEBUG) console.log(`PREVIEW_SRC_RESET_AFTER_REFRESH prev=${previousMediaRef.slice(0, 80)} new=empty`);
       // Keep existing media ref — don't wipe it if generation didn't produce a new one
       // This prevents broken preview after regenerate when image search fails
     }

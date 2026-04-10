@@ -62,7 +62,7 @@ _FAKE_NUMERIC_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\b\d{2,3}\s*%\s*(?:людей|клиентов|случаев|пациентов|водителей|пользователей|компаний|владельцев|автомобилей|мастеров|заведений)", re.I),
      "fabricated_percentage_with_subject"),
     (re.compile(r"(?:по данным|согласно|по статистике|по результатам)\s+(?:аналитиков|исследовани|опрос|экспертов|статистик|СТО|сервис|страхов)", re.I),
-     "fabricated_authority_reference"),
+     "fabricated_authority_reference"),  # "страхов" intentionally matches both "страховых" and "страховщиков"
     (re.compile(r"(?:исследовани[ея]|опрос[ы]?|аналитики|эксперты)\s+(?:показали|выявили|обнаружили|подтвердили|установили|доказали)", re.I),
      "fabricated_study_claim"),
     (re.compile(r"(?:в\s+\d{4}\s+(?:году?|г\.?))\s+(?:исследовани|опрос|стат|учёные|эксперты|аналитики)", re.I),
@@ -318,8 +318,15 @@ def validate_generated_text(
     if numeric_violations:
         result.fake_numeric_claims = numeric_violations
         risk += len(numeric_violations) * 3
+        # Categorize: authority-like reasons vs pure numeric reasons
+        _authority_reasons = {
+            "fabricated_authority_reference", "fabricated_study_claim",
+            "fabricated_dated_study", "fabricated_industry_claim",
+            "fabricated_scientific_proof", "fabricated_named_authority",
+            "fabricated_data_authority",
+        }
         for v in numeric_violations:
-            if "authority" in v or "study" in v or "industry" in v or "named" in v or "data_authority" in v:
+            if v in _authority_reasons:
                 result.log_events.append(f"TEXT_FAKE_AUTHORITY_REJECT reason={v}")
             else:
                 result.log_events.append(f"TEXT_FAKE_NUMERIC_REJECT reason={v}")

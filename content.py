@@ -291,11 +291,15 @@ def _apply_fabrication_cleanup(bundle: dict) -> None:
                 bundle[field] = cleaned
 
 
-def _strip_fabricated_claims(text: str, tv_result: Any) -> str:
+def _strip_fabricated_claims(text: str, tv_result: "TextValidationResult") -> str:
     """Attempt to repair text by stripping lines with fabricated claims.
 
     Uses the violation patterns from text_validator to find and remove
     or soften lines containing unsupported numeric/authority/personal claims.
+
+    Args:
+        text: Combined text to repair
+        tv_result: TextValidationResult from validate_text_runtime
     """
     if not text:
         return text
