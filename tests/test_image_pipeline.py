@@ -545,10 +545,11 @@ class TestOutcomeTypes(unittest.TestCase):
         )
 
     def test_editor_only_outcome(self):
-        trace = CandidateScore(final_score=18)  # Between editor and autopost
+        # Unified threshold: score 18 is below ACCEPT_MIN_SCORE=25 for all modes
+        trace = CandidateScore(final_score=18)
         self.assertEqual(
             determine_outcome(trace, MODE_EDITOR),
-            OUTCOME_ACCEPT_FOR_EDITOR,
+            OUTCOME_REJECT_LOW_CONFIDENCE,
         )
         self.assertEqual(
             determine_outcome(trace, MODE_AUTOPOST),
@@ -1253,14 +1254,14 @@ GOLDEN_CASES: list[GoldenCase] = [
         body="Средневековый замок-дворец в Баварии.",
         expect_sense="castle",
     ),
-    # --- MODE-SPECIFIC BEHAVIOR ---
+    # --- MODE-SPECIFIC BEHAVIOR (unified threshold) ---
     GoldenCase(
         name="mode_01_medium_confidence",
         title="Обустройство рабочего офиса",
         body="Как улучшить рабочее пространство и продуктивность.",
         good_meta="workspace productivity environment light setting",
         expect_autopost_rejects=True,
-        expect_editor_accepts=True,
+        expect_editor_accepts=False,  # Unified threshold: same as autopost
     ),
     # --- GENERIC STOCK DETECTION ---
     GoldenCase(

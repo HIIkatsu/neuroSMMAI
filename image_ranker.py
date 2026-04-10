@@ -73,12 +73,18 @@ ACCEPT_MIN_SCORE = 25
 # Backward-compat aliases (tests may reference these)
 AUTOPOST_MIN_SCORE = ACCEPT_MIN_SCORE
 EDITOR_MIN_SCORE = ACCEPT_MIN_SCORE
+EDITOR_SOFT_MIN = ACCEPT_MIN_SCORE  # removed concept; alias for compat
 TOP_N_AUTOPOST = 8
 TOP_N_EDITOR = 10
 
-# Outcome constants (simplified)
+# Provider bonus removed — constants kept as zero/compat
+PROVIDER_BONUS_WEIGHT = 0.0
+PROVIDER_BONUS_CAP = 0
+
+# Outcome constants (simplified — editor and autopost share same outcomes)
 OUTCOME_ACCEPT_BEST = "ACCEPT"
 OUTCOME_ACCEPT_FOR_EDITOR = "ACCEPT"  # Same as ACCEPT — no separate editor path
+OUTCOME_REJECT_NO_MATCH = "REJECT_LOW_CONFIDENCE"  # alias
 OUTCOME_REJECT_WRONG_SENSE = "REJECT_WRONG_SENSE"
 OUTCOME_REJECT_GENERIC_STOCK = "REJECT_GENERIC_STOCK"
 OUTCOME_REJECT_GENERIC_FILLER = "REJECT_GENERIC_FILLER"
@@ -518,16 +524,17 @@ def _compute_generic_stock_penalty(
 def _check_subject_scene_rules(
     meta_lower: str,
     intent: VisualIntentV2,
-) -> tuple[int, int]:
+) -> tuple[int, int, int]:
     """Check subject-specific accept/reject rules.
-    Returns (score_adjustment, reject_hits).
+    Returns (score_adjustment, reject_hits, weak_accept_hits).
     """
     if not intent.subject or not meta_lower:
-        return 0, 0
+        return 0, 0, 0
 
     subject_lower = intent.subject.lower()
     total_adjustment = 0
     reject_hits = 0
+    weak_accept_hits = 0
 
     for subj_key, rules in _SUBJECT_SCENE_RULES.items():
         if subj_key not in subject_lower:
@@ -536,11 +543,14 @@ def _check_subject_scene_rules(
             if term in meta_lower:
                 total_adjustment += P_SCENE_MISMATCH
                 reject_hits += 1
+        for term in rules.get("weak_accept", ()):
+            if term in meta_lower:
+                weak_accept_hits += 1
         accept_hits = sum(1 for t in rules.get("accept", ()) if t in meta_lower)
         if accept_hits > 0:
             total_adjustment += accept_hits * 3
 
-    return total_adjustment, reject_hits
+    return total_adjustment, reject_hits, weak_accept_hits
 
 
 def _check_scene_mismatch(
@@ -700,7 +710,7 @@ def score_candidate(
             reject_reason = "generic_filler"
 
     # --- 11. Subject-specific scene rules ---
-    subj_adj, subj_reject_hits = _check_subject_scene_rules(text, intent)
+    subj_adj, subj_reject_hits, weak_accept_hits = _check_subject_scene_rules(text, intent)
     score += subj_adj
     cs.subject_scene_reject_hits = subj_reject_hits
     if subj_reject_hits > 0 and not reject_reason:
@@ -848,5 +858,35 @@ def compute_provider_bonus(provider_score: int) -> int:
 
 
 def determine_outcome(cs: CandidateScore, mode: str = "autopost") -> str:
-    """Backward compat — just returns cs.outcome."""
-    return cs.outcome or OUTCOME_REJECT_LOW_CONFIDENCE
+    """Determine outcome from CandidateScore fields.
+
+    Same logic for all modes — unified threshold.
+    """
+    # If outcome already computed (e.g. by rank_candidates), return it
+    if cs.outcome:
+        return cs.outcome
+
+    # Hard reject takes priority
+    if cs.hard_reject:
+        if "wrong_sense" in cs.hard_reject:
+            return OUTCOME_REJECT_WRONG_SENSE
+        return OUTCOME_REJECT_CROSS_FAMILY
+
+    score = cs.final_score
+
+    if score >= ACCEPT_MIN_SCORE:
+        return OUTCOME_ACCEPT_BEST
+
+    # Below threshold — classify the rejection reason
+    if cs.generic_stock_hits >= 2:
+        return OUTCOME_REJECT_GENERIC_STOCK
+    if cs.reject_reason and "cross_family" in cs.reject_reason:
+        return OUTCOME_REJECT_CROSS_FAMILY
+    if cs.reject_reason and "wrong_sense" in cs.reject_reason:
+        return OUTCOME_REJECT_WRONG_SENSE
+    if cs.reject_reason and "generic_filler" in cs.reject_reason:
+        return OUTCOME_REJECT_GENERIC_FILLER
+    if cs.repeat_penalty <= -200:
+        return OUTCOME_REJECT_REPEAT
+
+    return OUTCOME_REJECT_LOW_CONFIDENCE

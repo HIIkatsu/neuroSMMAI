@@ -163,6 +163,32 @@ def _record_selection(
 # ---------------------------------------------------------------------------
 # No-image reason determination
 # ---------------------------------------------------------------------------
+_REASON_TO_OUTCOME: dict[str, str] = {
+    "low_imageability": "NO_IMAGE",
+    "no_candidates": "NO_IMAGE",
+    "no_visual_subject": "NO_IMAGE",
+    "weak_subject": "NO_IMAGE",
+    "no_search_queries": "NO_IMAGE",
+    "low_imageability_no_subject": "NO_IMAGE",
+    "no_post_content": "NO_IMAGE",
+    "wrong_sense": "REJECT_WRONG_SENSE",
+    "generic_stock": "REJECT_GENERIC_STOCK",
+    "generic_filler": "REJECT_GENERIC_FILLER",
+    "repeat_image": "REJECT_REPEAT",
+    "blocked_visual": "REJECT_CROSS_FAMILY",
+    "cross_family": "REJECT_CROSS_FAMILY",
+    "low_subject_match": "REJECT_LOW_CONFIDENCE",
+    "low_confidence": "REJECT_LOW_CONFIDENCE",
+    "scene_mismatch": "REJECT_LOW_CONFIDENCE",
+    "subject_scene_reject": "REJECT_LOW_CONFIDENCE",
+}
+
+
+def _reason_to_outcome(reason: str) -> str:
+    """Map a no-image reason string to an outcome constant."""
+    return _REASON_TO_OUTCOME.get(reason, "REJECT_LOW_CONFIDENCE")
+
+
 def _determine_no_image_reason(
     result: PipelineResult,
     intent: VisualIntentV2,
@@ -179,9 +205,13 @@ def _determine_no_image_reason(
     for prefix in ("wrong_sense", "blocked_visual", "cross_family",
                     "scene_mismatch", "subject_scene_reject",
                     "generic_filler", "generic_stock",
-                    "repeat_image", "low_score"):
+                    "repeat_image"):
         if any(r.startswith(prefix) for r in reasons):
             return prefix
+
+    # low_score → more specific label
+    if any(r.startswith("low_score") for r in reasons):
+        return "low_subject_match"
 
     if result.candidates_rejected > 0:
         return "low_confidence"
