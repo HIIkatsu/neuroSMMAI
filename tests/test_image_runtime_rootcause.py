@@ -32,9 +32,6 @@ os.environ.setdefault("OPENROUTER_API_KEY", "test-key")
 from topic_utils import detect_topic_family
 from image_search import (
     validate_image_for_autopost,
-    _is_cdn_asset_url,
-    _provider_from_url,
-    _log_image_decision_trace,
 )
 from ai_image_generator import generate_ai_image, DEFAULT_MODEL
 
@@ -252,137 +249,118 @@ class TestPostSubjectOverridesChannelFamily(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 6. Legacy fallback is explicit and not final by default
+# 6. Image gateway logs are present in the unified pipeline
 # ---------------------------------------------------------------------------
-class TestLegacyFallbackExplicit(unittest.TestCase):
-    """Legacy fallback in find_image must be explicitly logged."""
+class TestUnifiedGatewayLogs(unittest.TestCase):
+    """image_gateway.get_post_image must have structured logging."""
 
-    def test_find_image_has_legacy_fallback_log(self):
-        """find_image source code must contain IMAGE_LEGACY_FALLBACK_USED log."""
+    def test_gateway_has_accept_log(self):
+        """image_gateway source must contain IMAGE_GATEWAY_ACCEPT log."""
+        import image_gateway
+        import inspect
+        source = inspect.getsource(image_gateway.get_post_image)
+        self.assertIn("IMAGE_GATEWAY_ACCEPT", source,
+                       "get_post_image must log IMAGE_GATEWAY_ACCEPT when image is found")
+
+    def test_gateway_has_no_image_log(self):
+        """image_gateway source must contain IMAGE_GATEWAY_NO_IMAGE log."""
+        import image_gateway
+        import inspect
+        source = inspect.getsource(image_gateway.get_post_image)
+        self.assertIn("IMAGE_GATEWAY_NO_IMAGE", source,
+                       "get_post_image must log IMAGE_GATEWAY_NO_IMAGE when no image found")
+
+    def test_gateway_has_skip_log(self):
+        """image_gateway source must contain IMAGE_GATEWAY_SKIP log."""
+        import image_gateway
+        import inspect
+        source = inspect.getsource(image_gateway.get_post_image)
+        self.assertIn("IMAGE_GATEWAY_SKIP", source,
+                       "get_post_image must log when skipping due to no content")
+
+    def test_find_image_delegates_to_gateway(self):
+        """find_image in image_search must delegate to image_gateway."""
         import image_search
         import inspect
         source = inspect.getsource(image_search.find_image)
-        self.assertIn("IMAGE_LEGACY_FALLBACK_USED", source,
-                       "find_image must explicitly log when legacy fallback is used")
-
-    def test_find_image_has_v3_accept_log(self):
-        """find_image source code must contain IMAGE_V3_ACCEPT log."""
-        import image_search
-        import inspect
-        source = inspect.getsource(image_search.find_image)
-        self.assertIn("IMAGE_V3_ACCEPT", source,
-                       "find_image must log IMAGE_V3_ACCEPT when v3 pipeline accepts")
-
-    def test_find_image_has_v3_reject_log(self):
-        """find_image source code must contain IMAGE_V3_REJECT log."""
-        import image_search
-        import inspect
-        source = inspect.getsource(image_search.find_image)
-        self.assertIn("IMAGE_V3_REJECT", source,
-                       "find_image must log IMAGE_V3_REJECT when v3 pipeline rejects")
-
-    def test_find_image_has_v3_no_match_log(self):
-        """find_image source code must contain IMAGE_V3_NO_MATCH log."""
-        import image_search
-        import inspect
-        source = inspect.getsource(image_search.find_image)
-        self.assertIn("IMAGE_V3_NO_MATCH", source,
-                       "find_image must log IMAGE_V3_NO_MATCH when v3 finds nothing")
+        self.assertIn("get_post_image", source,
+                       "find_image must delegate to image_gateway.get_post_image")
 
 
 # ---------------------------------------------------------------------------
-# 7. CDN asset URL detection helper
+# 7. Image validation accepts CDN URLs correctly
 # ---------------------------------------------------------------------------
-class TestCdnAssetUrlDetection(unittest.TestCase):
-    """_is_cdn_asset_url must correctly identify known CDN/asset URL patterns."""
+class TestCdnUrlValidation(unittest.TestCase):
+    """validate_image_for_autopost must handle CDN URLs without false rejection."""
 
-    def test_pixabay_get_url(self):
-        self.assertTrue(_is_cdn_asset_url(
-            "https://pixabay.com/get/gf6172cb3dddedad1d4c7e1e9df0b2441916667f02a5a688531c8732"
-        ))
-
-    def test_pexels_photos_url(self):
-        self.assertTrue(_is_cdn_asset_url(
-            "https://images.pexels.com/photos/11350076/pexels-photo-11350076.jpeg?auto=compress"
-        ))
-
-    def test_unsplash_photo_url(self):
-        self.assertTrue(_is_cdn_asset_url(
-            "https://images.unsplash.com/photo-1234567890?w=400"
-        ))
-
-    def test_cdn_pixabay_url(self):
-        self.assertTrue(_is_cdn_asset_url(
-            "https://cdn.pixabay.com/photo/2020/01/01/000000_960_720.jpg"
-        ))
-
-    def test_random_url_not_cdn(self):
-        self.assertFalse(_is_cdn_asset_url(
-            "https://example.com/images/scooter-repair-workshop.jpg"
-        ))
-
-    def test_semantic_url_not_cdn(self):
-        self.assertFalse(_is_cdn_asset_url(
-            "https://blog.example.com/wp-content/uploads/massage-therapy-studio.jpg"
-        ))
-
-
-# ---------------------------------------------------------------------------
-# 8. Decision trace logging helper
-# ---------------------------------------------------------------------------
-class TestDecisionTraceLogging(unittest.TestCase):
-    """_log_image_decision_trace must run without errors."""
-
-    def test_trace_log_runs_without_error(self):
-        """Decision trace helper should not raise."""
-        _log_image_decision_trace(
-            url="https://pixabay.com/get/abc123",
-            mode="autopost",
-            subject="самокат",
-            family="generic",
-            provider="pixabay",
-            has_meta=False,
-            has_page_url=False,
-            reject_reason="",
-            accept_reason="cdn_skip",
-            final_score=0,
-            legacy_fallback_used=False,
+    def test_pixabay_cdn_url_not_rejected(self):
+        """Pixabay CDN URL should not be rejected for generic posts."""
+        result = validate_image_for_autopost(
+            "https://pixabay.com/get/gf6172cb3dddedad1d4c7e1e9df0b2441916667f02a5a688531c8732",
+            topic="общий",
+            post_text="Интересные факты о мире.",
         )
+        self.assertTrue(result)
 
-    def test_trace_log_with_reject(self):
-        """Decision trace with reject reason should not raise."""
-        _log_image_decision_trace(
-            url="https://example.com/bad-image.jpg",
-            mode="editor",
-            subject="ремонт",
-            family="local_business",
-            provider="unknown",
-            has_meta=True,
-            has_page_url=True,
-            reject_reason="cross_family",
-            accept_reason="",
-            final_score=-10,
-            legacy_fallback_used=True,
+    def test_pexels_cdn_url_not_rejected(self):
+        """Pexels CDN URL should not be rejected for generic posts."""
+        result = validate_image_for_autopost(
+            "https://images.pexels.com/photos/11350076/pexels-photo-11350076.jpeg?auto=compress",
+            topic="общий",
+            post_text="Новые тренды этого года.",
         )
+        self.assertTrue(result)
 
 
 # ---------------------------------------------------------------------------
-# 9. Provider detection from URL
+# 8. Image gateway validate_image function
 # ---------------------------------------------------------------------------
-class TestProviderFromUrl(unittest.TestCase):
-    """_provider_from_url must correctly identify providers."""
+class TestGatewayValidation(unittest.TestCase):
+    """image_gateway.validate_image must work for basic cases."""
 
-    def test_pixabay(self):
-        self.assertEqual(_provider_from_url("https://pixabay.com/get/abc"), "pixabay")
+    def test_validate_empty_ref(self):
+        """Empty image ref should be accepted (nothing to reject)."""
+        from image_gateway import validate_image
+        self.assertTrue(validate_image(""))
 
-    def test_pexels(self):
-        self.assertEqual(_provider_from_url("https://images.pexels.com/photos/123"), "pexels")
+    def test_validate_local_ref(self):
+        """Local file path should be accepted."""
+        from image_gateway import validate_image
+        self.assertTrue(validate_image("/uploads/image.jpg"))
 
-    def test_unsplash(self):
-        self.assertEqual(_provider_from_url("https://images.unsplash.com/photo-123"), "unsplash")
+    def test_validate_http_without_meta(self):
+        """HTTP URL without image_meta should be accepted (no data to reject on)."""
+        from image_gateway import validate_image
+        self.assertTrue(validate_image(
+            "https://example.com/image.jpg",
+            title="test",
+            body="test body",
+        ))
 
-    def test_unknown(self):
-        self.assertEqual(_provider_from_url("https://example.com/image.jpg"), "unknown")
+
+# ---------------------------------------------------------------------------
+# 9. Gateway mode propagation
+# ---------------------------------------------------------------------------
+class TestGatewayModePropagation(unittest.TestCase):
+    """image_gateway must correctly handle mode parameter."""
+
+    def test_editor_mode_accepted(self):
+        """Editor mode should be recognized."""
+        from image_gateway import MODE_EDITOR
+        self.assertEqual(MODE_EDITOR, "editor")
+
+    def test_autopost_mode_accepted(self):
+        """Autopost mode should be recognized."""
+        from image_gateway import MODE_AUTOPOST
+        self.assertEqual(MODE_AUTOPOST, "autopost")
+
+    def test_resolve_post_image_has_mode_param(self):
+        """actions.resolve_post_image must accept mode parameter."""
+        import inspect
+        from actions import resolve_post_image
+        sig = inspect.signature(resolve_post_image)
+        self.assertIn("mode", sig.parameters,
+                       "resolve_post_image must accept mode parameter")
 
 
 # ---------------------------------------------------------------------------

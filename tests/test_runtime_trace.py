@@ -223,12 +223,12 @@ class TestCanonicalTextGenerationPath(unittest.TestCase):
 class TestCanonicalImagePath(unittest.TestCase):
     """Verify editor and autopost image selection go through canonical path."""
 
-    def test_resolve_post_image_calls_find_image(self):
-        """actions.resolve_post_image must call find_image from image_search."""
+    def test_resolve_post_image_calls_gateway(self):
+        """actions.resolve_post_image must call get_post_image from image_gateway."""
         import actions
         import inspect
         source = inspect.getsource(actions.resolve_post_image)
-        self.assertIn("find_image", source)
+        self.assertIn("get_post_image", source)
 
     def test_generate_post_payload_uses_resolve_post_image(self):
         """actions.generate_post_payload must call resolve_post_image for image search."""
@@ -245,13 +245,13 @@ class TestCanonicalImagePath(unittest.TestCase):
         self.assertIn("trace_id", sig.parameters)
 
     def test_image_pipeline_single_path(self):
-        """image_search.find_image should be the single image orchestrator."""
+        """image_search.find_image should delegate to image_gateway."""
         import image_search
         self.assertTrue(hasattr(image_search, 'find_image'))
-        # Verify it calls the pipeline
+        # Verify it calls the gateway
         import inspect
         source = inspect.getsource(image_search.find_image)
-        self.assertIn("build_best_visual_queries", source)
+        self.assertIn("get_post_image", source)
 
 
 # ---------------------------------------------------------------------------

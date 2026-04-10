@@ -36,7 +36,7 @@ from db import (
 import db  # For get_channel_settings, list_channel_profiles
 from content import generate_post_text, _remove_fabricated_refs  # kept for backward compatibility / news hooks
 from actions import publish_draft, resolve_post_image, generate_post_payload
-from image_search import validate_image_for_autopost
+from image_gateway import validate_image
 from news_service import fetch_latest_news, fetch_news_candidates, build_news_post, build_news_source_meta, is_source_confident
 from media_lifecycle import cleanup_temp_media
 from safe_send import safe_send as _safe_send_dm
@@ -795,11 +795,12 @@ class SchedulerService:
                                     raw_user_query=item.get("title") or item.get("topic") or "",
                                 )
                                 # Autopost quality gate: reject semantically irrelevant images
-                                if image_ref and not validate_image_for_autopost(
+                                if image_ref and not validate_image(
                                     image_ref,
-                                    topic=item.get("topic") or "",
-                                    prompt=item.get("title") or "",
-                                    post_text=text,
+                                    title=item.get("title") or "",
+                                    body=text,
+                                    channel_topic=item.get("topic") or "",
+                                    mode="autopost",
                                 ):
                                     logger.warning("_job_news_tick: image rejected by quality gate owner_id=%s url=%r", owner_id, image_ref[:80])
                                     image_ref = ""
