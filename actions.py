@@ -20,6 +20,7 @@ from ai_image_generator import generate_ai_image, _heuristic_prompt
 from runtime_trace import new_trace_id, trace_text_generation, trace_image_selection, TraceTimer, debug_fields, is_debug_trace_enabled
 from safe_send import safe_send, safe_send_document, safe_send_photo, safe_send_video
 from topic_utils import detect_topic_family, detect_subfamily, get_family_image_queries, get_subfamily_image_queries
+from resolved_subject import resolve_post_subject, check_subject_alignment
 
 
 @dataclass
@@ -723,6 +724,25 @@ async def generate_post_payload(
             logger.exception("generate_post_payload image stage failed: %s", exc)
             logger.debug("GENERATE_POST_PAYLOAD_IMAGE_STAGE_FAILED type=%s msg=%r", type(exc).__name__, str(exc)[:300])
             image_ref = ""
+    # --- Cross-pipeline subject alignment check ---
+    try:
+        _resolved = resolve_post_subject(
+            title=title,
+            body=body,
+            channel_topic=channel_topic,
+        )
+        logger.info(
+            "RESOLVED_SUBJECT=%s RESOLVED_SCENE=%s family=%s confidence=%s",
+            _resolved.subject, _resolved.scene, _resolved.post_family, _resolved.confidence,
+        )
+        # Log subject for both pipelines using the same object
+        if image_ref and _resolved.subject:
+            logger.info(
+                "CROSS_PIPELINE_CHECK text_subject=%r image_ref=%r family=%s",
+                _resolved.subject, (image_ref or "")[:80], _resolved.post_family,
+            )
+    except Exception as _subj_exc:
+        logger.debug("RESOLVED_SUBJECT_FAILED: %s", _subj_exc)
     _trace_timer.__exit__(None, None, None)
     _text_trace = trace_text_generation(
         trace_id=_trace_id,

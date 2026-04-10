@@ -3954,7 +3954,16 @@ async function runEditorAIGeneration() {
     const btnTextInput = document.getElementById('dr-btn-text');
     if (btnTextInput && (payload?.button_text || '')) btnTextInput.value = payload.button_text || '';
     const mediaEl = document.getElementById('dr-media-ref');
-    if (mediaEl && (payload?.media_ref || payload?.draft?.media_ref)) mediaEl.value = payload.media_ref || payload.draft.media_ref || '';
+    const previousMediaRef = mediaEl?.value?.trim() || '';
+    const newMediaRef = payload?.media_ref || payload?.draft?.media_ref || '';
+    if (mediaEl && newMediaRef) {
+      mediaEl.value = newMediaRef;
+    } else if (mediaEl && previousMediaRef && !newMediaRef) {
+      // Detect stale ref reset: server returned empty media but we had one before
+      if (window._PREVIEW_DEBUG) console.log(`PREVIEW_SRC_RESET_AFTER_REFRESH prev=${previousMediaRef.substring(0, 60)} new=empty`);
+      // Keep existing media ref — don't wipe it if generation didn't produce a new one
+      // This prevents broken preview after regenerate when image search fails
+    }
     const mediaMetaEl = document.getElementById('dr-media-meta');
     if (mediaMetaEl) mediaMetaEl.value = payload?.media_meta_json || payload?.draft?.media_meta_json || '';
     const typeEl = document.getElementById('dr-media-type');
@@ -3971,6 +3980,13 @@ async function runEditorAIGeneration() {
     }
   } catch (e) {
     if (e.status === 402) return;
+    // Handle 429 rate limiting — do NOT leave stale preview/media state
+    if (e.status === 429) {
+      toast(e.message || 'Подожди перед следующей генерацией');
+      // Restore previous media state: don't wipe media on rate limit
+      if (window._PREVIEW_DEBUG) console.log('PREVIEW_RATE_LIMIT_429 state_preserved=true');
+      return;
+    }
     // Handle structured generation_failed error with retry UI
     if (e.status === 422 && e.message && (e.message.includes('generation_failed') || e.message.includes('качественный пост'))) {
       // Extract human-readable reason if available from the error message
@@ -4122,15 +4138,30 @@ function setEditorMediaType(type) {
 }
 
 function refreshEditorMediaPreview() {
-  const mediaRef = normalizeMediaRef(document.getElementById('dr-media-ref')?.value?.trim() || '');
+  const refEl = document.getElementById('dr-media-ref');
+  const rawRef = refEl?.value?.trim() || '';
+  const mediaRef = normalizeMediaRef(rawRef);
   const mediaType = document.getElementById('dr-media-type')?.value || guessMediaType(mediaRef);
   const box = document.getElementById('dr-media-preview');
   const status = document.getElementById('dr-upload-status');
   const attr = document.getElementById('dr-media-attribution');
+
+  // PREVIEW_RESOLVE_START — track the raw ref entering preview
+  if (window._PREVIEW_DEBUG) console.log(`PREVIEW_RESOLVE_START raw=${(rawRef || '').substring(0, 80)}`);
+
+  if (!rawRef) {
+    if (window._PREVIEW_DEBUG) console.log('PREVIEW_SRC_EMPTY reason=empty_ref_in_form');
+  }
+
   if (status) status.textContent = mediaRef ? 'Медиа выбрано' : 'Медиа не выбрано';
   if (!box) return;
   box.classList.remove('is-broken');
   box.innerHTML = renderMediaNode(mediaRef, mediaType);
+
+  if (mediaRef) {
+    if (window._PREVIEW_DEBUG) console.log(`PREVIEW_RESOLVE_OK path=${mediaRef.substring(0, 80)}`);
+  }
+
   let meta = null;
   try { meta = JSON.parse(document.getElementById('dr-media-meta')?.value || 'null'); } catch {}
   if (attr) {

@@ -61,11 +61,11 @@ _FAKE_NUMERIC_PATTERNS: list[tuple[re.Pattern, str]] = [
      "fabricated_ratio"),
     (re.compile(r"\b\d{2,3}\s*%\s*(?:людей|клиентов|случаев|пациентов|водителей|пользователей|компаний|владельцев|автомобилей|мастеров|заведений)", re.I),
      "fabricated_percentage_with_subject"),
-    (re.compile(r"(?:по данным|согласно|по статистике|по результатам)\s+(?:аналитиков|исследовани|опрос|экспертов|статистик)", re.I),
+    (re.compile(r"(?:по данным|согласно|по статистике|по результатам)\s+(?:аналитиков|исследовани|опрос|экспертов|статистик|СТО|сервис|страхов)", re.I),
      "fabricated_authority_reference"),
     (re.compile(r"(?:исследовани[ея]|опрос[ы]?|аналитики|эксперты)\s+(?:показали|выявили|обнаружили|подтвердили|установили|доказали)", re.I),
      "fabricated_study_claim"),
-    (re.compile(r"(?:в\s+\d{4}\s+(?:году?|г\.?))\s+(?:исследовани|опрос|стат|учёные|эксперты)", re.I),
+    (re.compile(r"(?:в\s+\d{4}\s+(?:году?|г\.?))\s+(?:исследовани|опрос|стат|учёные|эксперты|аналитики)", re.I),
      "fabricated_dated_study"),
     (re.compile(r"(?:страховые компании|банки|автосалоны|сервисы|клиники)\s+(?:говорят|утверждают|подтверждают|рекомендуют)", re.I),
      "fabricated_industry_claim"),
@@ -73,6 +73,12 @@ _FAKE_NUMERIC_PATTERNS: list[tuple[re.Pattern, str]] = [
      "fabricated_we_tested_N"),
     (re.compile(r"(?:доказано|клинически|научно)\s+(?:подтверждено|доказано|установлено)", re.I),
      "fabricated_scientific_proof"),
+    # Named authority without source: "Tom's Hardware выяснили", "Forbes написали"
+    (re.compile(r"(?:Tom'?s\s+Hardware|Forbes|Bloomberg|Reuters|TechRadar|Wired|CNET|The Verge)\s+(?:выяснил[иа]?|обнаружил[иа]?|подтвердил[иа]?|написал[иа]?|сообщил[иа]?)", re.I),
+     "fabricated_named_authority"),
+    # "по данным страховых компаний/банков/аналитиков"
+    (re.compile(r"по\s+данным\s+(?:страховых\s+компаний|банков|автосалонов|сервисных\s+центров|производителей)", re.I),
+     "fabricated_data_authority"),
 ]
 
 
@@ -313,9 +319,12 @@ def validate_generated_text(
         result.fake_numeric_claims = numeric_violations
         risk += len(numeric_violations) * 3
         for v in numeric_violations:
-            result.log_events.append(f"TEXT_FAKE_NUMERIC_CLAIM_REJECT reason={v}")
+            if "authority" in v or "study" in v or "industry" in v or "named" in v or "data_authority" in v:
+                result.log_events.append(f"TEXT_FAKE_AUTHORITY_REJECT reason={v}")
+            else:
+                result.log_events.append(f"TEXT_FAKE_NUMERIC_REJECT reason={v}")
         logger.warning(
-            "TEXT_FAKE_NUMERIC_CLAIM_REJECT count=%d reasons=%s text_excerpt=%r",
+            "TEXT_FAKE_NUMERIC_REJECT count=%d reasons=%s text_excerpt=%r",
             len(numeric_violations), numeric_violations, text[:100],
         )
 
@@ -329,9 +338,9 @@ def validate_generated_text(
         result.fake_personal_claims = personal_violations
         risk += len(personal_violations) * 3
         for v in personal_violations:
-            result.log_events.append(f"TEXT_FAKE_PERSONAL_CLAIM_REJECT reason={v}")
+            result.log_events.append(f"TEXT_FAKE_PERSONAL_EXPERIENCE_REJECT reason={v}")
         logger.warning(
-            "TEXT_FAKE_PERSONAL_CLAIM_REJECT count=%d reasons=%s text_excerpt=%r",
+            "TEXT_FAKE_PERSONAL_EXPERIENCE_REJECT count=%d reasons=%s text_excerpt=%r",
             len(personal_violations), personal_violations, text[:100],
         )
 
@@ -354,6 +363,20 @@ def validate_generated_text(
             )
         else:
             logger.info("TEXT_SOURCE_FIT_SCORE=%d", fit_score)
+
+    # 3b. Request-fit validation (manual/autopost modes)
+    if generation_mode in ("manual", "autopost") and input_text:
+        req_fit_score, req_drift = validate_source_fit(
+            text,
+            source_title=input_text,
+            source_summary="",
+            source_facts=None,
+        )
+        logger.info("TEXT_REQUEST_FIT_SCORE=%d", req_fit_score)
+        if req_drift and req_fit_score < 4:
+            risk += 2
+            for reason in req_drift:
+                result.log_events.append(f"TEXT_DRIFT_REJECT reason=request_{reason}")
 
     # 4. Template repetition
     template_hits = validate_template_repetition(text, recent_texts)

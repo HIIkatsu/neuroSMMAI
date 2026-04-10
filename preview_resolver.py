@@ -13,6 +13,13 @@ Handles:
   - Query param preservation for external URLs
 
 Production logs:
+  PREVIEW_RESOLVE_START
+  PREVIEW_RESOLVE_OK
+  PREVIEW_RESOLVE_FAIL
+  PREVIEW_STALE_REF
+  PREVIEW_RENDER_PATH=...
+  PREVIEW_SRC_EMPTY
+  PREVIEW_SRC_RESET_AFTER_REFRESH
   PREVIEW_MEDIA_RESOLVE_OK
   PREVIEW_MEDIA_RESOLVE_FAIL
   PREVIEW_MEDIA_AUTH_FAIL
@@ -109,19 +116,26 @@ def resolve_preview_media(
     result = PreviewResolveResult(original_ref=media_ref or "")
     raw = (media_ref or "").strip()
 
+    logger.info("PREVIEW_RESOLVE_START ref=%r", (raw or "")[:80])
+
     if not raw:
         result.error = "empty_ref"
-        logger.warning("PREVIEW_MEDIA_RESOLVE_FAIL reason=empty_ref")
+        logger.warning("PREVIEW_SRC_EMPTY reason=empty_ref")
+        logger.warning("PREVIEW_RESOLVE_FAIL reason=empty_ref")
         return result
 
     # --- tgfile: protocol ---
     if raw.startswith("tgfile:"):
-        return _resolve_tgfile(raw, auth_token=auth_token, base_url=base_url)
+        r = _resolve_tgfile(raw, auth_token=auth_token, base_url=base_url)
+        _log_resolve_outcome(r)
+        return r
 
     # --- /uploads/ paths ---
     if "/uploads/" in raw:
-        return _resolve_upload(raw, auth_token=auth_token, base_url=base_url,
-                               check_file_exists=check_file_exists)
+        r = _resolve_upload(raw, auth_token=auth_token, base_url=base_url,
+                            check_file_exists=check_file_exists)
+        _log_resolve_outcome(r)
+        return r
 
     # --- /generated_images/ (legacy underscore) → normalize to /generated-images/ ---
     if "/generated_images/" in raw:
@@ -130,27 +144,35 @@ def resolve_preview_media(
             "PREVIEW_MEDIA_QUERY_STRIPPED legacy_underscore_normalized from=%r to=%r",
             raw[:80], normalized[:80],
         )
-        return _resolve_generated(normalized, auth_token=auth_token, base_url=base_url,
-                                  check_file_exists=check_file_exists)
+        r = _resolve_generated(normalized, auth_token=auth_token, base_url=base_url,
+                               check_file_exists=check_file_exists)
+        _log_resolve_outcome(r)
+        return r
 
     # --- /generated-images/ ---
     if "/generated-images/" in raw:
-        return _resolve_generated(raw, auth_token=auth_token, base_url=base_url,
-                                  check_file_exists=check_file_exists)
+        r = _resolve_generated(raw, auth_token=auth_token, base_url=base_url,
+                               check_file_exists=check_file_exists)
+        _log_resolve_outcome(r)
+        return r
 
     # --- /api/media/telegram ---
     if raw.startswith("/api/media/telegram"):
-        return _resolve_telegram_api(raw, auth_token=auth_token, base_url=base_url)
+        r = _resolve_telegram_api(raw, auth_token=auth_token, base_url=base_url)
+        _log_resolve_outcome(r)
+        return r
 
     # --- External URL (http/https) ---
     if raw.startswith("http://") or raw.startswith("https://"):
-        return _resolve_external(raw)
+        r = _resolve_external(raw)
+        _log_resolve_outcome(r)
+        return r
 
     # --- Unknown path ---
     result.resolved_url = raw
     result.render_path = RENDER_PATH_UNKNOWN
     result.error = "unknown_ref_format"
-    logger.warning("PREVIEW_MEDIA_RESOLVE_FAIL reason=unknown_ref_format ref=%r", raw[:80])
+    logger.warning("PREVIEW_RESOLVE_FAIL reason=unknown_ref_format ref=%r", raw[:80])
     return result
 
 
@@ -265,3 +287,50 @@ def _inject_auth(url: str, auth_token: str) -> str:
         return url
     separator = "&" if "?" in url else "?"
     return f"{url}{separator}tgWebAppData={auth_token}"
+
+
+def _log_resolve_outcome(result: PreviewResolveResult) -> None:
+    """Emit structured resolve outcome logs."""
+    if result.ok:
+        logger.info(
+            "PREVIEW_RESOLVE_OK path=%s ref=%r",
+            result.render_path, (result.original_ref or "")[:80],
+        )
+        logger.info("PREVIEW_RENDER_PATH=%s", result.render_path)
+    else:
+        if result.is_stale:
+            logger.warning(
+                "PREVIEW_STALE_REF path=%s ref=%r error=%s",
+                result.render_path, (result.original_ref or "")[:80], result.error,
+            )
+        else:
+            logger.warning(
+                "PREVIEW_RESOLVE_FAIL path=%s ref=%r error=%s",
+                result.render_path, (result.original_ref or "")[:80], result.error,
+            )
+
+
+def resolve_and_track(
+    media_ref: str,
+    *,
+    previous_ref: str = "",
+    auth_token: str = "",
+    base_url: str = "",
+    check_file_exists: bool = False,
+) -> PreviewResolveResult:
+    """Resolve media ref and track stale-after-refresh resets.
+
+    If previous_ref was non-empty but media_ref is now empty, logs
+    PREVIEW_SRC_RESET_AFTER_REFRESH to flag accidental state loss.
+    """
+    if previous_ref and not (media_ref or "").strip():
+        logger.warning(
+            "PREVIEW_SRC_RESET_AFTER_REFRESH prev=%r current=empty",
+            previous_ref[:80],
+        )
+    return resolve_preview_media(
+        media_ref,
+        auth_token=auth_token,
+        base_url=base_url,
+        check_file_exists=check_file_exists,
+    )
