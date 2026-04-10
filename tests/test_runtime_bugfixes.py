@@ -283,33 +283,33 @@ class TestImagePipelineEditorMode(unittest.TestCase):
     """Editor mode must return candidates or explicit reject reasons."""
 
     def test_editor_lower_threshold_than_autopost(self):
-        from image_pipeline import EDITOR_MIN_SCORE, AUTOPOST_MIN_SCORE
+        from image_ranker import EDITOR_MIN_SCORE, AUTOPOST_MIN_SCORE
         self.assertLess(EDITOR_MIN_SCORE, AUTOPOST_MIN_SCORE)
 
     def test_editor_accepts_lower_score_candidate(self):
-        from image_pipeline import (
-            determine_candidate_outcome, CandidateTrace,
-            MODE_EDITOR, OUTCOME_ACCEPT_FOR_EDITOR, EDITOR_MIN_SCORE,
+        from image_ranker import (
+            determine_outcome, CandidateScore,
+            EDITOR_MIN_SCORE,
         )
-        trace = CandidateTrace()
-        trace.final_score = EDITOR_MIN_SCORE  # exactly at threshold
-        outcome = determine_candidate_outcome(trace, MODE_EDITOR)
+        from image_pipeline_v3 import MODE_EDITOR
+        cs = CandidateScore(final_score=EDITOR_MIN_SCORE)
+        outcome = determine_outcome(cs, MODE_EDITOR)
         self.assertIn("ACCEPT", outcome)
 
     def test_autopost_rejects_same_score(self):
-        from image_pipeline import (
-            determine_candidate_outcome, CandidateTrace,
-            MODE_AUTOPOST, EDITOR_MIN_SCORE,
+        from image_ranker import (
+            determine_outcome, CandidateScore,
+            EDITOR_MIN_SCORE,
         )
-        trace = CandidateTrace()
-        trace.final_score = EDITOR_MIN_SCORE  # below autopost threshold
-        outcome = determine_candidate_outcome(trace, MODE_AUTOPOST)
+        from image_pipeline_v3 import MODE_AUTOPOST
+        cs = CandidateScore(final_score=EDITOR_MIN_SCORE)
+        outcome = determine_outcome(cs, MODE_AUTOPOST)
         self.assertIn("REJECT", outcome)
 
     def test_editor_result_has_reject_reasons_on_failure(self):
-        """ImagePipelineResult exposes reject_reasons even with no accepted image."""
-        from image_pipeline import ImagePipelineResult
-        result = ImagePipelineResult(mode="editor")
+        """PipelineResult exposes reject_reasons even with no accepted image."""
+        from image_pipeline_v3 import PipelineResult
+        result = PipelineResult(mode="editor")
         result.reject_reasons = ["no_positive_affirmation", "generic_stock"]
         result.candidates_evaluated = 5
         result.candidates_rejected = 5
@@ -317,10 +317,10 @@ class TestImagePipelineEditorMode(unittest.TestCase):
         self.assertFalse(result.has_image)
 
     def test_trace_summary_contains_key_fields(self):
-        from image_pipeline import ImagePipelineResult, MODE_EDITOR
-        from visual_intent import VisualIntent
-        intent = VisualIntent(main_subject="car", sense="automobile", visuality="high")
-        result = ImagePipelineResult(mode=MODE_EDITOR, visual_intent=intent)
+        from image_pipeline_v3 import PipelineResult, MODE_EDITOR
+        from visual_intent_v2 import VisualIntentV2
+        intent = VisualIntentV2(subject="car", sense="automobile", imageability="high")
+        result = PipelineResult(mode=MODE_EDITOR, visual_intent=intent)
         result.image_url = "https://example.com/car.jpg"
         result.score = 30
         result.source_provider = "unsplash"
@@ -335,33 +335,33 @@ class TestPostSubjectOverChannelTopic(unittest.TestCase):
     """Image search must prioritize post subject over channel topic."""
 
     def test_visual_intent_uses_post_not_channel(self):
-        from visual_intent import extract_visual_intent
+        from visual_intent_v2 import extract_visual_intent_v2
         # Post about cars, channel about scooter repair
-        intent = extract_visual_intent(
+        intent = extract_visual_intent_v2(
             title="Лучшие машины 2025 года",
             body="BMW, Mercedes и Audi представили новые модели.",
             channel_topic="ремонт электросамокатов",
         )
         # Subject should be about cars, not scooters
-        subject_lower = intent.main_subject.lower()
+        subject_lower = intent.subject.lower()
         self.assertFalse("самокат" in subject_lower or "scooter" in subject_lower)
         # Source should be "post" not "fallback"
         self.assertEqual(intent.source, "post")
 
     def test_channel_topic_only_weak_fallback(self):
-        from visual_intent import extract_visual_intent
+        from visual_intent_v2 import extract_visual_intent_v2
         # Empty post text → channel topic should be weak fallback
-        intent = extract_visual_intent(
+        intent = extract_visual_intent_v2(
             title="",
             body="",
             channel_topic="ремонт электросамокатов",
         )
         # With empty post, channel topic MAY be used, but source should indicate fallback
-        # (or visuality should be low/none since there's no post content)
-        self.assertIn(intent.visuality, ["low", "none", "medium"])
+        # (or imageability should be low/none since there's no post content)
+        self.assertIn(intent.imageability, ["low", "none", "medium"])
 
     def test_scoring_rewards_subject_match_most(self):
-        from image_pipeline import W_SUBJECT, W_SENSE, W_SCENE, W_FAMILY_TERM
+        from image_ranker import W_SUBJECT, W_SENSE, W_SCENE, W_FAMILY_TERM
         # Subject weight should be highest
         self.assertGreater(W_SUBJECT, W_SENSE)
         self.assertGreater(W_SUBJECT, W_SCENE)

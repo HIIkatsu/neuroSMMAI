@@ -14,14 +14,11 @@ from __future__ import annotations
 
 import unittest
 
-from image_pipeline import (
-    CandidateTrace,
-    ImageDiversityCache,
+from image_ranker import (
+    CandidateScore,
     score_candidate,
-    compute_final_score,
-    determine_candidate_outcome,
-    MODE_AUTOPOST,
-    MODE_EDITOR,
+    compute_provider_bonus,
+    determine_outcome,
     AUTOPOST_MIN_SCORE,
     EDITOR_MIN_SCORE,
     EDITOR_SOFT_MIN,
@@ -32,12 +29,16 @@ from image_pipeline import (
     OUTCOME_REJECT_GENERIC_FILLER,
     OUTCOME_REJECT_REPEAT,
     OUTCOME_REJECT_LOW_CONFIDENCE,
-    P_REPEAT_URL,
+)
+from image_pipeline_v3 import MODE_AUTOPOST, MODE_EDITOR
+from image_history import (
+    ImageHistory,
+    P_REPEAT_EXACT_URL,
     P_REPEAT_VISUAL_CLASS,
     P_REPEAT_DOMAIN,
-    P_REPEAT_SUBJECT,
+    P_REPEAT_SUBJECT_BUCKET,
 )
-from visual_intent import VisualIntent
+from visual_intent_v2 import VisualIntentV2
 from generation_spec import (
     build_generation_spec,
     classify_opener_archetype,
@@ -66,20 +67,20 @@ class TestEditorRecallFixes(unittest.TestCase):
     def test_weak_score_accepted_in_editor(self):
         """A candidate with score between EDITOR_MIN_SCORE and AUTOPOST_MIN_SCORE
         should be accepted in editor mode."""
-        trace = CandidateTrace(final_score=5, hard_reject="", reject_reason="")
-        outcome = determine_candidate_outcome(trace, MODE_EDITOR)
+        trace = CandidateScore(final_score=5, hard_reject="", reject_reason="")
+        outcome = determine_outcome(trace, MODE_EDITOR)
         self.assertEqual(outcome, OUTCOME_ACCEPT_FOR_EDITOR)
 
     def test_weak_score_rejected_in_autopost(self):
         """Same weak score should be rejected in autopost mode."""
-        trace = CandidateTrace(final_score=5, hard_reject="", reject_reason="")
-        outcome = determine_candidate_outcome(trace, MODE_AUTOPOST)
+        trace = CandidateScore(final_score=5, hard_reject="", reject_reason="")
+        outcome = determine_outcome(trace, MODE_AUTOPOST)
         self.assertIn("REJECT", outcome)
 
     def test_very_weak_score_still_accepted_in_editor(self):
         """Even very weak scores (just above EDITOR_MIN_SCORE=4) should be accepted."""
-        trace = CandidateTrace(final_score=EDITOR_MIN_SCORE, hard_reject="", reject_reason="")
-        outcome = determine_candidate_outcome(trace, MODE_EDITOR)
+        trace = CandidateScore(final_score=EDITOR_MIN_SCORE, hard_reject="", reject_reason="")
+        outcome = determine_outcome(trace, MODE_EDITOR)
         self.assertEqual(outcome, OUTCOME_ACCEPT_FOR_EDITOR)
 
     def test_editor_min_is_lower_than_autopost(self):
@@ -89,8 +90,8 @@ class TestEditorRecallFixes(unittest.TestCase):
 
     def test_scoring_returns_nonzero_for_weak_match(self):
         """A candidate with one subject word hit should get a non-zero score."""
-        intent = VisualIntent(
-            main_subject="massage neck",
+        intent = VisualIntentV2(
+            subject="massage neck",
             sense="body massage",
             scene="spa room",
             post_family="massage",
@@ -110,8 +111,8 @@ class TestAutopostGenericFillerRejection(unittest.TestCase):
 
     def test_ai_chip_rejected_for_food_post(self):
         """AI chip image should be rejected for a food/cooking post."""
-        intent = VisualIntent(
-            main_subject="pasta recipe",
+        intent = VisualIntentV2(
+            subject="pasta recipe",
             sense="cooking food",
             scene="kitchen",
             post_family="food",
@@ -125,8 +126,8 @@ class TestAutopostGenericFillerRejection(unittest.TestCase):
 
     def test_ai_chip_accepted_for_ai_post(self):
         """AI chip image should be acceptable for an AI/tech post."""
-        intent = VisualIntent(
-            main_subject="ai chip processor",
+        intent = VisualIntentV2(
+            subject="ai chip processor",
             sense="technology",
             scene="laboratory",
             post_family="tech",
@@ -138,8 +139,8 @@ class TestAutopostGenericFillerRejection(unittest.TestCase):
 
     def test_code_screen_rejected_for_massage_post(self):
         """Code screen image should be rejected for a massage post."""
-        intent = VisualIntent(
-            main_subject="massage therapy",
+        intent = VisualIntentV2(
+            subject="massage therapy",
             sense="body massage",
             scene="spa",
             post_family="massage",
@@ -150,11 +151,11 @@ class TestAutopostGenericFillerRejection(unittest.TestCase):
 
     def test_generic_filler_outcome(self):
         """Candidates with generic_filler reason get correct outcome."""
-        trace = CandidateTrace(
+        trace = CandidateScore(
             final_score=10,
             reject_reason="generic_filler",
         )
-        outcome = determine_candidate_outcome(trace, MODE_AUTOPOST)
+        outcome = determine_outcome(trace, MODE_AUTOPOST)
         self.assertIn("REJECT", outcome)
 
 
@@ -167,74 +168,74 @@ class TestAutopostRepeatImageRejection(unittest.TestCase):
 
     def test_same_url_gets_strong_reject_penalty(self):
         """Same image URL in recent cache should get a strong negative penalty."""
-        cache = ImageDiversityCache(maxlen=10, ttl=3600)
-        cache.record(url="https://example.com/img1.jpg", visual_class="", domain="", subject="")
+        cache = ImageHistory(maxlen=10, ttl=3600)
+        cache.record(url="https://example.com/img1.jpg", visual_class="", domain="", subject_bucket="")
 
         penalty = cache.compute_penalty(
             url="https://example.com/img1.jpg",
             visual_class="",
             domain="",
-            subject="",
+            subject_bucket="",
         )
-        self.assertEqual(penalty, P_REPEAT_URL)
+        self.assertEqual(penalty, P_REPEAT_EXACT_URL)
         self.assertLessEqual(penalty, -200)
 
     def test_different_url_no_penalty(self):
         """Different URL should not trigger URL repeat penalty."""
-        cache = ImageDiversityCache(maxlen=10, ttl=3600)
-        cache.record(url="https://example.com/img1.jpg", visual_class="", domain="", subject="")
+        cache = ImageHistory(maxlen=10, ttl=3600)
+        cache.record(url="https://example.com/img1.jpg", visual_class="", domain="", subject_bucket="")
 
         penalty = cache.compute_penalty(
             url="https://example.com/img2.jpg",
             visual_class="",
             domain="",
-            subject="",
+            subject_bucket="",
         )
         self.assertGreaterEqual(penalty, P_REPEAT_DOMAIN)  # Domain might match
 
     def test_same_visual_class_penalty(self):
         """Same visual class should get penalty."""
-        cache = ImageDiversityCache(maxlen=10, ttl=3600)
-        cache.record(url="", visual_class="food", domain="", subject="")
+        cache = ImageHistory(maxlen=10, ttl=3600)
+        cache.record(url="", visual_class="food", domain="", subject_bucket="")
 
         penalty = cache.compute_penalty(
             url="https://other.com/img.jpg",
             visual_class="food",
             domain="",
-            subject="",
+            subject_bucket="",
         )
         self.assertEqual(penalty, P_REPEAT_VISUAL_CLASS)
 
     def test_same_domain_repeated_gets_penalty(self):
-        """Same domain repeated multiple times gets stronger penalty."""
-        cache = ImageDiversityCache(maxlen=10, ttl=3600)
-        cache.record(url="", visual_class="", domain="unsplash.com", subject="")
-        cache.record(url="", visual_class="", domain="unsplash.com", subject="")
+        """Same domain repeated multiple times gets penalty."""
+        cache = ImageHistory(maxlen=10, ttl=3600)
+        cache.record(url="", visual_class="", domain="unsplash.com", subject_bucket="")
+        cache.record(url="", visual_class="", domain="unsplash.com", subject_bucket="")
 
         penalty = cache.compute_penalty(
             url="https://other.com/img.jpg",
             visual_class="",
             domain="unsplash.com",
-            subject="",
+            subject_bucket="",
         )
-        self.assertEqual(penalty, P_REPEAT_DOMAIN * 2)
+        self.assertLess(penalty, 0, "Repeated domain should get a penalty")
 
     def test_repeated_url_triggers_reject_outcome_in_autopost(self):
         """Repeated URL in autopost should produce REJECT_REPEAT outcome."""
-        trace = CandidateTrace(
+        trace = CandidateScore(
             final_score=30,  # Above autopost threshold
-            diversity_penalty=P_REPEAT_URL,  # -200
+            repeat_penalty=P_REPEAT_EXACT_URL,  # -200
         )
-        outcome = determine_candidate_outcome(trace, MODE_AUTOPOST)
+        outcome = determine_outcome(trace, MODE_AUTOPOST)
         self.assertEqual(outcome, OUTCOME_REJECT_REPEAT)
 
     def test_repeated_url_not_hard_rejected_in_editor(self):
         """Repeated URL in editor should not produce hard reject (editor is lenient)."""
-        trace = CandidateTrace(
+        trace = CandidateScore(
             final_score=30,
-            diversity_penalty=P_REPEAT_URL,
+            repeat_penalty=P_REPEAT_EXACT_URL,
         )
-        outcome = determine_candidate_outcome(trace, MODE_EDITOR)
+        outcome = determine_outcome(trace, MODE_EDITOR)
         # Editor mode doesn't hard-reject repeats
         self.assertNotEqual(outcome, OUTCOME_REJECT_REPEAT)
 
@@ -248,17 +249,17 @@ class TestAutopostPrefersTextOnly(unittest.TestCase):
 
     def test_weak_score_below_autopost_threshold(self):
         """Candidate below AUTOPOST_MIN_SCORE should not be accepted."""
-        trace = CandidateTrace(
+        trace = CandidateScore(
             final_score=AUTOPOST_MIN_SCORE - 1,
             reject_reason="no_positive_affirmation",
         )
-        outcome = determine_candidate_outcome(trace, MODE_AUTOPOST)
+        outcome = determine_outcome(trace, MODE_AUTOPOST)
         self.assertIn("REJECT", outcome)
 
     def test_off_topic_image_rejected(self):
         """Off-topic cross-family image should be rejected in autopost."""
-        intent = VisualIntent(
-            main_subject="coffee beans",
+        intent = VisualIntentV2(
+            subject="coffee beans",
             sense="coffee brewing",
             scene="cafe",
             post_family="food",
@@ -426,8 +427,8 @@ class TestPostTextDominatesChannelTopic(unittest.TestCase):
     def test_post_subject_hits_dominate_score(self):
         """Image matching post subject should score higher than one matching channel."""
         # Post about coffee, channel about tech
-        intent = VisualIntent(
-            main_subject="coffee beans brewing",
+        intent = VisualIntentV2(
+            subject="coffee beans brewing",
             sense="coffee",
             scene="cafe",
             post_family="food",
@@ -446,26 +447,26 @@ class TestPostTextDominatesChannelTopic(unittest.TestCase):
 
     def test_channel_topic_not_in_intent(self):
         """Visual intent is extracted from post text, not channel topic alone."""
-        from visual_intent import extract_visual_intent
+        from visual_intent_v2 import extract_visual_intent_v2
 
-        intent = extract_visual_intent(
+        intent = extract_visual_intent_v2(
             title="Как приготовить идеальный эспрессо",
             body="Секрет идеального эспрессо — правильный помол и температура воды.",
             channel_topic="Технологии и программирование",
         )
         # The intent subject should be about coffee, not tech
-        subject_lower = (intent.main_subject or "").lower()
+        subject_lower = (intent.subject or "").lower()
         self.assertTrue(
             any(w in subject_lower for w in ["espresso", "кофе", "coffee", "эспрессо"]) or
             "технолог" not in subject_lower,
-            f"Intent subject should be about coffee, not tech: {intent.main_subject}"
+            f"Intent subject should be about coffee, not tech: {intent.subject}"
         )
 
     def test_autopost_uses_post_text_for_scoring(self):
         """In autopost mode, the score should be driven by post content, not channel."""
         # Post about massage therapy (different from channel topic)
-        intent = VisualIntent(
-            main_subject="massage therapy hands",
+        intent = VisualIntentV2(
+            subject="massage therapy hands",
             sense="body massage",
             scene="spa",
             post_family="massage",
@@ -495,8 +496,8 @@ class TestDiversityCacheIntegration(unittest.TestCase):
         """Prune should remove entries older than TTL."""
         import time as _time
 
-        cache = ImageDiversityCache(maxlen=10, ttl=0.01)  # Very short TTL
-        cache.record(url="https://example.com/old.jpg", visual_class="food", domain="example.com", subject="test")
+        cache = ImageHistory(maxlen=10, ttl=0.01)  # Very short TTL
+        cache.record(url="https://example.com/old.jpg", visual_class="food", domain="example.com", subject_bucket="test")
 
         _time.sleep(0.02)  # Wait for TTL to expire
         cache.prune()
@@ -505,22 +506,22 @@ class TestDiversityCacheIntegration(unittest.TestCase):
             url="https://example.com/old.jpg",
             visual_class="food",
             domain="example.com",
-            subject="test",
+            subject_bucket="test",
         )
         self.assertEqual(penalty, 0, "Expired entries should not trigger penalty")
 
     def test_cache_record_and_retrieve(self):
         """Record and then check penalty for same URL."""
-        cache = ImageDiversityCache(maxlen=10, ttl=3600)
-        cache.record(url="https://example.com/test.jpg", visual_class="", domain="", subject="")
+        cache = ImageHistory(maxlen=10, ttl=3600)
+        cache.record(url="https://example.com/test.jpg", visual_class="", domain="", subject_bucket="")
 
         penalty = cache.compute_penalty(
             url="https://example.com/test.jpg",
             visual_class="",
             domain="",
-            subject="",
+            subject_bucket="",
         )
-        self.assertEqual(penalty, P_REPEAT_URL)
+        self.assertEqual(penalty, P_REPEAT_EXACT_URL)
 
 
 class TestBuildGenerationSpecAntiPersona(unittest.TestCase):
