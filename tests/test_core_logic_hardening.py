@@ -427,10 +427,10 @@ class TestImageSearchSubjectFirst(unittest.TestCase):
 
     def test_visual_intent_from_post_not_channel(self):
         """Visual intent extracts subject from POST text, not channel topic."""
-        from visual_intent import extract_visual_intent
+        from visual_intent_v2 import extract_visual_intent_v2
 
         # Post about cars in a scooter-repair channel
-        intent = extract_visual_intent(
+        intent = extract_visual_intent_v2(
             title="Когда менять масло в двигателе автомобиля",
             body=(
                 "Замена масла в двигателе — базовая операция обслуживания автомобиля. "
@@ -439,19 +439,19 @@ class TestImageSearchSubjectFirst(unittest.TestCase):
             channel_topic="ремонт электросамокатов",
         )
         # Subject should be about cars, not scooters
-        subject_lower = intent.main_subject.lower()
+        subject_lower = intent.subject.lower()
         self.assertTrue(
             any(w in subject_lower for w in ["car", "automobile", "vehicle", "engine", "oil"]),
-            f"Visual intent main_subject should be about cars, got: '{intent.main_subject}'"
+            f"Visual intent subject should be about cars, got: '{intent.subject}'"
         )
         # Should NOT be about scooters
         self.assertNotIn("scooter", subject_lower)
 
     def test_visual_intent_source_is_post(self):
         """Visual intent source should be 'post' when post text has clear subject."""
-        from visual_intent import extract_visual_intent
+        from visual_intent_v2 import extract_visual_intent_v2
 
-        intent = extract_visual_intent(
+        intent = extract_visual_intent_v2(
             title="Как выбрать зимние шины для автомобиля",
             body="Зимние шины обеспечивают безопасность на дороге в холодный сезон.",
             channel_topic="электросамокаты",
@@ -460,12 +460,12 @@ class TestImageSearchSubjectFirst(unittest.TestCase):
 
     def test_image_scoring_prefers_post_subject(self):
         """Image scoring gives higher score to images matching post subject vs channel topic."""
-        from image_pipeline import score_candidate
-        from visual_intent import VisualIntent
+        from image_ranker import score_candidate
+        from visual_intent_v2 import VisualIntentV2
 
         # Visual intent about cars (post is about cars)
-        intent = VisualIntent(
-            main_subject="car automobile vehicle",
+        intent = VisualIntentV2(
+            subject="car automobile vehicle",
             sense="automotive transport",
             scene="car engine oil change maintenance",
             post_family="cars",
@@ -498,25 +498,24 @@ class TestEditorCandidatesMismatchedTopics(unittest.TestCase):
 
     def test_editor_threshold_lower_than_autopost(self):
         """Editor min score is lower than autopost, allowing more candidates."""
-        from image_pipeline import AUTOPOST_MIN_SCORE, EDITOR_MIN_SCORE
+        from image_ranker import AUTOPOST_MIN_SCORE, EDITOR_MIN_SCORE
         self.assertLess(EDITOR_MIN_SCORE, AUTOPOST_MIN_SCORE)
 
     def test_editor_accepts_moderate_match(self):
         """Editor mode accepts candidates with moderate post-centric score."""
-        from image_pipeline import determine_candidate_outcome, CandidateTrace, EDITOR_MIN_SCORE
+        from image_ranker import determine_outcome, CandidateScore, EDITOR_MIN_SCORE
 
-        # Create a trace with a score between editor and autopost thresholds
-        trace = CandidateTrace()
-        trace.final_score = EDITOR_MIN_SCORE + 5
-        outcome = determine_candidate_outcome(trace, mode="editor")
+        # Create a candidate score between editor and autopost thresholds
+        cs = CandidateScore(final_score=EDITOR_MIN_SCORE + 5)
+        outcome = determine_outcome(cs, mode="editor")
         self.assertIn("accept", outcome.lower(),
-                      f"Editor should accept score {trace.final_score}, got outcome: {outcome}")
+                      f"Editor should accept score {cs.final_score}, got outcome: {outcome}")
 
     def test_visual_intent_works_with_mismatched_channel(self):
         """Visual intent extraction works properly when channel ≠ post topic."""
-        from visual_intent import extract_visual_intent
+        from visual_intent_v2 import extract_visual_intent_v2
 
-        intent = extract_visual_intent(
+        intent = extract_visual_intent_v2(
             title="Топ-5 кулинарных трендов года",
             body="В этом году популярны ферментированные продукты, локальная кухня и дегустационные сеты.",
             channel_topic="ремонт техники",
@@ -524,9 +523,9 @@ class TestEditorCandidatesMismatchedTopics(unittest.TestCase):
         # Should extract food-related subject, not repair
         self.assertNotEqual(intent.post_family, "local_business")
         self.assertTrue(
-            any(w in intent.main_subject.lower() for w in ["food", "culinary", "cooking", "cuisine", "trend"]) or
+            any(w in intent.subject.lower() for w in ["food", "culinary", "cooking", "cuisine", "trend"]) or
             intent.post_family == "food",
-            f"Should extract food subject, got: '{intent.main_subject}', family: '{intent.post_family}'"
+            f"Should extract food subject, got: '{intent.subject}', family: '{intent.post_family}'"
         )
 
 

@@ -6,7 +6,7 @@ Covers:
      - Mode-specific thresholds (autopost vs editor)
      - Provider bonus capping (no more max(provider, pc))
      - Outcome types
-     - CandidateTrace
+     - CandidateScore
      - Top-N reranking
      - Runtime explainability
   C) Real-world regression golden dataset (80+ cases)
@@ -26,32 +26,33 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ.setdefault("BOT_TOKEN", "test:token")
 os.environ.setdefault("OPENROUTER_API_KEY", "test-key")
 
-from visual_intent import (
-    VisualIntent,
-    extract_visual_intent,
-    VISUALITY_HIGH,
-    VISUALITY_MEDIUM,
-    VISUALITY_LOW,
-    VISUALITY_NONE,
+from visual_intent_v2 import (
+    VisualIntentV2,
+    extract_visual_intent_v2,
+    IMAGEABILITY_HIGH,
+    IMAGEABILITY_MEDIUM,
+    IMAGEABILITY_LOW,
+    IMAGEABILITY_NONE,
     _disambiguate,
-    _assess_visuality,
+    _assess_imageability,
     _extract_subject,
     _extract_scene,
-    _build_search_queries,
+    _build_query_terms,
 )
-from image_pipeline import (
-    ImagePipelineResult,
-    CandidateTrace,
+from image_ranker import (
+    CandidateScore,
     check_wrong_sense,
     compute_generic_stock_penalty,
-    compute_final_score,
-    determine_candidate_outcome,
+    compute_provider_bonus,
+    determine_outcome,
     score_candidate,
     detect_meta_family,
-    _determine_no_image_reason,
     # Constants
-    MODE_AUTOPOST,
-    MODE_EDITOR,
+    AUTOPOST_MIN_SCORE,
+    EDITOR_MIN_SCORE,
+    PROVIDER_BONUS_CAP,
+    PROVIDER_BONUS_WEIGHT,
+    W_SUBJECT,
     OUTCOME_ACCEPT_BEST,
     OUTCOME_ACCEPT_FOR_EDITOR,
     OUTCOME_REJECT_NO_MATCH,
@@ -60,13 +61,14 @@ from image_pipeline import (
     OUTCOME_REJECT_CROSS_FAMILY,
     OUTCOME_REJECT_LOW_CONFIDENCE,
     OUTCOME_NO_IMAGE_SAFE,
-    OUTCOME_NO_IMAGE_LOW_VISUALITY,
+    OUTCOME_NO_IMAGE_LOW_IMAGEABILITY,
     OUTCOME_NO_IMAGE_NO_CANDIDATES,
-    W_SUBJECT,
-    AUTOPOST_MIN_SCORE,
-    EDITOR_MIN_SCORE,
-    PROVIDER_BONUS_CAP,
-    PROVIDER_BONUS_WEIGHT,
+)
+from image_pipeline_v3 import (
+    PipelineResult,
+    MODE_AUTOPOST,
+    MODE_EDITOR,
+    _determine_no_image_reason,
 )
 
 
@@ -81,50 +83,50 @@ class TestPostTextWinsOverChannelTopic(unittest.TestCase):
     """If channel is about X, but post is about Y, image must be about Y."""
 
     def test_food_channel_car_post_selects_car_intent(self):
-        intent = extract_visual_intent(
+        intent = extract_visual_intent_v2(
             title="Обзор нового автомобиля Toyota Camry",
             body="Тест-драйв седана Toyota Camry. Двигатель, салон, расход бензина.",
             channel_topic="Рецепты и еда",
         )
-        self.assertIn("car", intent.main_subject.lower())
-        self.assertNotIn("food", intent.main_subject.lower())
+        self.assertIn("car", intent.subject.lower())
+        self.assertNotIn("food", intent.subject.lower())
 
     def test_tech_channel_massage_post_selects_massage_intent(self):
-        intent = extract_visual_intent(
+        intent = extract_visual_intent_v2(
             title="Как правильно делать массаж шеи",
             body="Техника массажа для расслабления мышц шеи и плеч.",
             channel_topic="IT и технологии",
         )
-        self.assertIn("massage", intent.main_subject.lower())
+        self.assertIn("massage", intent.subject.lower())
 
     def test_finance_channel_cooking_post_selects_food_intent(self):
-        intent = extract_visual_intent(
+        intent = extract_visual_intent_v2(
             title="Рецепт домашней пиццы",
             body="Готовим пиццу на тонком тесте с моцареллой.",
             channel_topic="Финансы и инвестиции",
         )
-        self.assertIn("pizza", intent.main_subject.lower())
+        self.assertIn("pizza", intent.subject.lower())
 
     def test_post_queries_reflect_post_not_channel(self):
-        intent = extract_visual_intent(
+        intent = extract_visual_intent_v2(
             title="Обзор ноутбука Apple MacBook Pro M3",
             body="Тестируем новый MacBook с процессором M3.",
             channel_topic="Кулинария",
         )
-        queries = " ".join(intent.search_queries).lower()
+        queries = " ".join(intent.query_terms).lower()
         self.assertIn("laptop", queries)
         # Primary queries should be about laptop, not food
-        primary_queries = intent.search_queries[:3]
+        primary_queries = intent.query_terms[:3]
         primary = " ".join(primary_queries).lower()
         self.assertNotIn("recipe", primary)
 
     def test_channel_topic_only_when_post_empty(self):
-        intent = extract_visual_intent(
+        intent = extract_visual_intent_v2(
             title="",
             body="",
             channel_topic="Автомобили и тест-драйвы",
         )
-        self.assertEqual(intent.source, "fallback")
+        self.assertEqual(intent.source, "channel_fallback")
 
 
 # --- 2. Sense disambiguation works ---
@@ -212,7 +214,7 @@ class TestSenseDisambiguation(unittest.TestCase):
 class TestGenericStockPenalized(unittest.TestCase):
 
     def test_stock_photo_penalized_without_subject_match(self):
-        intent = VisualIntent(main_subject="car engine timing belt")
+        intent = VisualIntentV2(subject="car engine timing belt")
         penalty, hits = compute_generic_stock_penalty(
             "stock photo business team meeting happy people", intent
         )
@@ -220,28 +222,28 @@ class TestGenericStockPenalized(unittest.TestCase):
         self.assertGreater(hits, 0)
 
     def test_stock_photo_mild_penalty_with_subject_match(self):
-        intent = VisualIntent(main_subject="car engine timing belt")
+        intent = VisualIntentV2(subject="car engine timing belt")
         penalty, hits = compute_generic_stock_penalty(
             "stock photo car engine timing belt automotive", intent
         )
         self.assertGreater(penalty, -20)
 
     def test_smiling_office_people_penalized(self):
-        intent = VisualIntent(main_subject="laptop computer")
+        intent = VisualIntentV2(subject="laptop computer")
         penalty, hits = compute_generic_stock_penalty(
             "smiling office people business handshake", intent
         )
         self.assertLess(penalty, -20)
 
     def test_abstract_dashboard_penalized(self):
-        intent = VisualIntent(main_subject="data analytics")
+        intent = VisualIntentV2(subject="data analytics")
         penalty, hits = compute_generic_stock_penalty(
             "abstract dashboard abstract digital concept image", intent
         )
         self.assertLess(penalty, -20)
 
     def test_no_penalty_for_relevant_image(self):
-        intent = VisualIntent(main_subject="pizza cooking")
+        intent = VisualIntentV2(subject="pizza cooking")
         penalty, hits = compute_generic_stock_penalty(
             "fresh homemade pizza margherita cooking kitchen", intent
         )
@@ -254,8 +256,8 @@ class TestGenericStockPenalized(unittest.TestCase):
 class TestWrongSenseHardReject(unittest.TestCase):
 
     def test_car_image_rejected_for_industrial_machine_post(self):
-        intent = VisualIntent(
-            main_subject="industrial machine",
+        intent = VisualIntentV2(
+            subject="industrial machine",
             forbidden_meanings=["car", "automobile", "vehicle"],
         )
         reason = check_wrong_sense("beautiful car automobile vehicle driving", intent)
@@ -263,37 +265,37 @@ class TestWrongSenseHardReject(unittest.TestCase):
         self.assertIn("wrong_sense", reason)
 
     def test_industrial_image_rejected_for_car_post(self):
-        intent = VisualIntent(
-            main_subject="car automobile",
+        intent = VisualIntentV2(
+            subject="car automobile",
             forbidden_meanings=["industrial machine", "factory machine"],
         )
         reason = check_wrong_sense("industrial machine factory production", intent)
         self.assertIsNotNone(reason)
 
     def test_clothing_belt_rejected_for_timing_belt_post(self):
-        intent = VisualIntent(
-            main_subject="timing belt engine",
+        intent = VisualIntentV2(
+            subject="timing belt engine",
             forbidden_meanings=["clothing belt", "fashion belt"],
         )
         reason = check_wrong_sense("leather clothing belt fashion accessory", intent)
         self.assertIsNotNone(reason)
 
     def test_correct_sense_not_rejected(self):
-        intent = VisualIntent(
-            main_subject="car automobile",
+        intent = VisualIntentV2(
+            subject="car automobile",
             forbidden_meanings=["industrial machine"],
         )
         reason = check_wrong_sense("car driving highway automobile speed", intent)
         self.assertIsNone(reason)
 
     def test_no_forbidden_meanings_no_reject(self):
-        intent = VisualIntent(main_subject="laptop")
+        intent = VisualIntentV2(subject="laptop")
         reason = check_wrong_sense("laptop on desk workspace", intent)
         self.assertIsNone(reason)
 
     def test_wrong_sense_in_score_candidate(self):
-        intent = VisualIntent(
-            main_subject="industrial machine",
+        intent = VisualIntentV2(
+            subject="industrial machine",
             forbidden_meanings=["car", "automobile"],
         )
         score, reason, trace = score_candidate(
@@ -309,43 +311,43 @@ class TestWrongSenseHardReject(unittest.TestCase):
 class TestLowVisualityNoImage(unittest.TestCase):
 
     def test_abstract_strategy_post_low_visuality(self):
-        vis = _assess_visuality("Контент-план для стратегии продвижения бизнеса")
-        self.assertIn(vis, (VISUALITY_LOW, VISUALITY_NONE))
+        vis = _assess_imageability("Контент-план для стратегии продвижения бизнеса")
+        self.assertIn(vis, (IMAGEABILITY_LOW, IMAGEABILITY_NONE))
 
     def test_opinion_post_low_visuality(self):
-        vis = _assess_visuality("Моё мнение и размышления о жизни и работе")
-        self.assertIn(vis, (VISUALITY_LOW, VISUALITY_NONE))
+        vis = _assess_imageability("Моё мнение и размышления о жизни и работе")
+        self.assertIn(vis, (IMAGEABILITY_LOW, IMAGEABILITY_NONE))
 
     def test_list_post_none_visuality(self):
-        vis = _assess_visuality("Подборка цитат великих людей о мотивации и юморе")
-        self.assertIn(vis, (VISUALITY_LOW, VISUALITY_NONE))
+        vis = _assess_imageability("Подборка цитат великих людей о мотивации и юморе")
+        self.assertIn(vis, (IMAGEABILITY_LOW, IMAGEABILITY_NONE))
 
     def test_poll_post_none_visuality(self):
-        vis = _assess_visuality("Голосование: какой вариант лучше?")
-        self.assertEqual(vis, VISUALITY_NONE)
+        vis = _assess_imageability("Голосование: какой вариант лучше?")
+        self.assertEqual(vis, IMAGEABILITY_NONE)
 
     def test_food_post_high_visuality(self):
-        vis = _assess_visuality("Рецепт домашней пиццы на тонком тесте с моцареллой")
-        self.assertEqual(vis, VISUALITY_HIGH)
+        vis = _assess_imageability("Рецепт домашней пиццы на тонком тесте с моцареллой")
+        self.assertEqual(vis, IMAGEABILITY_HIGH)
 
     def test_car_review_high_visuality(self):
-        vis = _assess_visuality("Обзор нового автомобиля Toyota — фото, интерьер, двигатель")
-        self.assertEqual(vis, VISUALITY_HIGH)
+        vis = _assess_imageability("Обзор нового автомобиля Toyota — фото, интерьер, двигатель")
+        self.assertEqual(vis, IMAGEABILITY_HIGH)
 
     def test_empty_post_none_visuality(self):
-        vis = _assess_visuality("")
-        self.assertEqual(vis, VISUALITY_NONE)
+        vis = _assess_imageability("")
+        self.assertEqual(vis, IMAGEABILITY_NONE)
 
     def test_very_short_post_low_visuality(self):
-        vis = _assess_visuality("Привет мир")
-        self.assertEqual(vis, VISUALITY_NONE)
+        vis = _assess_imageability("Привет мир")
+        self.assertEqual(vis, IMAGEABILITY_NONE)
 
     def test_low_visuality_intent_has_reason(self):
-        intent = extract_visual_intent(
+        intent = extract_visual_intent_v2(
             title="Голосование: какой опрос лучше?",
             body="",
         )
-        self.assertEqual(intent.visuality, VISUALITY_NONE)
+        self.assertEqual(intent.imageability, IMAGEABILITY_NONE)
         self.assertTrue(intent.no_image_reason)
 
 
@@ -354,8 +356,8 @@ class TestLowVisualityNoImage(unittest.TestCase):
 class TestPostSpecificTokenMatch(unittest.TestCase):
 
     def test_specific_car_model_beats_generic_car(self):
-        intent = VisualIntent(
-            main_subject="car automobile vehicle toyota camry",
+        intent = VisualIntentV2(
+            subject="car automobile vehicle toyota camry",
             sense="car",
             scene="highway driving",
             post_family="cars",
@@ -373,8 +375,8 @@ class TestPostSpecificTokenMatch(unittest.TestCase):
         self.assertGreater(specific_score, generic_score)
 
     def test_massage_neck_beats_generic_wellness(self):
-        intent = VisualIntent(
-            main_subject="massage therapy",
+        intent = VisualIntentV2(
+            subject="massage therapy",
             sense="massage",
             scene="massage therapy session",
             post_family="massage",
@@ -392,8 +394,8 @@ class TestPostSpecificTokenMatch(unittest.TestCase):
         self.assertGreater(specific_score, generic_score)
 
     def test_coffee_post_in_food_channel(self):
-        intent = VisualIntent(
-            main_subject="coffee",
+        intent = VisualIntentV2(
+            subject="coffee",
             scene="cafe interior",
             post_family="food",
         )
@@ -410,7 +412,7 @@ class TestPostSpecificTokenMatch(unittest.TestCase):
         self.assertGreater(coffee_score, generic_food_score)
 
     def test_subject_match_weight_is_significant(self):
-        intent = VisualIntent(main_subject="laptop computer workspace")
+        intent = VisualIntentV2(subject="laptop computer workspace")
         with_subject, _, _ = score_candidate(
             "laptop computer workspace desk monitor keyboard",
             intent,
@@ -433,31 +435,32 @@ class TestProviderBonusCapping(unittest.TestCase):
 
     def test_provider_bonus_is_capped(self):
         """Even a very high provider score gets capped."""
-        final, bonus = compute_final_score(pc_score=30, provider_score=100)
+        bonus = compute_provider_bonus(100)
         self.assertLessEqual(bonus, PROVIDER_BONUS_CAP)
-        # Final should be pc + capped bonus, not max(100, 30) = 100
-        self.assertEqual(final, 30 + bonus)
+        final = 30 + bonus
         self.assertLess(final, 100)  # Provider can't dominate
 
     def test_provider_bonus_fraction(self):
-        final, bonus = compute_final_score(pc_score=20, provider_score=40)
+        bonus = compute_provider_bonus(40)
         expected_bonus = min(int(40 * PROVIDER_BONUS_WEIGHT), PROVIDER_BONUS_CAP)
         self.assertEqual(bonus, expected_bonus)
+        final = 20 + bonus
         self.assertEqual(final, 20 + expected_bonus)
 
     def test_negative_provider_gives_no_bonus(self):
-        final, bonus = compute_final_score(pc_score=20, provider_score=-10)
+        bonus = compute_provider_bonus(-10)
         self.assertEqual(bonus, 0)
-        self.assertEqual(final, 20)
 
     def test_zero_pc_with_high_provider(self):
         """If post-centric score is 0 (no match), provider can't rescue it."""
-        final, bonus = compute_final_score(pc_score=0, provider_score=50)
+        bonus = compute_provider_bonus(50)
+        final = 0 + bonus
         self.assertLessEqual(final, PROVIDER_BONUS_CAP)
 
     def test_old_max_behavior_gone(self):
         """max(provider, pc) would give 80; new system gives much less."""
-        final, _ = compute_final_score(pc_score=10, provider_score=80)
+        bonus = compute_provider_bonus(80)
+        final = 10 + bonus
         self.assertLess(final, 80)  # Old: max(80,10)=80; New: 10 + min(20,15) = 25
 
 
@@ -467,45 +470,45 @@ class TestModeSpecificThresholds(unittest.TestCase):
     """Autopost is stricter than editor mode."""
 
     def _make_trace(self, final_score, **kwargs):
-        t = CandidateTrace(final_score=final_score, **kwargs)
+        t = CandidateScore(final_score=final_score, **kwargs)
         return t
 
     def test_autopost_rejects_medium_score(self):
         """Score between editor and autopost thresholds: reject for autopost."""
         trace = self._make_trace(final_score=20)
-        outcome = determine_candidate_outcome(trace, MODE_AUTOPOST)
+        outcome = determine_outcome(trace, MODE_AUTOPOST)
         self.assertIn("REJECT", outcome)
 
     def test_editor_accepts_medium_score(self):
         """Same medium score: acceptable for editor."""
         trace = self._make_trace(final_score=20)
-        outcome = determine_candidate_outcome(trace, MODE_EDITOR)
+        outcome = determine_outcome(trace, MODE_EDITOR)
         self.assertIn("ACCEPT", outcome)
 
     def test_high_score_accepted_in_both_modes(self):
         trace = self._make_trace(final_score=40)
-        self.assertEqual(determine_candidate_outcome(trace, MODE_AUTOPOST), OUTCOME_ACCEPT_BEST)
-        self.assertEqual(determine_candidate_outcome(trace, MODE_EDITOR), OUTCOME_ACCEPT_BEST)
+        self.assertEqual(determine_outcome(trace, MODE_AUTOPOST), OUTCOME_ACCEPT_BEST)
+        self.assertEqual(determine_outcome(trace, MODE_EDITOR), OUTCOME_ACCEPT_BEST)
 
     def test_very_low_score_rejected_in_both(self):
         """Score below both thresholds is rejected in both modes."""
         trace = self._make_trace(final_score=2)
-        autopost = determine_candidate_outcome(trace, MODE_AUTOPOST)
-        editor = determine_candidate_outcome(trace, MODE_EDITOR)
+        autopost = determine_outcome(trace, MODE_AUTOPOST)
+        editor = determine_outcome(trace, MODE_EDITOR)
         self.assertIn("REJECT", autopost)
         self.assertIn("REJECT", editor)
 
     def test_weak_score_accepted_in_editor_rejected_in_autopost(self):
         """Score between editor and autopost thresholds: editor accepts, autopost rejects."""
         trace = self._make_trace(final_score=5)
-        autopost = determine_candidate_outcome(trace, MODE_AUTOPOST)
-        editor = determine_candidate_outcome(trace, MODE_EDITOR)
+        autopost = determine_outcome(trace, MODE_AUTOPOST)
+        editor = determine_outcome(trace, MODE_EDITOR)
         self.assertIn("REJECT", autopost)
         self.assertEqual(editor, OUTCOME_ACCEPT_FOR_EDITOR)
 
     def test_hard_reject_overrides_score(self):
         trace = self._make_trace(final_score=50, hard_reject="wrong_sense:car")
-        outcome = determine_candidate_outcome(trace, MODE_EDITOR)
+        outcome = determine_outcome(trace, MODE_EDITOR)
         self.assertEqual(outcome, OUTCOME_REJECT_WRONG_SENSE)
 
 
@@ -514,54 +517,54 @@ class TestModeSpecificThresholds(unittest.TestCase):
 class TestOutcomeTypes(unittest.TestCase):
 
     def test_wrong_sense_outcome(self):
-        trace = CandidateTrace(hard_reject="wrong_sense:car", final_score=-100)
+        trace = CandidateScore(hard_reject="wrong_sense:car", final_score=-100)
         self.assertEqual(
-            determine_candidate_outcome(trace, MODE_AUTOPOST),
+            determine_outcome(trace, MODE_AUTOPOST),
             OUTCOME_REJECT_WRONG_SENSE,
         )
 
     def test_generic_stock_outcome(self):
-        trace = CandidateTrace(final_score=5, generic_stock_hits=3)
+        trace = CandidateScore(final_score=5, generic_stock_hits=3)
         self.assertEqual(
-            determine_candidate_outcome(trace, MODE_AUTOPOST),
+            determine_outcome(trace, MODE_AUTOPOST),
             OUTCOME_REJECT_GENERIC_STOCK,
         )
 
     def test_cross_family_outcome(self):
-        trace = CandidateTrace(
+        trace = CandidateScore(
             final_score=5, reject_reason="cross_family:food",
         )
         self.assertEqual(
-            determine_candidate_outcome(trace, MODE_AUTOPOST),
+            determine_outcome(trace, MODE_AUTOPOST),
             OUTCOME_REJECT_CROSS_FAMILY,
         )
 
     def test_no_match_outcome(self):
-        trace = CandidateTrace(final_score=3)
+        trace = CandidateScore(final_score=3)
         self.assertEqual(
-            determine_candidate_outcome(trace, MODE_AUTOPOST),
+            determine_outcome(trace, MODE_AUTOPOST),
             OUTCOME_REJECT_NO_MATCH,
         )
 
     def test_editor_only_outcome(self):
-        trace = CandidateTrace(final_score=18)  # Between editor and autopost
+        trace = CandidateScore(final_score=18)  # Between editor and autopost
         self.assertEqual(
-            determine_candidate_outcome(trace, MODE_EDITOR),
+            determine_outcome(trace, MODE_EDITOR),
             OUTCOME_ACCEPT_FOR_EDITOR,
         )
         self.assertEqual(
-            determine_candidate_outcome(trace, MODE_AUTOPOST),
+            determine_outcome(trace, MODE_AUTOPOST),
             OUTCOME_REJECT_LOW_CONFIDENCE,
         )
 
 
-# --- CandidateTrace ---
+# --- CandidateScore ---
 
-class TestCandidateTrace(unittest.TestCase):
+class TestCandidateScore(unittest.TestCase):
 
     def test_score_candidate_returns_trace(self):
-        intent = VisualIntent(
-            main_subject="laptop computer",
+        intent = VisualIntentV2(
+            subject="laptop computer",
             scene="office workspace",
         )
         score, reason, trace = score_candidate(
@@ -569,30 +572,30 @@ class TestCandidateTrace(unittest.TestCase):
             intent,
             query="laptop workspace",
         )
-        self.assertIsInstance(trace, CandidateTrace)
-        self.assertGreater(trace.subject_hits, 0)
-        self.assertGreater(trace.scene_hits, 0)
+        self.assertIsInstance(trace, CandidateScore)
+        self.assertGreater(trace.subject_match, 0)
+        self.assertGreater(trace.scene_match, 0)
         self.assertEqual(trace.post_centric_score, score)
 
     def test_trace_as_log_dict(self):
-        trace = CandidateTrace(
+        trace = CandidateScore(
             url="https://example.com/photo.jpg",
-            source="unsplash",
-            subject_hits=3,
+            provider="unsplash",
+            subject_match=3,
             post_centric_score=42,
             final_score=50,
             outcome=OUTCOME_ACCEPT_BEST,
         )
         d = trace.as_log_dict()
         self.assertIn("url", d)
-        self.assertIn("src", d)
+        self.assertIn("prov", d)
         self.assertEqual(d["subj"], 3)
         self.assertEqual(d["pc"], 42)
         self.assertEqual(d["out"], OUTCOME_ACCEPT_BEST)
 
     def test_trace_hard_reject_propagated(self):
-        intent = VisualIntent(
-            main_subject="industrial machine",
+        intent = VisualIntentV2(
+            subject="industrial machine",
             forbidden_meanings=["car"],
         )
         _, _, trace = score_candidate("car automobile driving", intent)
@@ -638,21 +641,21 @@ class TestVisualIntentExtraction(unittest.TestCase):
         self.assertIn("office", scene.lower())
 
     def test_intent_combines_all_signals(self):
-        intent = extract_visual_intent(
+        intent = extract_visual_intent_v2(
             title="Рецепт пиццы",
             body="Готовим пиццу на кухне с моцареллой",
         )
-        self.assertTrue(intent.main_subject)
+        self.assertTrue(intent.subject)
         self.assertTrue(intent.scene)
-        self.assertTrue(intent.search_queries)
+        self.assertTrue(intent.query_terms)
 
     def test_intent_with_only_title(self):
-        intent = extract_visual_intent(title="Обзор автомобиля BMW X5")
-        self.assertTrue(intent.main_subject)
+        intent = extract_visual_intent_v2(title="Обзор автомобиля BMW X5")
+        self.assertTrue(intent.subject)
 
     def test_intent_with_only_body(self):
-        intent = extract_visual_intent(body="Массаж шеи и спины: техника расслабления")
-        self.assertIn("massage", intent.main_subject.lower())
+        intent = extract_visual_intent_v2(body="Массаж шеи и спины: техника расслабления")
+        self.assertIn("massage", intent.subject.lower())
 
 
 # --- No-image reasons ---
@@ -660,37 +663,37 @@ class TestVisualIntentExtraction(unittest.TestCase):
 class TestNoImageReasons(unittest.TestCase):
 
     def test_no_candidates_reason(self):
-        result = ImagePipelineResult(candidates_evaluated=0)
-        intent = VisualIntent()
+        result = PipelineResult(candidates_evaluated=0)
+        intent = VisualIntentV2()
         self.assertEqual(_determine_no_image_reason(result, intent), "no_candidates")
 
     def test_wrong_sense_reason(self):
-        result = ImagePipelineResult(
+        result = PipelineResult(
             reject_reasons=["wrong_sense:car"],
             candidates_rejected=1,
         )
-        intent = VisualIntent()
+        intent = VisualIntentV2()
         self.assertEqual(_determine_no_image_reason(result, intent), "wrong_sense")
 
     def test_generic_stock_reason(self):
-        result = ImagePipelineResult(
+        result = PipelineResult(
             reject_reasons=["generic_stock"],
             candidates_rejected=1,
         )
-        intent = VisualIntent()
+        intent = VisualIntentV2()
         self.assertEqual(_determine_no_image_reason(result, intent), "generic_stock")
 
     def test_low_subject_match_reason(self):
-        result = ImagePipelineResult(
+        result = PipelineResult(
             reject_reasons=["low_score"],
             candidates_rejected=1,
         )
-        intent = VisualIntent()
+        intent = VisualIntentV2()
         self.assertEqual(_determine_no_image_reason(result, intent), "low_subject_match")
 
     def test_intent_reason_takes_precedence(self):
-        result = ImagePipelineResult()
-        intent = VisualIntent(no_image_reason="weak_subject")
+        result = PipelineResult()
+        intent = VisualIntentV2(no_image_reason="weak_subject")
         self.assertEqual(_determine_no_image_reason(result, intent), "weak_subject")
 
 
@@ -699,22 +702,22 @@ class TestNoImageReasons(unittest.TestCase):
 class TestSearchQueryGeneration(unittest.TestCase):
 
     def test_queries_contain_subject(self):
-        intent = VisualIntent(main_subject="laptop computer")
-        queries = _build_search_queries(intent)
+        intent = VisualIntentV2(subject="laptop computer")
+        queries = _build_query_terms(intent)
         self.assertTrue(any("laptop" in q.lower() for q in queries))
 
     def test_queries_include_scene(self):
-        intent = VisualIntent(
-            main_subject="laptop",
+        intent = VisualIntentV2(
+            subject="laptop",
             scene="office workspace",
         )
-        queries = _build_search_queries(intent)
+        queries = _build_query_terms(intent)
         combined = " ".join(queries).lower()
         self.assertIn("office", combined)
 
     def test_queries_are_latin_only(self):
-        intent = VisualIntent(main_subject="laptop computer")
-        queries = _build_search_queries(intent)
+        intent = VisualIntentV2(subject="laptop computer")
+        queries = _build_query_terms(intent)
         import re
         for q in queries:
             words = q.split()
@@ -725,22 +728,22 @@ class TestSearchQueryGeneration(unittest.TestCase):
                 )
 
     def test_empty_subject_uses_scene(self):
-        intent = VisualIntent(scene="kitchen cooking environment")
-        queries = _build_search_queries(intent)
+        intent = VisualIntentV2(scene="kitchen cooking environment")
+        queries = _build_query_terms(intent)
         self.assertTrue(any("kitchen" in q.lower() for q in queries))
 
     def test_max_query_count(self):
-        intent = VisualIntent(
-            main_subject="a b c d e f g h i j",
+        intent = VisualIntentV2(
+            subject="a b c d e f g h i j",
             scene="scene words here",
             post_family="food",
         )
-        queries = _build_search_queries(intent)
+        queries = _build_query_terms(intent)
         self.assertLessEqual(len(queries), 8)
 
     def test_queries_limited_length(self):
-        intent = VisualIntent(main_subject="word " * 50)
-        queries = _build_search_queries(intent)
+        intent = VisualIntentV2(subject="word " * 50)
+        queries = _build_query_terms(intent)
         for q in queries:
             self.assertLessEqual(len(q), 140)
 
@@ -750,13 +753,13 @@ class TestSearchQueryGeneration(unittest.TestCase):
 class TestScoringEdgeCases(unittest.TestCase):
 
     def test_empty_meta_returns_zero(self):
-        intent = VisualIntent(main_subject="laptop")
+        intent = VisualIntentV2(subject="laptop")
         score, reason, trace = score_candidate("", intent)
         self.assertEqual(score, 0)
         self.assertEqual(reason, "empty_meta")
 
     def test_blocked_visual_class_penalty(self):
-        intent = VisualIntent(main_subject="laptop", post_family="tech")
+        intent = VisualIntentV2(subject="laptop", post_family="tech")
         score, reason, trace = score_candidate(
             "laptop food pizza kitchen cooking",
             intent,
@@ -786,8 +789,8 @@ class GoldenCase:
         # Expected intent properties
         expect_subject_contains: list[str] | None = None,
         expect_subject_not_contains: list[str] | None = None,
-        expect_visuality: str | None = None,
-        expect_visuality_in: list[str] | None = None,
+        expect_imageability: str | None = None,
+        expect_imageability_in: list[str] | None = None,
         expect_forbidden: list[str] | None = None,
         expect_sense: str | None = None,
         # Candidate scoring expectations
@@ -807,8 +810,8 @@ class GoldenCase:
         self.channel_topic = channel_topic
         self.expect_subject_contains = expect_subject_contains or []
         self.expect_subject_not_contains = expect_subject_not_contains or []
-        self.expect_visuality = expect_visuality
-        self.expect_visuality_in = expect_visuality_in
+        self.expect_imageability = expect_imageability
+        self.expect_imageability_in = expect_imageability_in
         self.expect_forbidden = expect_forbidden
         self.expect_sense = expect_sense
         self.good_meta = good_meta
@@ -829,7 +832,7 @@ GOLDEN_CASES: list[GoldenCase] = [
         title="Обзор Toyota Camry 2024",
         body="Тест-драйв нового седана Toyota Camry. Двигатель, расход, салон.",
         expect_subject_contains=["car"],
-        expect_visuality=VISUALITY_HIGH,
+        expect_imageability=IMAGEABILITY_HIGH,
     ),
     GoldenCase(
         name="cars_02_channel_mismatch",
@@ -923,7 +926,7 @@ GOLDEN_CASES: list[GoldenCase] = [
         title="Рецепт домашней пиццы",
         body="Готовим пиццу маргариту на тонком тесте.",
         expect_subject_contains=["pizza"],
-        expect_visuality=VISUALITY_HIGH,
+        expect_imageability=IMAGEABILITY_HIGH,
     ),
     GoldenCase(
         name="food_02_coffee",
@@ -966,13 +969,13 @@ GOLDEN_CASES: list[GoldenCase] = [
         name="health_02_workout",
         title="Тренировка в спортзале для начинающих",
         body="Программа тренировок на неделю: упражнения, подходы.",
-        expect_visuality=VISUALITY_HIGH,
+        expect_imageability=IMAGEABILITY_HIGH,
     ),
     GoldenCase(
         name="health_03_abstract_kpi",
         title="KPI клиники: метрики эффективности",
         body="Как считать ROI в медицинском бизнесе.",
-        expect_visuality_in=[VISUALITY_LOW, VISUALITY_NONE],
+        expect_imageability_in=[IMAGEABILITY_LOW, IMAGEABILITY_NONE],
     ),
     GoldenCase(
         name="health_04_ranking",
@@ -987,28 +990,28 @@ GOLDEN_CASES: list[GoldenCase] = [
         name="news_01_abstract_news",
         title="Новости дня: обзор",
         body="Главные события и анонсы за неделю.",
-        expect_visuality_in=[VISUALITY_LOW, VISUALITY_NONE],
+        expect_imageability_in=[IMAGEABILITY_LOW, IMAGEABILITY_NONE],
     ),
     GoldenCase(
         name="news_02_specific_event",
         title="Открытие нового ресторана в центре Москвы",
         body="Ресторан итальянской кухни открылся на Тверской.",
         expect_subject_contains=["restaurant"],
-        expect_visuality_in=[VISUALITY_HIGH, VISUALITY_MEDIUM],
+        expect_imageability_in=[IMAGEABILITY_HIGH, IMAGEABILITY_MEDIUM],
     ),
     # --- BUSINESS / BRAND ---
     GoldenCase(
         name="business_01_abstract",
         title="Стратегия развития бренда",
         body="Как построить узнаваемый бренд в 2024 году.",
-        expect_visuality_in=[VISUALITY_LOW, VISUALITY_MEDIUM],
+        expect_imageability_in=[IMAGEABILITY_LOW, IMAGEABILITY_MEDIUM],
     ),
     GoldenCase(
         name="business_02_office",
         title="Как обустроить офис для продуктивности",
         body="Интерьер офиса: мебель, свет, растения.",
         expect_subject_contains=["office"],
-        expect_visuality_in=[VISUALITY_HIGH, VISUALITY_MEDIUM],
+        expect_imageability_in=[IMAGEABILITY_HIGH, IMAGEABILITY_MEDIUM],
     ),
     GoldenCase(
         name="business_03_generic_stock_reject",
@@ -1035,7 +1038,7 @@ GOLDEN_CASES: list[GoldenCase] = [
         name="edu_03_abstract_content_plan",
         title="Контент-план для образовательного канала",
         body="Как составить контент-план на месяц.",
-        expect_visuality_in=[VISUALITY_LOW, VISUALITY_NONE],
+        expect_imageability_in=[IMAGEABILITY_LOW, IMAGEABILITY_NONE],
     ),
     # --- TECH / GADGETS ---
     GoldenCase(
@@ -1076,7 +1079,7 @@ GOLDEN_CASES: list[GoldenCase] = [
         title="Модный маникюр 2024",
         body="Тренды nail art: цвета, дизайн, техника.",
         expect_subject_contains=["manicure"],
-        expect_visuality=VISUALITY_HIGH,
+        expect_imageability=IMAGEABILITY_HIGH,
     ),
     GoldenCase(
         name="beauty_02_haircut",
@@ -1116,32 +1119,32 @@ GOLDEN_CASES: list[GoldenCase] = [
         name="noimage_01_poll",
         title="Голосование: какой вариант лучше?",
         body="Опрос для подписчиков.",
-        expect_visuality=VISUALITY_NONE,
+        expect_imageability=IMAGEABILITY_NONE,
         expect_no_image=True,
     ),
     GoldenCase(
         name="noimage_02_content_plan",
         title="Контент-план на неделю",
         body="Стратегия публикаций для Telegram канала.",
-        expect_visuality_in=[VISUALITY_LOW, VISUALITY_NONE],
+        expect_imageability_in=[IMAGEABILITY_LOW, IMAGEABILITY_NONE],
     ),
     GoldenCase(
         name="noimage_03_quotes",
         title="Подборка цитат о мотивации",
         body="Лучшие цитаты великих людей.",
-        expect_visuality_in=[VISUALITY_LOW, VISUALITY_NONE],
+        expect_imageability_in=[IMAGEABILITY_LOW, IMAGEABILITY_NONE],
     ),
     GoldenCase(
         name="noimage_04_opinion",
         title="Моё мнение о текущей ситуации",
         body="Размышления о жизни и работе.",
-        expect_visuality_in=[VISUALITY_LOW, VISUALITY_NONE],
+        expect_imageability_in=[IMAGEABILITY_LOW, IMAGEABILITY_NONE],
     ),
     GoldenCase(
         name="noimage_05_empty",
         title="",
         body="",
-        expect_visuality=VISUALITY_NONE,
+        expect_imageability=IMAGEABILITY_NONE,
         expect_no_image=True,
     ),
     # --- CROSS-FAMILY FALSE POSITIVES ---
@@ -1310,7 +1313,7 @@ class TestGoldenDataset(unittest.TestCase):
     """Real-world regression golden dataset: 80+ cases."""
 
     def _run_golden(self, case: GoldenCase):
-        intent = extract_visual_intent(
+        intent = extract_visual_intent_v2(
             title=case.title,
             body=case.body,
             channel_topic=case.channel_topic,
@@ -1320,34 +1323,34 @@ class TestGoldenDataset(unittest.TestCase):
         for word in case.expect_subject_contains:
             self.assertIn(
                 word.lower(),
-                intent.main_subject.lower(),
+                intent.subject.lower(),
                 f"[{case.name}] Expected subject to contain '{word}', "
-                f"got '{intent.main_subject}'",
+                f"got '{intent.subject}'",
             )
 
         # --- Check subject NOT contains ---
         for word in case.expect_subject_not_contains:
             self.assertNotIn(
                 word.lower(),
-                intent.main_subject.lower(),
+                intent.subject.lower(),
                 f"[{case.name}] Subject should NOT contain '{word}', "
-                f"got '{intent.main_subject}'",
+                f"got '{intent.subject}'",
             )
 
         # --- Check visuality ---
-        if case.expect_visuality:
+        if case.expect_imageability:
             self.assertEqual(
-                intent.visuality,
-                case.expect_visuality,
-                f"[{case.name}] Expected visuality={case.expect_visuality}, "
-                f"got {intent.visuality}",
+                intent.imageability,
+                case.expect_imageability,
+                f"[{case.name}] Expected visuality={case.expect_imageability}, "
+                f"got {intent.imageability}",
             )
-        if case.expect_visuality_in:
+        if case.expect_imageability_in:
             self.assertIn(
-                intent.visuality,
-                case.expect_visuality_in,
-                f"[{case.name}] Expected visuality in {case.expect_visuality_in}, "
-                f"got {intent.visuality}",
+                intent.imageability,
+                case.expect_imageability_in,
+                f"[{case.name}] Expected visuality in {case.expect_imageability_in}, "
+                f"got {intent.imageability}",
             )
 
         # --- Check WSD sense ---
@@ -1374,10 +1377,10 @@ class TestGoldenDataset(unittest.TestCase):
         # --- Check no-image expectation ---
         if case.expect_no_image:
             self.assertIn(
-                intent.visuality,
-                (VISUALITY_NONE, VISUALITY_LOW),
+                intent.imageability,
+                (IMAGEABILITY_NONE, IMAGEABILITY_LOW),
                 f"[{case.name}] Expected no-image (low/none visuality), "
-                f"got {intent.visuality}",
+                f"got {intent.imageability}",
             )
 
         # --- Check candidate ranking ---
@@ -1412,11 +1415,12 @@ class TestGoldenDataset(unittest.TestCase):
         # --- Check mode-specific behavior ---
         if case.good_meta and (case.expect_autopost_rejects or case.expect_editor_accepts):
             score, reason, trace = score_candidate(case.good_meta, intent)
-            final, bonus = compute_final_score(score, 20)  # Assume moderate provider
+            bonus = compute_provider_bonus(20)  # Assume moderate provider
+            final = score + bonus
             trace.final_score = final
 
             if case.expect_autopost_rejects:
-                outcome = determine_candidate_outcome(trace, MODE_AUTOPOST)
+                outcome = determine_outcome(trace, MODE_AUTOPOST)
                 self.assertIn(
                     "REJECT",
                     outcome,
@@ -1425,7 +1429,7 @@ class TestGoldenDataset(unittest.TestCase):
                 )
 
             if case.expect_editor_accepts:
-                outcome = determine_candidate_outcome(trace, MODE_EDITOR)
+                outcome = determine_outcome(trace, MODE_EDITOR)
                 self.assertIn(
                     "ACCEPT",
                     outcome,

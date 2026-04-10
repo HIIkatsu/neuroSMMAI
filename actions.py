@@ -15,7 +15,8 @@ from aiogram.types import FSInputFile
 
 import db
 from content import generate_post_bundle
-from image_search import find_image, _LATIN_TOKEN_RE, validate_image_for_autopost
+from image_gateway import get_post_image, validate_image, MODE_AUTOPOST, MODE_EDITOR
+from image_search import _LATIN_TOKEN_RE, trigger_unsplash_download  # backward compat utilities
 from ai_image_generator import generate_ai_image, _heuristic_prompt
 from runtime_trace import new_trace_id, trace_text_generation, trace_image_selection, TraceTimer, debug_fields, is_debug_trace_enabled
 from safe_send import safe_send, safe_send_document, safe_send_photo, safe_send_video
@@ -474,96 +475,89 @@ async def resolve_post_image(
     ai_prompt: str = "",
     topic: str = "",
     post_text: str = "",
+    title: str = "",
     config: Any | None = None,
     used_refs: set[str] | None = None,
     raw_user_query: str = "",
     trace_id: str = "",
+    mode: str = "",
 ) -> str:
+    """Resolve the best image for a post via the unified image gateway.
+
+    All the logic is in get_post_image(). This function is just a thin
+    orchestration wrapper that maps legacy parameters and handles tracing.
+    """
     _tid = trace_id or new_trace_id()
     _timer = TraceTimer()
     _timer.__enter__()
+
+    # Determine the effective title: use explicit title, or raw user query, or query
+    effective_title = title or raw_user_query or query or ""
+    effective_body = post_text or ""
+    effective_mode = mode if mode in (MODE_AUTOPOST, MODE_EDITOR) else MODE_AUTOPOST
+
     logger.info(
-        "resolve_post_image start owner_id=%s raw_user_query=%r query=%r topic=%r ai_prompt=%r trace_id=%s",
-        owner_id, raw_user_query, query, topic, ai_prompt, _tid,
+        "resolve_post_image start owner_id=%s title=%r body_excerpt=%r "
+        "topic=%r mode=%s trace_id=%s",
+        owner_id, effective_title[:80], effective_body[:80],
+        (topic or "")[:60], effective_mode, _tid,
     )
-
-    # ---------- STEP 1: Try raw user query first (literal-first priority) ----------
-    if raw_user_query:
-        logger.info("resolve_post_image trying raw_user_query=%r", raw_user_query)
-        try:
-            image_ref = await find_image(
-                raw_user_query,
-                used_refs=used_refs,
-                topic=topic,
-                post_text=post_text,
-            ) or ""
-        except Exception as exc:
-            logger.exception("resolve_post_image raw_user_query search failed: %s", exc)
-            image_ref = ""
-
-        if image_ref and validate_image_for_autopost(
-            image_ref, topic=topic, prompt=ai_prompt, post_text=post_text
-        ):
-            logger.info("resolve_post_image SELECTED via raw_user_query=%r url=%r", raw_user_query, image_ref[:80])
-            _timer.__exit__(None, None, None)
-            trace_image_selection(
-                trace_id=_tid, route="resolve_post_image",
-                title_excerpt=topic, body_excerpt=(post_text or "")[:100],
-                visual_subject=raw_user_query, built_query=raw_user_query,
-                provider_result_count=1, scoring_path="raw_user_query",
-                accept_outcome="accepted", duration_ms=_timer.elapsed_ms,
-            )
-            return image_ref
-        elif image_ref:
-            logger.warning("resolve_post_image raw_user_query result REJECTED by quality gate url=%r", image_ref[:80])
-
-    # ---------- STEP 2: Fallback — enriched query (family-aware) ----------
-    search_query = _visual_search_query(query, topic, ai_prompt, post_text)
-    logger.info("resolve_post_image fallback search_query=%r", search_query)
 
     try:
-        image_ref = await find_image(
-            search_query,
+        result = await get_post_image(
+            title=effective_title,
+            body=effective_body,
+            channel_topic=topic,
             used_refs=used_refs,
-            topic=topic,
-            post_text=post_text,
-        ) or ""
-    except Exception as exc:
-        logger.exception("resolve_post_image fallback search failed: %s", exc)
-        image_ref = ""
-
-    # Final quality gate: validate before returning
-    if image_ref and not validate_image_for_autopost(
-        image_ref, topic=topic, prompt=ai_prompt, post_text=post_text
-    ):
-        logger.warning(
-            "resolve_post_image REJECTED by quality gate owner_id=%s url=%r",
-            owner_id, image_ref[:80],
+            mode=effective_mode,
         )
-        image_ref = ""
-
-    _timer.__exit__(None, None, None)
-    if image_ref:
-        logger.info("resolve_post_image SELECTED via fallback url=%r", image_ref[:80])
+    except Exception as exc:
+        logger.exception("resolve_post_image gateway failed: %s", exc)
+        _timer.__exit__(None, None, None)
         trace_image_selection(
             trace_id=_tid, route="resolve_post_image",
-            title_excerpt=topic, body_excerpt=(post_text or "")[:100],
-            visual_subject=search_query, built_query=search_query,
-            provider_result_count=1, scoring_path="enriched_fallback",
+            title_excerpt=effective_title[:60], body_excerpt=effective_body[:100],
+            visual_subject=raw_user_query or query, built_query=query,
+            provider_result_count=0, scoring_path="gateway_error",
+            accept_outcome="no_image", reject_reason=str(exc)[:200],
+            duration_ms=_timer.elapsed_ms,
+        )
+        return ""
+
+    image_ref = result.image_url or ""
+    _timer.__exit__(None, None, None)
+
+    if image_ref:
+        logger.info(
+            "resolve_post_image SELECTED url=%r score=%d mode=%s provider=%s",
+            image_ref[:80], result.score, effective_mode, result.source_provider,
+        )
+        trace_image_selection(
+            trace_id=_tid, route="resolve_post_image",
+            title_excerpt=effective_title[:60], body_excerpt=effective_body[:100],
+            visual_subject=result.matched_query or raw_user_query or query,
+            built_query=result.matched_query or query,
+            provider_result_count=result.candidates_evaluated,
+            scoring_path="unified_gateway",
             accept_outcome="accepted", duration_ms=_timer.elapsed_ms,
         )
-        return image_ref
+    else:
+        logger.debug(
+            "resolve_post_image EMPTY reason=%s outcome=%s",
+            result.no_image_reason, result.outcome,
+        )
+        trace_image_selection(
+            trace_id=_tid, route="resolve_post_image",
+            title_excerpt=effective_title[:60], body_excerpt=effective_body[:100],
+            visual_subject=raw_user_query or query, built_query=query,
+            provider_result_count=result.candidates_evaluated,
+            scoring_path="unified_gateway",
+            accept_outcome="no_image",
+            reject_reason=result.no_image_reason or "no_match",
+            duration_ms=_timer.elapsed_ms,
+        )
 
-    logger.debug("RESOLVE_POST_IMAGE_EMPTY raw_user_query=%r query=%r", (raw_user_query or "")[:200], (query or "")[:240])
-    trace_image_selection(
-        trace_id=_tid, route="resolve_post_image",
-        title_excerpt=topic, body_excerpt=(post_text or "")[:100],
-        visual_subject=search_query or raw_user_query, built_query=search_query,
-        provider_result_count=0, scoring_path="enriched_fallback",
-        accept_outcome="no_image", reject_reason="no_match",
-        duration_ms=_timer.elapsed_ms,
-    )
-    return ""
+    return image_ref
 
 
 # ---------- PAYLOAD ----------
@@ -708,10 +702,12 @@ async def generate_post_payload(
                             owner_id=owner_id,
                             ai_prompt=llm_image_prompt or effective_prompt or enriched_query or text_part or "",
                             topic=title or channel_topic,
+                            title=title,
                             post_text=text or "",
                             config=config,
                             used_refs=used_refs,
                             raw_user_query=effective_prompt,
+                            mode=generation_path,
                         ),
                         timeout=25.0,
                     )
