@@ -64,6 +64,7 @@ from prompt_builder import (
     build_writer_prompt,
     build_targeted_rewrite_prompt,
 )
+from text_validator import validate_generated_text as validate_text_runtime
 
 logger = logging.getLogger(__name__)
 _ERROR_PREFIXES = ("⚠️", "⏳", "🌐")
@@ -288,6 +289,50 @@ def _apply_fabrication_cleanup(bundle: dict) -> None:
             cleaned, n_at, n_url = _remove_fabricated_refs(val)
             if n_at or n_url:
                 bundle[field] = cleaned
+
+
+def _strip_fabricated_claims(text: str, tv_result: "TextValidationResult") -> str:
+    """Attempt to repair text by stripping lines with fabricated claims.
+
+    Uses the violation patterns from text_validator to find and remove
+    or soften lines containing unsupported numeric/authority/personal claims.
+
+    Args:
+        text: Combined text to repair
+        tv_result: TextValidationResult from validate_text_runtime
+    """
+    if not text:
+        return text
+
+    from text_validator import _FAKE_NUMERIC_PATTERNS, _FAKE_PERSONAL_PATTERNS
+
+    lines = text.split("\n")
+    cleaned_lines = []
+    removed = 0
+    for line in lines:
+        line_lower = line.lower()
+        has_violation = False
+        # Check numeric claim patterns
+        for pattern, _reason in _FAKE_NUMERIC_PATTERNS:
+            if pattern.search(line_lower):
+                has_violation = True
+                break
+        # Check personal claim patterns (only if not allowed)
+        if not has_violation and tv_result.fake_personal_claims:
+            for pattern, _reason in _FAKE_PERSONAL_PATTERNS:
+                if pattern.search(line_lower):
+                    has_violation = True
+                    break
+        if has_violation and len(line.strip()) > 0:
+            removed += 1
+            logger.info("TEXT_FABRICATION_STRIP line=%r", line[:80])
+            continue  # Skip this line
+        cleaned_lines.append(line)
+
+    if removed > 0:
+        logger.info("TEXT_FABRICATION_STRIPPED_LINES count=%d", removed)
+
+    return "\n".join(cleaned_lines)
 
 
 # ---------------------------------------------------------------------------
@@ -2975,6 +3020,46 @@ async def generate_post_bundle(
                     len(gen_issues),
                     "; ".join(f"{r}: {d}" for r, d in gen_issues[:3]),
                 )
+            # --- Runtime anti-fabrication gate (text_validator) ---
+            _combined_text = "\n".join(
+                normalized.get(k, "") for k in ("title", "body", "cta") if normalized.get(k)
+            )
+            _tv_result = validate_text_runtime(
+                _combined_text,
+                generation_mode=generation_mode,
+                source_title="",
+                source_summary="",
+                source_text="",
+                input_text=requested,
+                allow_personal=bool(gen_spec.allow_personal if hasattr(gen_spec, "allow_personal") else False),
+                reject_threshold=6,
+            )
+            if _tv_result.should_reject:
+                logger.warning(
+                    "TEXT_FABRICATION_GATE_REJECT risk=%d numeric=%d personal=%d drift=%d",
+                    _tv_result.total_risk_score,
+                    len(_tv_result.fake_numeric_claims),
+                    len(_tv_result.fake_personal_claims),
+                    len(_tv_result.source_drift_reasons),
+                )
+                # Attempt repair: strip detected fabricated claims from text
+                _combined_text = _strip_fabricated_claims(
+                    _combined_text, _tv_result
+                )
+                # Re-split into fields
+                _parts = _combined_text.split("\n", 2)
+                if len(_parts) >= 1:
+                    normalized["title"] = _parts[0].strip()
+                if len(_parts) >= 2:
+                    normalized["body"] = _parts[1].strip()
+                if len(_parts) >= 3:
+                    normalized["cta"] = _parts[2].strip()
+            elif _tv_result.total_risk_score > 0:
+                logger.info(
+                    "TEXT_FABRICATION_GATE_PASS risk=%d events=%s",
+                    _tv_result.total_risk_score,
+                    _tv_result.log_events[:3],
+                )
             # Enforce single-message budget for autopost path
             if generation_path == "autopost":
                 t, b, c = enforce_autopost_budget(
@@ -3086,6 +3171,31 @@ async def generate_post_bundle(
             len(gen_issues),
             "; ".join(f"{r}: {d}" for r, d in gen_issues[:3]),
         )
+
+    # --- Runtime anti-fabrication gate on best candidate ---
+    _best_combined = "\n".join(
+        best.get(k, "") for k in ("title", "body", "cta") if best.get(k)
+    )
+    _best_tv = validate_text_runtime(
+        _best_combined,
+        generation_mode=generation_mode,
+        input_text=requested,
+        allow_personal=bool(gen_spec.allow_personal if hasattr(gen_spec, "allow_personal") else False),
+        reject_threshold=6,
+    )
+    if _best_tv.should_reject:
+        logger.warning(
+            "TEXT_FABRICATION_GATE_REJECT_BEST risk=%d events=%s",
+            _best_tv.total_risk_score, _best_tv.log_events[:3],
+        )
+        _best_combined = _strip_fabricated_claims(_best_combined, _best_tv)
+        _parts = _best_combined.split("\n", 2)
+        if len(_parts) >= 1:
+            best["title"] = _parts[0].strip()
+        if len(_parts) >= 2:
+            best["body"] = _parts[1].strip()
+        if len(_parts) >= 3:
+            best["cta"] = _parts[2].strip()
 
     # Enforce single-message budget for autopost path
     if generation_path == "autopost":
