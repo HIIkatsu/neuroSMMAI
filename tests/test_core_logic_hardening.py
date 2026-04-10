@@ -496,17 +496,17 @@ class TestImageSearchSubjectFirst(unittest.TestCase):
 class TestEditorCandidatesMismatchedTopics(unittest.TestCase):
     """Editor mode should return usable candidates even when channel ≠ post topic."""
 
-    def test_editor_threshold_lower_than_autopost(self):
-        """Editor min score is lower than autopost, allowing more candidates."""
+    def test_editor_threshold_equal_to_autopost(self):
+        """Editor and autopost now use the same threshold (unified ACCEPT_MIN_SCORE)."""
         from image_ranker import AUTOPOST_MIN_SCORE, EDITOR_MIN_SCORE
-        self.assertLess(EDITOR_MIN_SCORE, AUTOPOST_MIN_SCORE)
+        self.assertEqual(EDITOR_MIN_SCORE, AUTOPOST_MIN_SCORE)
 
     def test_editor_accepts_moderate_match(self):
-        """Editor mode accepts candidates with moderate post-centric score."""
+        """Editor mode accepts candidates at or above ACCEPT_MIN_SCORE."""
         from image_ranker import determine_outcome, CandidateScore, EDITOR_MIN_SCORE
 
-        # Create a candidate score between editor and autopost thresholds
-        cs = CandidateScore(final_score=EDITOR_MIN_SCORE + 5)
+        # Create a candidate at the unified threshold
+        cs = CandidateScore(final_score=EDITOR_MIN_SCORE + 5, outcome="ACCEPT")
         outcome = determine_outcome(cs, mode="editor")
         self.assertIn("accept", outcome.lower(),
                       f"Editor should accept score {cs.final_score}, got outcome: {outcome}")

@@ -245,13 +245,13 @@ class TestCanonicalImagePath(unittest.TestCase):
         self.assertIn("trace_id", sig.parameters)
 
     def test_image_pipeline_single_path(self):
-        """image_search.find_image should delegate to image_gateway."""
-        import image_search
-        self.assertTrue(hasattr(image_search, 'find_image'))
-        # Verify it calls the gateway
+        """image_gateway.get_post_image should be the single entry point."""
+        import image_gateway
+        self.assertTrue(hasattr(image_gateway, 'get_post_image'))
+        # Verify it delegates to run_pipeline_v3
         import inspect
-        source = inspect.getsource(image_search.find_image)
-        self.assertIn("get_post_image", source)
+        source = inspect.getsource(image_gateway.get_post_image)
+        self.assertIn("run_pipeline_v3", source)
 
 
 # ---------------------------------------------------------------------------

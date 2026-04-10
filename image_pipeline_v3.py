@@ -1,36 +1,28 @@
 """
-image_pipeline_v3.py — New image pipeline orchestrator (v3).
+image_pipeline_v3.py — Image pipeline orchestrator.
 
-Complete rewrite of the image selection system.
+Complete replacement of the image selection system.
 
 Core principle: IMAGE = f(POST), not f(CHANNEL).
-Channel topic is a very weak fallback for empty posts only.
+A wrong image is an ERROR worse than no image.
 
 Architecture:
   1. Extract visual intent from post title + body
-  2. Check imageability → skip if too abstract
-  3. Collect raw candidates from providers (broad retrieval)
-  4. Score each candidate against post intent
+  2. Check imageability → skip if abstract
+  3. Collect raw candidates from providers
+  4. Score each candidate against post intent (STRICT)
   5. Apply anti-repeat penalties
-  6. Top-N reranking
-  7. Mode-specific final decision
-  8. Log debug trace
+  6. Accept ONLY if score >= ACCEPT_MIN_SCORE (same for ALL modes)
+  7. Log runtime proof: WHY accepted or rejected
 
-Two modes:
-  EDITOR  — high recall, returns 6-10 candidates, tolerates weak matches
-  AUTOPOST — high precision, prefers NO_IMAGE over bad image
-
-Provider strategy:
-  Pexels  = primary
-  Pixabay = secondary
-  Openverse = editor-only weak fallback (feature-flagged)
+ONE threshold. ONE path. Editor and autopost use identical scoring.
+Mode only affects retrieval breadth (editor fetches more candidates).
 """
 from __future__ import annotations
 
 import logging
 import re
 from dataclasses import dataclass, field
-from urllib.parse import urlparse as _urlparse
 
 from visual_intent_v2 import (
     VisualIntentV2,
@@ -46,21 +38,7 @@ from image_ranker import (
     score_candidate,
     rank_candidates,
     detect_meta_family,
-    AUTOPOST_MIN_SCORE,
-    EDITOR_MIN_SCORE,
-    TOP_N_AUTOPOST,
-    TOP_N_EDITOR,
-    OUTCOME_ACCEPT_BEST,
-    OUTCOME_ACCEPT_FOR_EDITOR,
-    OUTCOME_REJECT_WRONG_SENSE,
-    OUTCOME_REJECT_GENERIC_STOCK,
-    OUTCOME_REJECT_GENERIC_FILLER,
-    OUTCOME_REJECT_CROSS_FAMILY,
-    OUTCOME_REJECT_LOW_CONFIDENCE,
-    OUTCOME_REJECT_REPEAT,
-    OUTCOME_NO_IMAGE_SAFE,
-    OUTCOME_NO_IMAGE_LOW_IMAGEABILITY,
-    OUTCOME_NO_IMAGE_NO_CANDIDATES,
+    ACCEPT_MIN_SCORE,
 )
 from image_history import (
     ImageHistory,
@@ -72,12 +50,32 @@ from topic_utils import get_family_blocked_visuals
 
 logger = logging.getLogger(__name__)
 
-
-# ---------------------------------------------------------------------------
-# Pipeline modes
-# ---------------------------------------------------------------------------
+# Mode constants — kept here for backward compat with tests and callers
 MODE_AUTOPOST = "autopost"
 MODE_EDITOR = "editor"
+
+# Re-export old outcome constants for backward compat
+from image_ranker import (  # noqa: E402
+    OUTCOME_ACCEPT_BEST,
+    OUTCOME_ACCEPT_FOR_EDITOR,
+    OUTCOME_REJECT_WRONG_SENSE,
+    OUTCOME_REJECT_GENERIC_STOCK,
+    OUTCOME_REJECT_GENERIC_FILLER,
+    OUTCOME_REJECT_CROSS_FAMILY,
+    OUTCOME_REJECT_LOW_CONFIDENCE,
+    OUTCOME_REJECT_REPEAT,
+    OUTCOME_NO_IMAGE_SAFE,
+    OUTCOME_NO_IMAGE_LOW_IMAGEABILITY,
+    OUTCOME_NO_IMAGE_NO_CANDIDATES,
+    AUTOPOST_MIN_SCORE,
+    EDITOR_MIN_SCORE,
+    TOP_N_AUTOPOST,
+    TOP_N_EDITOR,
+)
+
+# Backward compat alias for old validate_image_post_centric_v3 name
+# Backward compat alias for old validate_image_post_centric_v3 name
+# (set after function definition below)
 
 
 # ---------------------------------------------------------------------------
@@ -85,19 +83,20 @@ MODE_EDITOR = "editor"
 # ---------------------------------------------------------------------------
 @dataclass
 class PipelineResult:
-    """Result of the image pipeline v3."""
+    """Result of the image pipeline."""
     image_url: str = ""
     score: int = 0
     source_provider: str = ""
     matched_query: str = ""
     no_image_reason: str = ""
-    outcome: str = ""
-    mode: str = MODE_AUTOPOST
+    outcome: str = ""          # "ACCEPT" or "NO_IMAGE"
+    accept_reason: str = ""    # Human-readable: WHY this image was chosen
+    mode: str = "autopost"
     visual_intent: VisualIntentV2 | None = None
     candidates_evaluated: int = 0
     candidates_rejected: int = 0
     reject_reasons: list[str] = field(default_factory=list)
-    # Editor mode: multiple tolerable candidates
+    # Editor: additional candidates above threshold (for carousel/choices)
     editor_candidates: list[tuple[str, int]] = field(default_factory=list)
     # Full trace for debugging
     traces: list[CandidateScore] = field(default_factory=list)
@@ -116,6 +115,7 @@ class PipelineResult:
             "score": self.score,
             "source": self.source_provider,
             "query": self.matched_query[:60] if self.matched_query else "",
+            "accept_reason": self.accept_reason,
             "no_image_reason": self.no_image_reason,
             "candidates_evaluated": self.candidates_evaluated,
             "candidates_rejected": self.candidates_rejected,
@@ -124,44 +124,16 @@ class PipelineResult:
             "visual_sense": (intent.sense if intent else "")[:30],
             "imageability": intent.imageability if intent else "",
             "search_queries": [q[:40] for q in (intent.query_terms if intent else [])[:3]],
-            "negative_terms": (intent.negative_terms if intent else [])[:3],
             "editor_candidates_count": len(self.editor_candidates),
         }
 
 
-# ---------------------------------------------------------------------------
-# Debug trace
-# ---------------------------------------------------------------------------
-def _log_debug_trace(result: PipelineResult, title: str, body: str) -> None:
-    """Log a compact but useful debug trace for the pipeline run."""
-    intent = result.visual_intent
-    logger.info(
-        "IMAGE_PIPELINE_V3_TRACE mode=%s outcome=%s "
-        "title=%r body_excerpt=%r "
-        "subject=%r sense=%r scene=%r "
-        "imageability=%s family=%s source=%s "
-        "queries=%s "
-        "candidates_evaluated=%d candidates_rejected=%d "
-        "best_score=%d best_provider=%s best_query=%r "
-        "no_image_reason=%s reject_reasons=%s",
-        result.mode, result.outcome,
-        (title or "")[:60], (body or "")[:60],
-        (intent.subject if intent else "")[:40],
-        (intent.sense if intent else ""),
-        (intent.scene if intent else "")[:40],
-        intent.imageability if intent else "",
-        intent.post_family if intent else "",
-        intent.source if intent else "",
-        [q[:40] for q in (intent.query_terms if intent else [])[:3]],
-        result.candidates_evaluated, result.candidates_rejected,
-        result.score, result.source_provider,
-        result.matched_query[:40] if result.matched_query else "",
-        result.no_image_reason,
-        result.reject_reasons[:5],
-    )
-    # Log top candidate traces
-    for cs in result.traces[:5]:
-        logger.info("IMAGE_V3_CANDIDATE %s", cs.as_log_dict())
+# Retrieval limits per mode (editor gets more candidates to choose from)
+_RETRIEVE_QUERIES_AUTOPOST = 4
+_RETRIEVE_QUERIES_EDITOR = 6
+
+# Max candidates to consider after ranking
+_TOP_N = 10
 
 
 # ---------------------------------------------------------------------------
@@ -175,9 +147,7 @@ def _record_selection(
     """Record accepted image into anti-repeat history."""
     domain = extract_domain(cs.url)
     visual_class = detect_meta_family(cs.meta_snippet)
-    # Scene class is the coarse visual bucket for scene dedup
     scene_class = intent.scene or visual_class
-    # Coarse pattern combines visual class + subject for pattern-level dedup
     coarse_pattern = f"{visual_class}_{intent.subject or 'generic'}".lower().replace(" ", "_")
     history.record(
         url=cs.url,
@@ -205,63 +175,61 @@ def _determine_no_image_reason(
     if not reasons and result.candidates_evaluated == 0:
         return "no_candidates"
 
-    wrong_sense_count = sum(1 for r in reasons if r.startswith("wrong_sense"))
-    generic_stock_count = sum(1 for r in reasons if r == "generic_stock")
-    blocked_count = sum(1 for r in reasons if r.startswith("blocked_visual"))
-    cross_family_count = sum(1 for r in reasons if r.startswith("cross_family"))
-    repeat_count = sum(1 for r in reasons if r == "repeat_image")
-    filler_count = sum(1 for r in reasons if r == "generic_filler")
+    # Priority order for reason reporting
+    for prefix in ("wrong_sense", "blocked_visual", "cross_family",
+                    "scene_mismatch", "subject_scene_reject",
+                    "generic_filler", "generic_stock",
+                    "repeat_image", "low_score"):
+        if any(r.startswith(prefix) for r in reasons):
+            return prefix
 
-    if wrong_sense_count > 0:
-        return "wrong_sense"
-    if repeat_count > 0:
-        return "repeat_image"
-    if filler_count > 0:
-        return "generic_filler"
-    if generic_stock_count > 0:
-        return "generic_stock"
-    if blocked_count > 0:
-        return "blocked_visual"
-    if cross_family_count > 0:
-        return "cross_family"
     if result.candidates_rejected > 0:
-        return "low_subject_match"
+        return "low_confidence"
     return "no_candidates"
 
 
-def _reason_to_outcome(reason: str) -> str:
-    """Map reason string to OUTCOME constant."""
-    mapping = {
-        "low_imageability": OUTCOME_NO_IMAGE_LOW_IMAGEABILITY,
-        "low_imageability_no_subject": OUTCOME_NO_IMAGE_LOW_IMAGEABILITY,
-        "no_search_queries": OUTCOME_NO_IMAGE_NO_CANDIDATES,
-        "no_candidates": OUTCOME_NO_IMAGE_NO_CANDIDATES,
-        "wrong_sense": OUTCOME_REJECT_WRONG_SENSE,
-        "generic_stock": OUTCOME_REJECT_GENERIC_STOCK,
-        "generic_filler": OUTCOME_REJECT_GENERIC_FILLER,
-        "repeat_image": OUTCOME_REJECT_REPEAT,
-        "blocked_visual": OUTCOME_REJECT_CROSS_FAMILY,
-        "cross_family": OUTCOME_REJECT_CROSS_FAMILY,
-        "low_subject_match": OUTCOME_REJECT_LOW_CONFIDENCE,
-        "weak_subject": OUTCOME_NO_IMAGE_SAFE,
-        "no_visual_subject": OUTCOME_NO_IMAGE_SAFE,
-    }
-    return mapping.get(reason, OUTCOME_NO_IMAGE_SAFE)
+# ---------------------------------------------------------------------------
+# Runtime proof log
+# ---------------------------------------------------------------------------
+def _log_runtime_proof(result: PipelineResult, title: str, body: str) -> None:
+    """Emit structured runtime proof: what happened and why."""
+    intent = result.visual_intent
+    logger.info(
+        "IMAGE_PIPELINE_PROOF mode=%s outcome=%s "
+        "title=%r subject=%r scene=%r imageability=%s "
+        "queries=%s candidates=%d rejected=%d "
+        "best_score=%d accept_reason=%s no_image_reason=%s "
+        "reject_reasons=%s",
+        result.mode, result.outcome,
+        (title or "")[:60],
+        (intent.subject if intent else "")[:40],
+        (intent.scene if intent else "")[:40],
+        intent.imageability if intent else "",
+        [q[:40] for q in (intent.query_terms if intent else [])[:3]],
+        result.candidates_evaluated, result.candidates_rejected,
+        result.score,
+        result.accept_reason or "none",
+        result.no_image_reason or "none",
+        result.reject_reasons[:5],
+    )
+    # Log top candidate details for debugging
+    for cs in result.traces[:5]:
+        logger.info("IMAGE_CANDIDATE %s", cs.as_log_dict())
 
 
 # ---------------------------------------------------------------------------
 # Validation (post-centric)
 # ---------------------------------------------------------------------------
-def validate_image_post_centric_v3(
+def validate_image_v3(
     image_ref: str,
     *,
     intent: VisualIntentV2,
     image_meta: str = "",
-    mode: str = MODE_AUTOPOST,
 ) -> tuple[bool, str]:
     """Validate image against post's visual intent.
 
     Returns (is_valid, reject_reason).
+    Same strict threshold as pipeline selection.
     """
     if not image_ref or not image_ref.startswith("http"):
         return True, ""
@@ -278,16 +246,15 @@ def validate_image_post_centric_v3(
                 if re.search(rf"\b{re.escape(cls)}\b", meta_lower, re.I):
                     return False, f"blocked_visual:{cls}"
 
-        min_score = AUTOPOST_MIN_SCORE if mode == MODE_AUTOPOST else EDITOR_MIN_SCORE
         pc_score, reason, _cs = score_candidate(image_meta, intent)
-        if pc_score < min_score:
+        if pc_score < ACCEPT_MIN_SCORE:
             return False, reason or "low_score"
 
     return True, ""
 
 
-# ---------------------------------------------------------------------------
-# Main pipeline entry point (v3)
+# Backward compat alias
+validate_image_post_centric_v3 = validate_image_v3
 # ---------------------------------------------------------------------------
 async def run_pipeline_v3(
     *,
@@ -295,19 +262,18 @@ async def run_pipeline_v3(
     body: str = "",
     channel_topic: str = "",
     used_refs: set[str] | None = None,
-    mode: str = MODE_AUTOPOST,
+    mode: str = "autopost",
 ) -> PipelineResult:
-    """Run the full image pipeline v3.
+    """Run the image pipeline.
 
     Flow:
-    1. Extract visual intent from post
+    1. Extract visual intent
     2. Check imageability
-    3. Collect candidates from providers (broad retrieval)
-    4. Score each candidate post-centrically
+    3. Collect candidates from providers
+    4. Score each candidate (strict, post-centric)
     5. Apply anti-repeat penalties
-    6. Top-N rerank
-    7. Mode-specific final decision
-    8. Log debug trace
+    6. Accept ONLY if best score >= ACCEPT_MIN_SCORE
+    7. Log runtime proof
     """
     result = PipelineResult(mode=mode)
 
@@ -322,30 +288,29 @@ async def run_pipeline_v3(
     # --- Step 2: Check imageability ---
     if intent.imageability == IMAGEABILITY_NONE:
         result.no_image_reason = "low_imageability"
-        result.outcome = OUTCOME_NO_IMAGE_LOW_IMAGEABILITY
-        logger.info(
-            "IMAGE_V3 outcome=%s reason=low_imageability mode=%s title=%r",
-            result.outcome, mode, (title or "")[:60],
-        )
-        _log_debug_trace(result, title, body)
+        result.outcome = "NO_IMAGE"
+        _log_runtime_proof(result, title, body)
         return result
 
     if intent.imageability == IMAGEABILITY_LOW and not intent.subject:
         result.no_image_reason = "low_imageability_no_subject"
-        result.outcome = OUTCOME_NO_IMAGE_LOW_IMAGEABILITY
-        _log_debug_trace(result, title, body)
+        result.outcome = "NO_IMAGE"
+        _log_runtime_proof(result, title, body)
         return result
 
     # --- Step 3: Get search queries ---
     queries = intent.query_terms
     if not queries:
         result.no_image_reason = "no_search_queries"
-        result.outcome = OUTCOME_NO_IMAGE_NO_CANDIDATES
-        _log_debug_trace(result, title, body)
+        result.outcome = "NO_IMAGE"
+        _log_runtime_proof(result, title, body)
         return result
 
+    # Mode affects retrieval breadth only
+    max_queries = _RETRIEVE_QUERIES_EDITOR if mode == "editor" else _RETRIEVE_QUERIES_AUTOPOST
+    queries = queries[:max_queries]
+
     # --- Step 4: Collect candidates from providers ---
-    # Lazy import: image_providers requires httpx (runtime dependency)
     from image_providers import collect_candidates
 
     raw_candidates = await collect_candidates(
@@ -355,14 +320,12 @@ async def run_pipeline_v3(
     )
 
     logger.info(
-        "IMAGE_V3_RETRIEVE mode=%s family=%s subject=%r queries=%s "
-        "imageability=%s raw_candidates=%d",
-        mode, intent.post_family, (intent.subject or "")[:40],
-        [q[:40] for q in queries[:3]], intent.imageability,
-        len(raw_candidates),
+        "IMAGE_RETRIEVE mode=%s subject=%r queries=%s raw_candidates=%d",
+        mode, (intent.subject or "")[:40],
+        [q[:40] for q in queries[:3]], len(raw_candidates),
     )
 
-    # --- Step 5: Score each candidate ---
+    # --- Step 5: Score each candidate (STRICT) ---
     scored: list[CandidateScore] = []
     for raw in raw_candidates:
         pc_score, pc_reason, cs = score_candidate(raw.meta_text, intent, raw.query)
@@ -372,96 +335,48 @@ async def run_pipeline_v3(
         scored.append(cs)
         result.candidates_evaluated += 1
 
-        if cs.hard_reject or pc_score < EDITOR_MIN_SCORE:
+        if cs.hard_reject or pc_score < ACCEPT_MIN_SCORE:
             result.candidates_rejected += 1
             if pc_reason:
                 result.reject_reasons.append(pc_reason)
 
     # --- Step 6: Apply anti-repeat + rank ---
     history = get_image_history()
-    ranked = rank_candidates(
-        scored,
-        intent=intent,
-        history=history,
-        mode=mode,
-    )
+    ranked = rank_candidates(scored, intent=intent, history=history)
     result.traces = ranked
 
-    # Update rejection counts after ranking
+    # Collect all reject reasons from ranking
     for cs in ranked:
-        if cs.outcome.startswith("REJECT") and cs.reject_reason:
-            if cs.reject_reason not in result.reject_reasons:
-                result.reject_reasons.append(cs.reject_reason)
+        if cs.reject_reason and cs.reject_reason not in result.reject_reasons:
+            result.reject_reasons.append(cs.reject_reason)
 
-    # --- Step 7: Top-N selection ---
+    # --- Step 7: Accept ONLY if best >= ACCEPT_MIN_SCORE ---
     accepted = [
         cs for cs in ranked
-        if not cs.hard_reject and not cs.outcome.startswith("REJECT")
+        if not cs.hard_reject and cs.final_score >= ACCEPT_MIN_SCORE
     ]
-    top_n_limit = TOP_N_EDITOR if mode == MODE_EDITOR else TOP_N_AUTOPOST
-    top_n = accepted[:top_n_limit]
 
-    # --- Step 8: Mode-specific final decision ---
-    if top_n:
-        best = top_n[0]
-        min_score = AUTOPOST_MIN_SCORE if mode == MODE_AUTOPOST else EDITOR_MIN_SCORE
+    if accepted:
+        best = accepted[0]
+        result.image_url = best.url
+        result.score = best.final_score
+        result.source_provider = best.provider
+        result.matched_query = best.query
+        result.outcome = "ACCEPT"
+        result.accept_reason = best.accept_reason
 
-        if best.final_score >= min_score:
-            result.image_url = best.url
-            result.score = best.final_score
-            result.source_provider = best.provider
-            result.matched_query = best.query
-            result.outcome = best.outcome
-
-            if mode == MODE_EDITOR:
-                result.editor_candidates = [
-                    (cs.url, cs.final_score) for cs in top_n[:10]
-                    if cs.final_score >= EDITOR_MIN_SCORE
-                ]
-
-            _record_selection(best, intent, history)
-            _log_debug_trace(result, title, body)
-            return result
-
-        # Editor: accept weaker candidates
-        if mode == MODE_EDITOR and best.final_score >= EDITOR_MIN_SCORE:
-            result.image_url = best.url
-            result.score = best.final_score
-            result.outcome = OUTCOME_ACCEPT_FOR_EDITOR
-            result.source_provider = best.provider
-            result.matched_query = best.query
+        # Editor gets additional candidates above threshold
+        if mode == "editor":
             result.editor_candidates = [
-                (cs.url, cs.final_score) for cs in top_n[:10]
-                if cs.final_score >= EDITOR_MIN_SCORE
+                (cs.url, cs.final_score) for cs in accepted[:_TOP_N]
             ]
-            _record_selection(best, intent, history)
-            _log_debug_trace(result, title, body)
-            return result
 
-    # --- Editor fallback: surface non-hard-rejected positives ---
-    if mode == MODE_EDITOR and ranked:
-        soft_ok = [
-            cs for cs in ranked
-            if not cs.hard_reject and cs.final_score > 0
-        ]
-        if soft_ok:
-            best_soft = soft_ok[0]
-            result.image_url = best_soft.url
-            result.score = best_soft.final_score
-            result.source_provider = best_soft.provider
-            result.matched_query = best_soft.query
-            result.outcome = OUTCOME_ACCEPT_FOR_EDITOR
-            result.editor_candidates = [
-                (cs.url, cs.final_score) for cs in soft_ok[:10]
-            ]
-            _record_selection(best_soft, intent, history)
-            _log_debug_trace(result, title, body)
-            return result
+        _record_selection(best, intent, history)
+        _log_runtime_proof(result, title, body)
+        return result
 
     # --- No acceptable candidate: honest no-image ---
     result.no_image_reason = _determine_no_image_reason(result, intent)
-    result.outcome = _reason_to_outcome(result.no_image_reason)
-    result.reject_reasons = list(set(result.reject_reasons))
-
-    _log_debug_trace(result, title, body)
+    result.outcome = "NO_IMAGE"
+    _log_runtime_proof(result, title, body)
     return result

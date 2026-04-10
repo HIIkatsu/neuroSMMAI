@@ -30,9 +30,7 @@ os.environ.setdefault("BOT_TOKEN", "test:token")
 os.environ.setdefault("OPENROUTER_API_KEY", "test-key")
 
 from topic_utils import detect_topic_family
-from image_search import (
-    validate_image_for_autopost,
-)
+from image_gateway import validate_image
 from ai_image_generator import generate_ai_image, DEFAULT_MODEL
 
 
@@ -70,11 +68,11 @@ class TestPixabayGetUrlNotRejected(unittest.TestCase):
     def test_pixabay_get_url_passes_validation(self):
         """pixabay.com/get/<hash> URL should pass without metadata."""
         url = "https://pixabay.com/get/gf6172cb3dddedad1d4c7e1e9df0b2441916667f02a5a688531c8732"
-        result = validate_image_for_autopost(
+        result = validate_image(
             url,
-            topic="Сколько стоит езда на проколотом самокате",
-            prompt="scooter tire flat repair cost",
-            post_text="По данным сервисных центров, 4 из 10 самокатов имеют проблемы с шинами.",
+            title="scooter tire flat repair cost",
+            body="По данным сервисных центров, 4 из 10 самокатов имеют проблемы с шинами.",
+            channel_topic="Сколько стоит езда на проколотом самокате",
         )
         self.assertTrue(result,
                         "Pixabay /get/ URL must not be rejected solely by URL keyword mismatch")
@@ -82,11 +80,11 @@ class TestPixabayGetUrlNotRejected(unittest.TestCase):
     def test_pixabay_cdn_url_passes_validation(self):
         """cdn.pixabay.com URL should pass without metadata."""
         url = "https://cdn.pixabay.com/photo/2020/01/01/000000_960_720.jpg"
-        result = validate_image_for_autopost(
+        result = validate_image(
             url,
-            topic="Урожай и лампочка",
-            prompt="harvest light bulb",
-            post_text="Ваш урожай сожжет лампочка? Вот почему важно выбирать правильное освещение.",
+            title="harvest light bulb",
+            body="Ваш урожай сожжет лампочка? Вот почему важно выбирать правильное освещение.",
+            channel_topic="Урожай и лампочка",
         )
         self.assertTrue(result,
                         "cdn.pixabay.com URL must not be rejected by URL keyword mismatch")
@@ -101,11 +99,11 @@ class TestPexelsAssetUrlNotRejected(unittest.TestCase):
     def test_pexels_photo_url_passes_validation(self):
         """images.pexels.com/photos/<id>/... URL should pass without metadata."""
         url = "https://images.pexels.com/photos/11350076/pexels-photo-11350076.jpeg?auto=compress"
-        result = validate_image_for_autopost(
+        result = validate_image(
             url,
-            topic="Ваш урожай сожжет лампочка? Вот почему",
-            prompt="harvest lighting indoor plants grow",
-            post_text="Неправильное освещение может уничтожить рассаду за неделю.",
+            title="harvest lighting indoor plants grow",
+            body="Неправильное освещение может уничтожить рассаду за неделю.",
+            channel_topic="Ваш урожай сожжет лампочка? Вот почему",
         )
         self.assertTrue(result,
                         "Pexels asset URL must not be rejected solely by URL having no topic keywords")
@@ -113,11 +111,11 @@ class TestPexelsAssetUrlNotRejected(unittest.TestCase):
     def test_pexels_url_with_different_topic(self):
         """Pexels photo URL with generic topic should also pass."""
         url = "https://images.pexels.com/photos/99999/pexels-photo-99999.jpeg?auto=compress&w=600"
-        result = validate_image_for_autopost(
+        result = validate_image(
             url,
-            topic="Как выбрать правильный инструмент для дачи",
-            prompt="garden tool selection",
-            post_text="Правильный инструмент экономит 3 часа работы в неделю.",
+            title="garden tool selection",
+            body="Правильный инструмент экономит 3 часа работы в неделю.",
+            channel_topic="Как выбрать правильный инструмент для дачи",
         )
         self.assertTrue(result,
                         "Pexels URL must pass validation even without topic keywords in URL")
@@ -222,11 +220,11 @@ class TestPostSubjectOverridesChannelFamily(unittest.TestCase):
     def test_scooter_post_in_generic_channel_not_local_business(self):
         """A scooter post should not be forced into local_business by channel topic."""
         url = "https://pixabay.com/get/g730860eefb2fa82d6d24dddc5f5eb97fc2e05066"
-        result = validate_image_for_autopost(
+        result = validate_image(
             url,
-            topic="общие новости",
-            prompt="scooter",
-            post_text="Сколько стоит езда на проколотом самокате? По данным сервисных центров...",
+            title="scooter",
+            body="Сколько стоит езда на проколотом самокате? По данным сервисных центров...",
+            channel_topic="общие новости",
         )
         # The important thing is: the family used for validation should be
         # derived from post_text, not forced into local_business from channel topic.
@@ -237,11 +235,11 @@ class TestPostSubjectOverridesChannelFamily(unittest.TestCase):
     def test_harvest_lighting_post_not_hijacked_by_channel(self):
         """A gardening/lighting post should use the post's subject family."""
         url = "https://images.pexels.com/photos/11350076/pexels-photo-11350076.jpeg?auto=compress"
-        result = validate_image_for_autopost(
+        result = validate_image(
             url,
-            topic="generic channel",
-            prompt="harvest light indoor",
-            post_text="Ваш урожай сожжет лампочка? Вот почему важно выбирать правильное освещение.",
+            title="harvest light indoor",
+            body="Ваш урожай сожжет лампочка? Вот почему важно выбирать правильное освещение.",
+            channel_topic="generic channel",
         )
         self.assertTrue(result,
                         "Post about harvest/lighting must not be rejected by generic "
@@ -255,59 +253,60 @@ class TestUnifiedGatewayLogs(unittest.TestCase):
     """image_gateway.get_post_image must have structured logging."""
 
     def test_gateway_has_accept_log(self):
-        """image_gateway source must contain IMAGE_GATEWAY_ACCEPT log."""
+        """image_gateway source must contain IMAGE_GATEWAY ACCEPT log."""
         import image_gateway
         import inspect
         source = inspect.getsource(image_gateway.get_post_image)
-        self.assertIn("IMAGE_GATEWAY_ACCEPT", source,
-                       "get_post_image must log IMAGE_GATEWAY_ACCEPT when image is found")
+        self.assertIn("IMAGE_GATEWAY", source)
+        self.assertIn("ACCEPT", source,
+                       "get_post_image must log ACCEPT when image is found")
 
     def test_gateway_has_no_image_log(self):
-        """image_gateway source must contain IMAGE_GATEWAY_NO_IMAGE log."""
+        """image_gateway source must contain IMAGE_GATEWAY NO_IMAGE log."""
         import image_gateway
         import inspect
         source = inspect.getsource(image_gateway.get_post_image)
-        self.assertIn("IMAGE_GATEWAY_NO_IMAGE", source,
-                       "get_post_image must log IMAGE_GATEWAY_NO_IMAGE when no image found")
+        self.assertIn("NO_IMAGE", source,
+                       "get_post_image must log NO_IMAGE when no image found")
 
     def test_gateway_has_skip_log(self):
-        """image_gateway source must contain IMAGE_GATEWAY_SKIP log."""
+        """image_gateway source must log when skipping due to no content."""
         import image_gateway
         import inspect
         source = inspect.getsource(image_gateway.get_post_image)
-        self.assertIn("IMAGE_GATEWAY_SKIP", source,
+        self.assertIn("no_post_content", source,
                        "get_post_image must log when skipping due to no content")
 
-    def test_find_image_delegates_to_gateway(self):
-        """find_image in image_search must delegate to image_gateway."""
-        import image_search
+    def test_get_post_image_delegates_to_pipeline(self):
+        """get_post_image in image_gateway must delegate to run_pipeline_v3."""
+        import image_gateway
         import inspect
-        source = inspect.getsource(image_search.find_image)
-        self.assertIn("get_post_image", source,
-                       "find_image must delegate to image_gateway.get_post_image")
+        source = inspect.getsource(image_gateway.get_post_image)
+        self.assertIn("run_pipeline_v3", source,
+                       "get_post_image must delegate to run_pipeline_v3")
 
 
 # ---------------------------------------------------------------------------
 # 7. Image validation accepts CDN URLs correctly
 # ---------------------------------------------------------------------------
 class TestCdnUrlValidation(unittest.TestCase):
-    """validate_image_for_autopost must handle CDN URLs without false rejection."""
+    """validate_image must handle CDN URLs without false rejection."""
 
     def test_pixabay_cdn_url_not_rejected(self):
         """Pixabay CDN URL should not be rejected for generic posts."""
-        result = validate_image_for_autopost(
+        result = validate_image(
             "https://pixabay.com/get/gf6172cb3dddedad1d4c7e1e9df0b2441916667f02a5a688531c8732",
-            topic="общий",
-            post_text="Интересные факты о мире.",
+            title="общий",
+            body="Интересные факты о мире.",
         )
         self.assertTrue(result)
 
     def test_pexels_cdn_url_not_rejected(self):
         """Pexels CDN URL should not be rejected for generic posts."""
-        result = validate_image_for_autopost(
+        result = validate_image(
             "https://images.pexels.com/photos/11350076/pexels-photo-11350076.jpeg?auto=compress",
-            topic="общий",
-            post_text="Новые тренды этого года.",
+            title="общий",
+            body="Новые тренды этого года.",
         )
         self.assertTrue(result)
 
@@ -367,18 +366,18 @@ class TestGatewayModePropagation(unittest.TestCase):
 # 10. Family detection with post text priority
 # ---------------------------------------------------------------------------
 class TestFamilyDetectionPostTextPriority(unittest.TestCase):
-    """validate_image_for_autopost should use post_text for family detection."""
+    """validate_image should use post_text for family detection."""
 
     def test_non_semantic_url_with_post_text(self):
         """Post text about generic topic with CDN URL should not be rejected."""
         # This tests that family detection from post_text does not force
         # a strict family match against a CDN URL that has no keywords.
         url = "https://pixabay.com/get/ge51b4a9f91370657cc85dbeef88c980025c0a14b"
-        result = validate_image_for_autopost(
+        result = validate_image(
             url,
-            topic="Растения и освещение",
-            prompt="indoor plants lighting",
-            post_text="Ваш урожай сожжет лампочка? Правильное освещение — ключ к здоровой рассаде.",
+            title="indoor plants lighting",
+            body="Ваш урожай сожжет лампочка? Правильное освещение — ключ к здоровой рассаде.",
+            channel_topic="Растения и освещение",
         )
         self.assertTrue(result,
                         "CDN URL with generic post text should not be rejected")

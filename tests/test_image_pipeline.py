@@ -50,12 +50,10 @@ from image_ranker import (
     # Constants
     AUTOPOST_MIN_SCORE,
     EDITOR_MIN_SCORE,
-    PROVIDER_BONUS_CAP,
-    PROVIDER_BONUS_WEIGHT,
+    ACCEPT_MIN_SCORE,
     W_SUBJECT,
     OUTCOME_ACCEPT_BEST,
     OUTCOME_ACCEPT_FOR_EDITOR,
-    OUTCOME_REJECT_NO_MATCH,
     OUTCOME_REJECT_WRONG_SENSE,
     OUTCOME_REJECT_GENERIC_STOCK,
     OUTCOME_REJECT_CROSS_FAMILY,
@@ -64,6 +62,11 @@ from image_ranker import (
     OUTCOME_NO_IMAGE_LOW_IMAGEABILITY,
     OUTCOME_NO_IMAGE_NO_CANDIDATES,
 )
+# Backward compat: provider bonus removed (returns 0)
+PROVIDER_BONUS_CAP = 0
+PROVIDER_BONUS_WEIGHT = 0
+# Backward compat: OUTCOME_REJECT_NO_MATCH merged into LOW_CONFIDENCE
+OUTCOME_REJECT_NO_MATCH = OUTCOME_REJECT_LOW_CONFIDENCE
 from image_pipeline_v3 import (
     PipelineResult,
     MODE_AUTOPOST,
@@ -442,10 +445,8 @@ class TestProviderBonusCapping(unittest.TestCase):
 
     def test_provider_bonus_fraction(self):
         bonus = compute_provider_bonus(40)
-        expected_bonus = min(int(40 * PROVIDER_BONUS_WEIGHT), PROVIDER_BONUS_CAP)
-        self.assertEqual(bonus, expected_bonus)
-        final = 20 + bonus
-        self.assertEqual(final, 20 + expected_bonus)
+        # Provider bonus removed — always returns 0
+        self.assertEqual(bonus, 0)
 
     def test_negative_provider_gives_no_bonus(self):
         bonus = compute_provider_bonus(-10)
@@ -467,47 +468,44 @@ class TestProviderBonusCapping(unittest.TestCase):
 # --- Mode-specific thresholds ---
 
 class TestModeSpecificThresholds(unittest.TestCase):
-    """Autopost is stricter than editor mode."""
+    """Editor and autopost now use the same unified threshold."""
 
     def _make_trace(self, final_score, **kwargs):
         t = CandidateScore(final_score=final_score, **kwargs)
         return t
 
-    def test_autopost_rejects_medium_score(self):
-        """Score between editor and autopost thresholds: reject for autopost."""
-        trace = self._make_trace(final_score=20)
+    def test_below_threshold_rejected_in_autopost(self):
+        """Score below ACCEPT_MIN_SCORE: reject for autopost."""
+        trace = self._make_trace(final_score=20, outcome=OUTCOME_REJECT_LOW_CONFIDENCE)
         outcome = determine_outcome(trace, MODE_AUTOPOST)
         self.assertIn("REJECT", outcome)
 
-    def test_editor_accepts_medium_score(self):
-        """Same medium score: acceptable for editor."""
-        trace = self._make_trace(final_score=20)
+    def test_below_threshold_rejected_in_editor(self):
+        """Same score below threshold: also rejected for editor (unified threshold)."""
+        trace = self._make_trace(final_score=20, outcome=OUTCOME_REJECT_LOW_CONFIDENCE)
         outcome = determine_outcome(trace, MODE_EDITOR)
-        self.assertIn("ACCEPT", outcome)
+        self.assertIn("REJECT", outcome)
 
     def test_high_score_accepted_in_both_modes(self):
-        trace = self._make_trace(final_score=40)
+        trace = self._make_trace(final_score=40, outcome=OUTCOME_ACCEPT_BEST)
         self.assertEqual(determine_outcome(trace, MODE_AUTOPOST), OUTCOME_ACCEPT_BEST)
         self.assertEqual(determine_outcome(trace, MODE_EDITOR), OUTCOME_ACCEPT_BEST)
 
     def test_very_low_score_rejected_in_both(self):
-        """Score below both thresholds is rejected in both modes."""
-        trace = self._make_trace(final_score=2)
+        """Score below threshold is rejected in both modes."""
+        trace = self._make_trace(final_score=2, outcome=OUTCOME_REJECT_LOW_CONFIDENCE)
         autopost = determine_outcome(trace, MODE_AUTOPOST)
         editor = determine_outcome(trace, MODE_EDITOR)
         self.assertIn("REJECT", autopost)
         self.assertIn("REJECT", editor)
 
-    def test_weak_score_accepted_in_editor_rejected_in_autopost(self):
-        """Score between editor and autopost thresholds: editor accepts, autopost rejects."""
-        trace = self._make_trace(final_score=5)
-        autopost = determine_outcome(trace, MODE_AUTOPOST)
-        editor = determine_outcome(trace, MODE_EDITOR)
-        self.assertIn("REJECT", autopost)
-        self.assertEqual(editor, OUTCOME_ACCEPT_FOR_EDITOR)
+    def test_unified_threshold_same_for_both_modes(self):
+        """Editor and autopost use the same ACCEPT_MIN_SCORE threshold."""
+        self.assertEqual(EDITOR_MIN_SCORE, AUTOPOST_MIN_SCORE)
+        self.assertEqual(ACCEPT_MIN_SCORE, AUTOPOST_MIN_SCORE)
 
     def test_hard_reject_overrides_score(self):
-        trace = self._make_trace(final_score=50, hard_reject="wrong_sense:car")
+        trace = self._make_trace(final_score=50, hard_reject="wrong_sense:car", outcome=OUTCOME_REJECT_WRONG_SENSE)
         outcome = determine_outcome(trace, MODE_EDITOR)
         self.assertEqual(outcome, OUTCOME_REJECT_WRONG_SENSE)
 

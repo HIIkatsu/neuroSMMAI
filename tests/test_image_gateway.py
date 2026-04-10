@@ -191,7 +191,7 @@ class TestValidateBasic(unittest.TestCase):
 class TestValidateWithPipeline(unittest.TestCase):
     """Validation with post-centric v3 checks."""
 
-    @patch("image_gateway.validate_image_post_centric_v3")
+    @patch("image_gateway.validate_image_v3")
     @patch("image_gateway.extract_visual_intent_v2")
     def test_rejects_when_v3_rejects(self, mock_intent, mock_validate):
         mock_intent.return_value = VisualIntentV2(
@@ -208,7 +208,7 @@ class TestValidateWithPipeline(unittest.TestCase):
         )
         self.assertFalse(result)
 
-    @patch("image_gateway.validate_image_post_centric_v3")
+    @patch("image_gateway.validate_image_v3")
     @patch("image_gateway.extract_visual_intent_v2")
     def test_accepts_when_v3_accepts(self, mock_intent, mock_validate):
         mock_intent.return_value = VisualIntentV2(
@@ -227,31 +227,23 @@ class TestValidateWithPipeline(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 7. Backward compatibility — image_search shim
+# 7. Backward compatibility — image_gateway exports
 # ---------------------------------------------------------------------------
 class TestBackwardCompatShim(unittest.TestCase):
-    """image_search.py functions must still work as wrappers."""
-
-    def test_find_image_exists(self):
-        from image_search import find_image
-        self.assertTrue(inspect.iscoroutinefunction(find_image))
-
-    def test_validate_image_for_autopost_exists(self):
-        from image_search import validate_image_for_autopost
-        self.assertFalse(inspect.iscoroutinefunction(validate_image_for_autopost))
-
-    def test_build_best_visual_queries_exists(self):
-        from image_search import build_best_visual_queries
-        self.assertTrue(callable(build_best_visual_queries))
+    """image_gateway must export backward-compat symbols."""
 
     def test_trigger_unsplash_download_exists(self):
-        from image_search import trigger_unsplash_download
+        from image_gateway import trigger_unsplash_download
         self.assertTrue(inspect.iscoroutinefunction(trigger_unsplash_download))
 
     def test_latin_token_re_exported(self):
-        from image_search import _LATIN_TOKEN_RE
+        from image_gateway import _LATIN_TOKEN_RE
         self.assertTrue(_LATIN_TOKEN_RE.match("hello"))
         self.assertFalse(_LATIN_TOKEN_RE.match("привет"))
+
+    def test_validate_image_post_centric_v3_importable(self):
+        from image_gateway import validate_image_post_centric_v3
+        self.assertTrue(callable(validate_image_post_centric_v3))
 
 
 # ---------------------------------------------------------------------------

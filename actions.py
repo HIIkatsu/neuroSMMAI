@@ -15,8 +15,7 @@ from aiogram.types import FSInputFile
 
 import db
 from content import generate_post_bundle
-from image_gateway import get_post_image, validate_image, MODE_AUTOPOST, MODE_EDITOR
-from image_search import _LATIN_TOKEN_RE, trigger_unsplash_download  # backward compat utilities
+from image_gateway import get_post_image, validate_image, MODE_AUTOPOST, MODE_EDITOR, _LATIN_TOKEN_RE, trigger_unsplash_download
 from ai_image_generator import generate_ai_image, _heuristic_prompt
 from runtime_trace import new_trace_id, trace_text_generation, trace_image_selection, TraceTimer, debug_fields, is_debug_trace_enabled
 from safe_send import safe_send, safe_send_document, safe_send_photo, safe_send_video
