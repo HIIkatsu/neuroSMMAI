@@ -369,8 +369,8 @@ _SUBJECT_TRANSLATIONS: list[tuple[str, str]] = [
     # Beauty
     ("маникюр", "manicure nail art"), ("педикюр", "pedicure"),
     ("стриж", "haircut hairstyle"), ("окраш", "hair coloring"),
-    ("кожа ", "skincare skin"), ("кожу", "skincare skin"),
-    ("кожи ", "skincare skin"), ("кожей", "skincare skin"),
+    ("кожа", "skincare skin"), ("кожу", "skincare skin"),
+    ("кожи", "skincare skin"), ("кожей", "skincare skin"),
     # Home/building — specific first, then general
     ("паркет", "parquet flooring wood floor"),
     ("ламинат", "laminate flooring"),
@@ -394,7 +394,7 @@ _SUBJECT_TRANSLATIONS: list[tuple[str, str]] = [
     ("огород", "vegetable garden"),
     # NOTE: "парк" is ambiguous — matches "паркет", "паркинг".
     # Use explicit forms:
-    ("парков", "park parking"),
+    ("парков", "park"),
     (" парк ", "park"), (" парке ", "park"), (" парка ", "park"),
     (" парку", "park"), (" парком", "park"),
     (" лес ", "forest"), (" лесу", "forest"), (" лесн", "forest"),
@@ -468,7 +468,7 @@ _SCENE_PATTERNS: list[tuple[str, str]] = [
     ("спортзал", "gym fitness"),
     # NOTE: "парк" is ambiguous — matches "паркет". Use explicit forms.
     (" парк ", "park outdoor nature"), (" парке ", "park outdoor nature"),
-    (" парка ", "park outdoor nature"), ("парков", "park outdoor nature"),
+    (" парка ", "park outdoor nature"),
     ("улиц", "street urban outdoor"),
     ("магазин", "retail shop"),
     ("школ", "school classroom"),
