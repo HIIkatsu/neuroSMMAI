@@ -381,10 +381,12 @@ async def run_pipeline_v3(
         if cs.reject_reason and cs.reject_reason not in result.reject_reasons:
             result.reject_reasons.append(cs.reject_reason)
 
-    # --- Step 7: Accept ONLY if best >= ACCEPT_MIN_SCORE ---
+    # --- Step 7: Accept ONLY if best >= ACCEPT_MIN_SCORE AND subject confirmed ---
     accepted = [
         cs for cs in ranked
-        if not cs.hard_reject and cs.final_score >= ACCEPT_MIN_SCORE
+        if not cs.hard_reject
+        and cs.final_score >= ACCEPT_MIN_SCORE
+        and (cs.subject_match >= 1 or cs.allowed_visual_hits >= 1)
     ]
 
     if accepted:

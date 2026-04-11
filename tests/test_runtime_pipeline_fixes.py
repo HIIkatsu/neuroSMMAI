@@ -77,8 +77,8 @@ class TestEditorRecallFixes(unittest.TestCase):
         self.assertIn("REJECT", outcome)
 
     def test_above_threshold_accepted_in_editor(self):
-        """Score at/above ACCEPT_MIN_SCORE is accepted."""
-        trace = CandidateScore(final_score=EDITOR_MIN_SCORE, hard_reject="", reject_reason="")
+        """Score at/above ACCEPT_MIN_SCORE is accepted when subject is confirmed."""
+        trace = CandidateScore(final_score=EDITOR_MIN_SCORE, hard_reject="", reject_reason="", subject_match=1)
         outcome = determine_outcome(trace, MODE_EDITOR)
         self.assertIn("ACCEPT", outcome)
 

@@ -321,13 +321,24 @@ _SUBJECT_TRANSLATIONS: list[tuple[str, str]] = [
     # Food
     ("карбонар", "carbonara pasta spaghetti"),
     ("кофе", "coffee"), ("чай", "tea"), ("торт", "cake"), ("пицц", "pizza"),
-    ("суш", "sushi"), ("бургер", "burger"), ("салат", "salad"), ("паст", "pasta"),
+    ("суш", "sushi"), ("бургер", "burger"), ("салат", "salad"),
+    # NOTE: "паст" removed — too short, false-matches "пастбище" (pasture).
+    # Use explicit forms instead:
+    ("паста ", "pasta"), ("пасту", "pasta"), ("пастой", "pasta"),
+    ("пасте", "pasta"), ("пасты", "pasta"),
     ("рецепт", "recipe food dish"),
     ("завтрак", "breakfast"), ("обед", "lunch"), ("ужин", "dinner"),
     ("выпечк", "bakery pastry"), ("хлеб", "bread"),
     ("десерт", "dessert"), ("мороженое", "ice cream"),
     ("гриб", "mushrooms"), ("ягод", "berries"), ("мясо", "meat"),
     ("рыб", "fish seafood"), ("овощ", "vegetables"), ("фрукт", "fruits"),
+    ("конфет", "candy sweets chocolate"),
+    ("шоколад", "chocolate candy"),
+    ("сладост", "sweets confectionery"),
+    ("молоко", "milk dairy"), ("молочн", "dairy milk"),
+    ("коров", "cow cattle livestock"), ("говядин", "beef meat"),
+    ("свинин", "pork meat"), ("курин", "chicken poultry"),
+    ("курятин", "chicken poultry"), ("куриц", "chicken poultry"),
     # Transport / micro-mobility (BEFORE vehicles to catch specific terms)
     ("самокат", "scooter electric scooter kick scooter"),
     ("велосипед", "bicycle bike cycling"),
@@ -337,6 +348,9 @@ _SUBJECT_TRANSLATIONS: list[tuple[str, str]] = [
     ("бензин", "gasoline fuel petrol"),
     ("дизел", "diesel fuel"),
     ("двигател", "engine motor"),
+    ("шин ", "tire tires winter tire"), ("шины", "tire tires"),
+    ("шину", "tire"), ("шинам", "tire tires"), ("шинах", "tire tires"),
+    ("покрышк", "tire tires"),
     # Vehicles
     ("китайск", "chinese car modern car chinese automobile"),
     ("автомобил", "automobile car"), ("авто ", "car automotive"),
@@ -344,6 +358,7 @@ _SUBJECT_TRANSLATIONS: list[tuple[str, str]] = [
     ("электромоб", "electric vehicle"),
     ("седан", "sedan car"), ("кроссовер", "crossover suv car"),
     ("тест-драйв", "test drive car"), ("внедорожник", "suv offroad"),
+    ("машин", "car automobile"),
     # Tech
     ("ноутбук", "laptop"), ("компьют", "computer"), ("сервер", "server"),
     ("видеокарт", "graphics card gpu"), ("процессор", "processor cpu"),
@@ -354,8 +369,13 @@ _SUBJECT_TRANSLATIONS: list[tuple[str, str]] = [
     # Beauty
     ("маникюр", "manicure nail art"), ("педикюр", "pedicure"),
     ("стриж", "haircut hairstyle"), ("окраш", "hair coloring"),
-    ("кож", "skincare skin face"),
-    # Home/building
+    ("кожа ", "skincare skin"), ("кожу", "skincare skin"),
+    ("кожи ", "skincare skin"), ("кожей", "skincare skin"),
+    # Home/building — specific first, then general
+    ("паркет", "parquet flooring wood floor"),
+    ("ламинат", "laminate flooring"),
+    ("линолеум", "linoleum flooring"),
+    ("плитк", "tile flooring"),
     ("кухн", "kitchen"), ("ванн", "bathroom"), ("спальн", "bedroom"),
     ("гостин", "living room"), ("балкон", "balcony"),
     ("ремонт", "repair renovation"), ("строительств", "construction"),
@@ -367,16 +387,31 @@ _SUBJECT_TRANSLATIONS: list[tuple[str, str]] = [
     ("диван", "sofa couch furniture"),
     ("стол ", "table furniture"),
     ("стул", "chair furniture"),
-    ("полк", "shelf furniture"),
-    # Nature
-    ("сад", "garden"), ("огород", "vegetable garden"),
-    ("парк", "park"),
+    ("полка", "shelf furniture"), ("полки", "shelf furniture"),
+    ("полок", "shelf furniture"), ("полку", "shelf furniture"),
+    # Nature — use longer stems to avoid false matches
+    ("сад ", "garden"), (" саду", "garden"), ("сада ", "garden"),
+    ("огород", "vegetable garden"),
+    # NOTE: "парк" is ambiguous — matches "паркет", "паркинг".
+    # Use explicit forms:
+    ("парков", "park parking"),
+    (" парк ", "park"), (" парке ", "park"), (" парка ", "park"),
+    (" парку", "park"), (" парком", "park"),
     (" лес ", "forest"), (" лесу", "forest"), (" лесн", "forest"),
     (" леса", "forest"), (" лесом", "forest"), (" лесе", "forest"),
     ("озер", "lake"),
-    # Business
+    # Business / Finance
     ("офис", "office"), ("склад", "warehouse"), ("магазин", "shop store"),
     ("ресторан", "restaurant dining"),
+    ("инвестиц", "investment finance money"),
+    ("инвестор", "investor finance"),
+    ("акци", "stocks shares investment"),
+    ("биржа", "stock exchange trading"),
+    ("трейдинг", "trading finance"),
+    ("крипто", "cryptocurrency bitcoin"),
+    ("бизнес", "business entrepreneur"),
+    ("предприниматель", "entrepreneur business"),
+    ("стартап", "startup business"),
     # Professions
     ("стоматолог", "dentist"), ("психолог", "psychologist"),
     ("ветеринар", "veterinarian"), ("юрист", "lawyer"),
@@ -389,9 +424,18 @@ _SUBJECT_TRANSLATIONS: list[tuple[str, str]] = [
     ("баскетбол", "basketball"), ("теннис", "tennis"),
     ("хоккей", "hockey"), ("бокс", "boxing"),
     ("чемпионат", "championship competition sport"),
+    # Gaming
+    ("видеоигр", "video game gaming"), ("компьютерн", "computer gaming"),
+    ("геймер", "gamer gaming"), ("геймин", "gaming esports"),
+    ("консол", "game console gaming"), ("playstation", "playstation gaming"),
+    ("xbox", "xbox gaming"),
+    # News
+    ("новост", "news headlines breaking news"),
     # Other
-    ("свадьб", "wedding ceremony"), ("детск", "children kids"),
-    ("ребен", "children kids"), ("дет", "children kids"),
+    ("свадьб", "wedding ceremony"),
+    ("детск", "children kids"), ("ребен", "children kids"),
+    # NOTE: removed bare "дет" — too short, matches "детали" (details).
+    # "детск" and "ребен" cover "детский" and "ребенок" correctly.
     ("животн", "animals"), ("собак", "dog"), ("кошк", "cat"),
     ("путешеств", "travel"), ("туризм", "tourism"),
     ("недвижимост", "real estate"), ("ипотек", "mortgage"),
@@ -422,7 +466,9 @@ _SCENE_PATTERNS: list[tuple[str, str]] = [
     ("студи", "studio creative space"),
     ("гараж", "garage workspace"),
     ("спортзал", "gym fitness"),
-    ("парк", "park outdoor nature"),
+    # NOTE: "парк" is ambiguous — matches "паркет". Use explicit forms.
+    (" парк ", "park outdoor nature"), (" парке ", "park outdoor nature"),
+    (" парка ", "park outdoor nature"), ("парков", "park outdoor nature"),
     ("улиц", "street urban outdoor"),
     ("магазин", "retail shop"),
     ("школ", "school classroom"),
