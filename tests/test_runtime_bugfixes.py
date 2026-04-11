@@ -282,9 +282,10 @@ class TestStructureCardinalityValidation(unittest.TestCase):
 class TestImagePipelineEditorMode(unittest.TestCase):
     """Editor mode must return candidates or explicit reject reasons."""
 
-    def test_editor_lower_threshold_than_autopost(self):
+    def test_editor_same_threshold_as_autopost(self):
+        """Editor and autopost now use the same threshold (ACCEPT_MIN_SCORE)."""
         from image_ranker import EDITOR_MIN_SCORE, AUTOPOST_MIN_SCORE
-        self.assertLess(EDITOR_MIN_SCORE, AUTOPOST_MIN_SCORE)
+        self.assertEqual(EDITOR_MIN_SCORE, AUTOPOST_MIN_SCORE)
 
     def test_editor_accepts_lower_score_candidate(self):
         from image_ranker import (
@@ -292,7 +293,7 @@ class TestImagePipelineEditorMode(unittest.TestCase):
             EDITOR_MIN_SCORE,
         )
         from image_pipeline_v3 import MODE_EDITOR
-        cs = CandidateScore(final_score=EDITOR_MIN_SCORE)
+        cs = CandidateScore(final_score=EDITOR_MIN_SCORE, outcome="ACCEPT")
         outcome = determine_outcome(cs, MODE_EDITOR)
         self.assertIn("ACCEPT", outcome)
 
@@ -302,9 +303,10 @@ class TestImagePipelineEditorMode(unittest.TestCase):
             EDITOR_MIN_SCORE,
         )
         from image_pipeline_v3 import MODE_AUTOPOST
-        cs = CandidateScore(final_score=EDITOR_MIN_SCORE)
+        # With unified threshold, a score at EDITOR_MIN_SCORE (=25) is accepted
+        cs = CandidateScore(final_score=EDITOR_MIN_SCORE, outcome="ACCEPT")
         outcome = determine_outcome(cs, MODE_AUTOPOST)
-        self.assertIn("REJECT", outcome)
+        self.assertIn("ACCEPT", outcome)
 
     def test_editor_result_has_reject_reasons_on_failure(self):
         """PipelineResult exposes reject_reasons even with no accepted image."""

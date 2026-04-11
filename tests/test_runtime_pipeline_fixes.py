@@ -61,15 +61,14 @@ from news_service import (
 # ---------------------------------------------------------------------------
 
 class TestEditorRecallFixes(unittest.TestCase):
-    """Editor mode should return tolerable results instead of empty
-    for weak-but-relevant candidates."""
+    """Editor and autopost use unified threshold (ACCEPT_MIN_SCORE).
+    Wrong image is worse than no image — both modes reject weak candidates."""
 
-    def test_weak_score_accepted_in_editor(self):
-        """A candidate with score between EDITOR_MIN_SCORE and AUTOPOST_MIN_SCORE
-        should be accepted in editor mode."""
+    def test_weak_score_rejected_in_editor(self):
+        """Unified threshold: weak score (5) rejected even in editor."""
         trace = CandidateScore(final_score=5, hard_reject="", reject_reason="")
         outcome = determine_outcome(trace, MODE_EDITOR)
-        self.assertEqual(outcome, OUTCOME_ACCEPT_FOR_EDITOR)
+        self.assertIn("REJECT", outcome)
 
     def test_weak_score_rejected_in_autopost(self):
         """Same weak score should be rejected in autopost mode."""
@@ -77,16 +76,16 @@ class TestEditorRecallFixes(unittest.TestCase):
         outcome = determine_outcome(trace, MODE_AUTOPOST)
         self.assertIn("REJECT", outcome)
 
-    def test_very_weak_score_still_accepted_in_editor(self):
-        """Even very weak scores (just above EDITOR_MIN_SCORE=4) should be accepted."""
+    def test_above_threshold_accepted_in_editor(self):
+        """Score at/above ACCEPT_MIN_SCORE is accepted."""
         trace = CandidateScore(final_score=EDITOR_MIN_SCORE, hard_reject="", reject_reason="")
         outcome = determine_outcome(trace, MODE_EDITOR)
-        self.assertEqual(outcome, OUTCOME_ACCEPT_FOR_EDITOR)
+        self.assertIn("ACCEPT", outcome)
 
-    def test_editor_min_is_lower_than_autopost(self):
-        """Verify EDITOR_MIN_SCORE < AUTOPOST_MIN_SCORE."""
-        self.assertLess(EDITOR_MIN_SCORE, AUTOPOST_MIN_SCORE)
-        self.assertLess(EDITOR_MIN_SCORE, 8)  # Lowered from old value of 8
+    def test_unified_threshold(self):
+        """EDITOR_MIN_SCORE == AUTOPOST_MIN_SCORE (unified)."""
+        self.assertEqual(EDITOR_MIN_SCORE, AUTOPOST_MIN_SCORE)
+        self.assertEqual(EDITOR_MIN_SCORE, 25)
 
     def test_scoring_returns_nonzero_for_weak_match(self):
         """A candidate with one subject word hit should get a non-zero score."""
@@ -229,15 +228,14 @@ class TestAutopostRepeatImageRejection(unittest.TestCase):
         outcome = determine_outcome(trace, MODE_AUTOPOST)
         self.assertEqual(outcome, OUTCOME_REJECT_REPEAT)
 
-    def test_repeated_url_not_hard_rejected_in_editor(self):
-        """Repeated URL in editor should not produce hard reject (editor is lenient)."""
+    def test_repeated_url_rejected_in_editor_too(self):
+        """Unified: Repeated URL is rejected in all modes (wrong image > no image)."""
         trace = CandidateScore(
             final_score=30,
             repeat_penalty=P_REPEAT_EXACT_URL,
         )
         outcome = determine_outcome(trace, MODE_EDITOR)
-        # Editor mode doesn't hard-reject repeats
-        self.assertNotEqual(outcome, OUTCOME_REJECT_REPEAT)
+        self.assertEqual(outcome, OUTCOME_REJECT_REPEAT)
 
 
 # ---------------------------------------------------------------------------
@@ -269,9 +267,9 @@ class TestAutopostPrefersTextOnly(unittest.TestCase):
         self.assertLess(score, AUTOPOST_MIN_SCORE)
 
     def test_autopost_threshold_is_strict(self):
-        """AUTOPOST_MIN_SCORE should be significantly higher than editor."""
+        """Unified threshold: AUTOPOST_MIN_SCORE == EDITOR_MIN_SCORE == 25."""
         self.assertGreaterEqual(AUTOPOST_MIN_SCORE, 25)
-        self.assertGreater(AUTOPOST_MIN_SCORE, EDITOR_MIN_SCORE * 3)
+        self.assertEqual(AUTOPOST_MIN_SCORE, EDITOR_MIN_SCORE)
 
 
 # ---------------------------------------------------------------------------

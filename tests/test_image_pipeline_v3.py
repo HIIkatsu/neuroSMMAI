@@ -94,25 +94,25 @@ from image_pipeline_v3 import (
 # 1. EDITOR returns candidates instead of empty too often
 # ===========================================================================
 class TestEditorReturnsCandidates(unittest.TestCase):
-    """Editor mode should have high recall — return weak but acceptable candidates."""
+    """Editor mode uses unified threshold — same bar as autopost."""
 
-    def test_editor_accepts_moderate_score(self):
-        """Score between EDITOR_MIN and AUTOPOST_MIN → accepted for editor."""
+    def test_editor_rejects_low_score(self):
+        """Score below ACCEPT_MIN_SCORE → rejected for all modes."""
         cs = CandidateScore(final_score=10)
         outcome = determine_outcome(cs, mode="editor")
-        self.assertEqual(outcome, OUTCOME_ACCEPT_FOR_EDITOR)
+        self.assertEqual(outcome, OUTCOME_REJECT_LOW_CONFIDENCE)
 
-    def test_editor_accepts_low_positive_score(self):
-        """Even low positive scores should be accepted in editor mode."""
+    def test_editor_rejects_very_low_score(self):
+        """Very low scores rejected in editor."""
         cs = CandidateScore(final_score=5)
         outcome = determine_outcome(cs, mode="editor")
-        self.assertEqual(outcome, OUTCOME_ACCEPT_FOR_EDITOR)
+        self.assertEqual(outcome, OUTCOME_REJECT_LOW_CONFIDENCE)
 
     def test_editor_rejects_negative_score(self):
         """Very low scores still rejected in editor."""
         cs = CandidateScore(final_score=2)
         outcome = determine_outcome(cs, mode="editor")
-        self.assertEqual(outcome, OUTCOME_REJECT_NO_MATCH)
+        self.assertEqual(outcome, OUTCOME_REJECT_LOW_CONFIDENCE)
 
     def test_editor_intent_typical_post_finds_subject(self):
         """A typical food post should extract subject and produce queries."""
@@ -498,18 +498,19 @@ class TestCandidateReranking(unittest.TestCase):
 # 10. Mode-specific threshold tests
 # ===========================================================================
 class TestModeSpecificThresholds(unittest.TestCase):
-    """Autopost and editor modes must have different thresholds."""
+    """Unified threshold: editor and autopost share the same ACCEPT_MIN_SCORE."""
 
     def test_autopost_threshold_is_strict(self):
-        """Autopost threshold should be significantly higher than editor."""
-        self.assertGreater(AUTOPOST_MIN_SCORE, EDITOR_MIN_SCORE * 3)
+        """Unified threshold: AUTOPOST_MIN_SCORE == EDITOR_MIN_SCORE == 25."""
+        self.assertEqual(AUTOPOST_MIN_SCORE, EDITOR_MIN_SCORE)
+        self.assertGreaterEqual(AUTOPOST_MIN_SCORE, 25)
 
-    def test_same_score_different_outcome_by_mode(self):
-        """Score of 15 → accepted in editor, rejected in autopost."""
+    def test_same_score_same_outcome_by_mode(self):
+        """Score of 15 → rejected in both modes (unified threshold)."""
         cs = CandidateScore(final_score=15)
         editor_out = determine_outcome(cs, "editor")
         autopost_out = determine_outcome(cs, "autopost")
-        self.assertIn("ACCEPT", editor_out)
+        self.assertIn("REJECT", editor_out)
         self.assertIn("REJECT", autopost_out)
 
 

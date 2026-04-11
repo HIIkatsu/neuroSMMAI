@@ -1,29 +1,36 @@
 """
-image_ranker.py — Candidate scoring and ranking for image pipeline v3.
+image_ranker.py — Strict candidate scoring for the image pipeline.
 
 Scores each candidate against the post's VisualIntentV2.
-Produces transparent, explainable per-candidate score breakdowns.
+ONE threshold (ACCEPT_MIN_SCORE) for ALL modes.
 
 Scoring dimensions:
-  1. subject_match   — Does the image match the post's main subject?
-  2. sense_match     — Does it match the disambiguated meaning?
-  3. scene_match     — Does it match the expected visual scene?
-  4. generic_stock_penalty — Is it generic stock filler?
-  5. repeat_penalty   — Has this image/type been used recently?
-  6. provider_bonus   — Small bonus for provider confidence (CAPPED)
+  1. subject_match  — Does the image match the post's subject? (highest weight)
+  2. sense_match    — Does it match the disambiguated meaning?
+  3. scene_match    — Does it match the expected visual scene?
+  4. query_token    — Do search query words appear in metadata?
 
-Key rules:
-  - provider_bonus cannot rescue a weak candidate
-  - hard reject gates fire BEFORE scoring
-  - affirmation requirement: ≥1 real positive signal needed
+Hard reject gates (fire BEFORE scoring):
+  - Wrong sense (ambiguous word resolved to wrong meaning)
+  - Blocked visual class
+  - Cross-family mismatch (image belongs to a clearly different domain)
+
+Anti-junk gates:
+  - Generic stock penalty (shutterstock clichés)
+  - Scene mismatch penalty (hiking photo for a car topic)
+  - No positive affirmation → capped at low score
+
+Key rule: a candidate MUST have at least 1 strong positive signal
+(subject hit OR allowed visual hit) to pass. No amount of weak
+signals can substitute for subject relevance.
 """
 from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
-from visual_intent_v2 import VisualIntentV2, IMAGEABILITY_LOW, IMAGEABILITY_NONE
+from visual_intent_v2 import VisualIntentV2
 from image_history import ImageHistory, extract_domain, url_content_hash
 from topic_utils import (
     TOPIC_FAMILY_TERMS,
@@ -35,11 +42,9 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Scoring weights (named constants, no magic numbers)
+# Scoring weights
 # ---------------------------------------------------------------------------
-
-# Post-centric weights (PRIMARY)
-W_SUBJECT = 14              # Per subject-word hit (highest weight)
+W_SUBJECT = 14              # Per subject-word hit
 W_SUBJECT_STRONG = 15       # Bonus when ≥3 subject words match
 W_SENSE = 8                 # Per sense-word hit
 W_SCENE = 7                 # Per scene-word hit
@@ -48,39 +53,51 @@ W_FAMILY_TERM = 5           # Per family-term hit (weak signal)
 W_ALLOWED_VISUAL = 10       # Per allowed visual class hit
 
 # Penalties
-P_BLOCKED_VISUAL = -35      # Per blocked visual class hit
-P_CROSS_FAMILY = -25        # Cross-family mismatch
-P_GENERIC_STOCK = -20       # Per generic stock signal (max 3 counted)
+P_BLOCKED_VISUAL = -35
+P_CROSS_FAMILY = -25
+P_GENERIC_STOCK = -20       # Per generic stock signal (max 3)
 P_GENERIC_STOCK_MILD = -5   # Per stock signal when subject matches strongly
-P_GENERIC_FILLER_PER = -15  # Per generic filler hit when subject doesn't match
+P_GENERIC_FILLER = -15      # Per generic filler hit
 
-# Provider bonus — SECONDARY, CAPPED
-PROVIDER_BONUS_WEIGHT = 0.25
-PROVIDER_BONUS_CAP = 15
+# Scene mismatch
+P_SCENE_MISMATCH = -22
+P_SCENE_MISMATCH_STRONG = -30
 
-# Affirmation requirements
+# Affirmation
 AFFIRMATION_MIN_SUBJECT_HITS = 1
-AFFIRMATION_MIN_ALLOWED_HITS = 1
-AFFIRMATION_MIN_SCENE_HITS = 2
 MAX_SCORE_WITHOUT_AFFIRMATION = 10
 
-# Mode-specific thresholds
-AUTOPOST_MIN_SCORE = 25     # Strict: real confidence required
-EDITOR_MIN_SCORE = 4        # Lenient: show weak-but-relevant
-EDITOR_SOFT_MIN = 8         # Preferred editor score
+# ONE threshold for all modes. Wrong image is worse than no image.
+ACCEPT_MIN_SCORE = 25
 
-# Top-N reranking limits
+# Backward-compat aliases (tests may reference these)
+AUTOPOST_MIN_SCORE = ACCEPT_MIN_SCORE
+EDITOR_MIN_SCORE = ACCEPT_MIN_SCORE
+EDITOR_SOFT_MIN = ACCEPT_MIN_SCORE  # removed concept; alias for compat
 TOP_N_AUTOPOST = 8
 TOP_N_EDITOR = 10
 
+# Provider bonus removed — constants kept as zero/compat
+PROVIDER_BONUS_WEIGHT = 0.0
+PROVIDER_BONUS_CAP = 0
 
-# Scene mismatch penalty
-P_SCENE_MISMATCH = -22          # Per scene mismatch hit
-P_SCENE_MISMATCH_STRONG = -30   # Strong mismatch (completely wrong context)
+# Outcome constants (simplified — editor and autopost share same outcomes)
+OUTCOME_ACCEPT_BEST = "ACCEPT"
+OUTCOME_ACCEPT_FOR_EDITOR = "ACCEPT"  # Same as ACCEPT — no separate editor path
+OUTCOME_REJECT_NO_MATCH = "REJECT_LOW_CONFIDENCE"  # alias
+OUTCOME_REJECT_WRONG_SENSE = "REJECT_WRONG_SENSE"
+OUTCOME_REJECT_GENERIC_STOCK = "REJECT_GENERIC_STOCK"
+OUTCOME_REJECT_GENERIC_FILLER = "REJECT_GENERIC_FILLER"
+OUTCOME_REJECT_CROSS_FAMILY = "REJECT_CROSS_FAMILY"
+OUTCOME_REJECT_LOW_CONFIDENCE = "REJECT_LOW_CONFIDENCE"
+OUTCOME_REJECT_REPEAT = "REJECT_REPEAT"
+OUTCOME_NO_IMAGE_SAFE = "NO_IMAGE"
+OUTCOME_NO_IMAGE_LOW_IMAGEABILITY = "NO_IMAGE"
+OUTCOME_NO_IMAGE_NO_CANDIDATES = "NO_IMAGE"
 
 
 # ---------------------------------------------------------------------------
-# Subject-specific accept/reject rules (scene-level precision)
+# Subject-specific accept/reject rules
 # ---------------------------------------------------------------------------
 _SUBJECT_SCENE_RULES: dict[str, dict[str, list[str]]] = {
     "scooter": {
@@ -99,8 +116,6 @@ _SUBJECT_SCENE_RULES: dict[str, dict[str, list[str]]] = {
                     "tropical car", "sunset car scenic",
                     "soup", "vegetables", "salad", "food plate", "cooking pot",
                     "kitchen interior", "recipe", "baking"],
-        "deprioritize": ["retro car", "vintage car", "classic car", "antique car",
-                         "old car", "postcard car", "retro automobile"],
     },
     "investment": {
         "accept": ["investment", "investor", "stock", "portfolio", "finance",
@@ -141,14 +156,12 @@ _SUBJECT_SCENE_RULES: dict[str, dict[str, list[str]]] = {
         "accept": ["carbonara", "spaghetti carbonara", "pasta carbonara",
                     "plated pasta", "creamy pasta", "guanciale", "pecorino",
                     "italian pasta dish"],
-        "weak_accept": ["eggs", "flour", "ingredient", "raw pasta"],
         "reject": ["bakery", "deli", "food market", "grocery store",
                     "food shop", "supermarket", "food stall", "market stand"],
     },
     "pasta": {
         "accept": ["pasta", "spaghetti", "penne", "fettuccine", "plated dish",
                     "italian food", "sauce", "bolognese", "alfredo"],
-        "weak_accept": ["flour", "dough", "ingredient"],
         "reject": ["bakery shop", "grocery", "food market", "supermarket"],
     },
     "fuel": {
@@ -158,8 +171,6 @@ _SUBJECT_SCENE_RULES: dict[str, dict[str, list[str]]] = {
         "reject": ["beach", "seaside", "ocean", "scenic road trip",
                     "vintage car postcard", "soup", "vegetables",
                     "cooking", "kitchen", "recipe"],
-        "deprioritize": ["retro car", "vintage car", "classic car", "antique car",
-                         "old car", "postcard car", "retro automobile"],
     },
     "engine": {
         "accept": ["engine", "motor", "cylinder", "piston", "mechanical",
@@ -208,25 +219,39 @@ _SUBJECT_SCENE_RULES: dict[str, dict[str, list[str]]] = {
                     "dealership", "showroom", "dashboard", "car interior",
                     "test drive", "chinese automobile", "chinese brand",
                     "geely", "chery", "haval", "byd", "changan", "great wall"],
-        "deprioritize": ["retro car", "vintage car", "classic car", "antique car",
-                         "old car", "postcard car", "beach car", "decorative car",
-                         "car photography art", "rustic car"],
-        "reject": ["bicycle", "motorcycle", "horse cart", "train", "airplane"],
+        "reject": ["bicycle", "motorcycle", "horse cart", "train", "airplane",
+                    "retro car", "vintage car", "classic car", "antique car",
+                    "old car", "postcard car"],
+    },
+    "gaming": {
+        "accept": ["gaming", "game", "gamer", "esports", "controller",
+                    "console", "keyboard", "headset", "monitor", "pc gaming",
+                    "gameplay", "streaming", "twitch", "competition"],
+        "reject": ["cooking", "recipe", "salon", "beauty", "spa",
+                    "medical", "clinic", "hospital"],
+    },
+    "parquet": {
+        "accept": ["parquet", "floor", "flooring", "wood floor", "hardwood",
+                    "laminate", "plank", "installation", "renovation"],
+        "reject": ["cooking", "recipe", "beauty", "makeup", "portrait",
+                    "landscape", "hiking"],
+    },
+    "back pain": {
+        "accept": ["back pain", "spine", "posture", "office", "ergonomic",
+                    "chair", "desk", "stretching", "physiotherapy",
+                    "workplace health", "sitting"],
+        "reject": ["cooking", "recipe", "car", "gaming", "beauty"],
     },
 }
 
-# Scene mismatch rules: if post-family + subject indicate one context,
-# penalise images from a completely different scene
+# Scene mismatch rules: penalise images from a completely different context
 _SCENE_MISMATCH_RULES: list[tuple[list[str], list[str], int]] = [
-    # (post_signals, image_reject_signals, penalty)
-    # Person/lifestyle when post is about mechanics/object/repair
     (
         ["repair", "engine", "brake", "mechanic", "tool", "fix", "maintenance"],
         ["person outdoor", "lifestyle", "girl", "boy", "woman walking",
          "man walking", "portrait outdoor", "casual person", "people park"],
         P_SCENE_MISMATCH,
     ),
-    # Nature/hiking when topic is urban transport
     (
         ["scooter", "car", "vehicle", "transport", "traffic", "urban",
          "driving", "fuel", "gasoline", "highway"],
@@ -234,7 +259,6 @@ _SCENE_MISMATCH_RULES: list[tuple[list[str], list[str], int]] = [
          "trekking", "wilderness", "nature walk", "countryside"],
         P_SCENE_MISMATCH_STRONG,
     ),
-    # Shop/market when topic is specific dish
     (
         ["carbonara", "pasta dish", "spaghetti", "plated", "bolognese",
          "risotto", "lasagna", "ramen", "pho", "sushi plate"],
@@ -242,14 +266,12 @@ _SCENE_MISMATCH_RULES: list[tuple[list[str], list[str], int]] = [
          "market stall", "bakery shop", "food stand"],
         P_SCENE_MISMATCH,
     ),
-    # Concept/abstract when post is factual/news
     (
         ["news", "report", "fact", "statistics", "data", "study", "research"],
         ["abstract concept", "idea concept", "motivation concept",
          "creativity concept", "innovation concept"],
         P_SCENE_MISMATCH,
     ),
-    # Children/family when topic is furniture/kitchen/interior
     (
         ["kitchen", "furniture", "cabinet", "countertop", "interior",
          "facade", "wardrobe", "shelf", "renovation"],
@@ -259,16 +281,13 @@ _SCENE_MISMATCH_RULES: list[tuple[list[str], list[str], int]] = [
          "playground", "daycare", "kids playing"],
         P_SCENE_MISMATCH,
     ),
-    # Retro/vintage when topic is modern/chinese cars
     (
         ["chinese car", "new car", "modern car", "crossover", "suv",
          "electric car", "chinese brand", "chinese automobile"],
         ["retro car", "vintage car", "classic car", "antique car",
-         "old car", "postcard car", "rustic car", "decorative car",
-         "car photography art"],
+         "old car", "postcard car", "rustic car", "decorative car"],
         P_SCENE_MISMATCH,
     ),
-    # Beauty/cosmetics when topic is investment/business/finance
     (
         ["investment", "investor", "finance", "business", "entrepreneur",
          "startup", "capital", "portfolio", "stock", "trading", "fund"],
@@ -277,7 +296,6 @@ _SCENE_MISMATCH_RULES: list[tuple[list[str], list[str], int]] = [
          "flatlay", "beauty flatlay", "spa treatment", "facial mask"],
         P_SCENE_MISMATCH_STRONG,
     ),
-    # Clinic/medical when topic is business/entrepreneur (not medical)
     (
         ["entrepreneur", "business owner", "startup", "marketing",
          "strategy", "brand", "pitch", "deal"],
@@ -286,7 +304,6 @@ _SCENE_MISMATCH_RULES: list[tuple[list[str], list[str], int]] = [
          "medical equipment", "operating room"],
         P_SCENE_MISMATCH,
     ),
-    # Kitchen/food/soup when topic is crocodile/car/automotive danger
     (
         ["crocodile", "alligator", "reptile", "predator",
          "road danger", "animal crossing"],
@@ -295,7 +312,6 @@ _SCENE_MISMATCH_RULES: list[tuple[list[str], list[str], int]] = [
          "fruit basket", "dinner table", "meal prep"],
         P_SCENE_MISMATCH_STRONG,
     ),
-    # Retro car when topic is fuel/gasoline/modern automotive
     (
         ["fuel", "gasoline", "petrol", "gas station", "diesel",
          "refueling", "gas price", "oil price"],
@@ -303,23 +319,24 @@ _SCENE_MISMATCH_RULES: list[tuple[list[str], list[str], int]] = [
          "old car", "postcard car"],
         P_SCENE_MISMATCH,
     ),
+    (
+        ["parquet", "floor", "flooring", "wood floor", "laminate"],
+        ["cooking", "recipe", "beauty", "makeup", "portrait",
+         "landscape", "hiking", "fashion"],
+        P_SCENE_MISMATCH,
+    ),
+    (
+        ["back pain", "spine", "posture", "ergonomic", "office health"],
+        ["cooking", "recipe", "car", "gaming", "beauty",
+         "hiking", "beach"],
+        P_SCENE_MISMATCH,
+    ),
 ]
 
 
 # ---------------------------------------------------------------------------
-# Generic filler patterns
+# Generic stock/filler patterns
 # ---------------------------------------------------------------------------
-_AUTOPOST_GENERIC_FILLER = [
-    "ai chip", "ai processor", "artificial intelligence chip",
-    "code screen", "code on screen", "programming code",
-    "binary code", "matrix code", "circuit board abstract",
-    "random stock product", "generic product photo",
-    "abstract technology", "digital transformation",
-    "futuristic city", "robot hand", "robot face",
-    "hologram", "virtual reality abstract",
-    "neon lights abstract", "cyber background",
-]
-
 _GENERIC_STOCK_SIGNALS = [
     "stock photo", "shutterstock", "istockphoto", "getty images",
     "abstract background", "business team meeting", "happy people",
@@ -340,26 +357,20 @@ _GENERIC_STOCK_SIGNALS = [
     "arrows growth", "rocket launch business",
 ]
 
-
-# ---------------------------------------------------------------------------
-# Outcome constants — explicit, semantic decision labels
-# ---------------------------------------------------------------------------
-OUTCOME_ACCEPT_BEST = "ACCEPT_BEST"
-OUTCOME_ACCEPT_FOR_EDITOR = "ACCEPT_FOR_EDITOR_ONLY"
-OUTCOME_REJECT_NO_MATCH = "REJECT_NO_MATCH"
-OUTCOME_REJECT_WRONG_SENSE = "REJECT_WRONG_SENSE"
-OUTCOME_REJECT_GENERIC_STOCK = "REJECT_GENERIC_STOCK"
-OUTCOME_REJECT_CROSS_FAMILY = "REJECT_CROSS_FAMILY"
-OUTCOME_REJECT_LOW_CONFIDENCE = "REJECT_LOW_CONFIDENCE"
-OUTCOME_REJECT_REPEAT = "REJECT_REPEAT_IMAGE"
-OUTCOME_REJECT_GENERIC_FILLER = "REJECT_GENERIC_FILLER"
-OUTCOME_NO_IMAGE_SAFE = "NO_IMAGE_SAFE_FALLBACK"
-OUTCOME_NO_IMAGE_LOW_IMAGEABILITY = "NO_IMAGE_LOW_IMAGEABILITY"
-OUTCOME_NO_IMAGE_NO_CANDIDATES = "NO_IMAGE_NO_CANDIDATES"
+_AUTOPOST_GENERIC_FILLER = [
+    "ai chip", "ai processor", "artificial intelligence chip",
+    "code screen", "code on screen", "programming code",
+    "binary code", "matrix code", "circuit board abstract",
+    "random stock product", "generic product photo",
+    "abstract technology", "digital transformation",
+    "futuristic city", "robot hand", "robot face",
+    "hologram", "virtual reality abstract",
+    "neon lights abstract", "cyber background",
+]
 
 
 # ---------------------------------------------------------------------------
-# Meta-family detection (lightweight, no image_search dependency)
+# Meta-family detection
 # ---------------------------------------------------------------------------
 _META_FAMILY_KEYWORDS: dict[str, list[str]] = {
     "food": ["food", "dish", "recipe", "cooking", "restaurant", "kitchen", "meal",
@@ -384,14 +395,13 @@ _META_FAMILY_KEYWORDS: dict[str, list[str]] = {
                        "construction", "renovation", "handyman"],
     "lifestyle": ["lifestyle", "travel", "fashion", "interior", "design",
                   "photography"],
+    "gaming": ["gaming", "game", "gamer", "esports", "console", "controller",
+               "streaming", "twitch", "gameplay"],
 }
 
 
 def detect_meta_family(text: str) -> str:
-    """Detect topic family from image metadata text.
-
-    Requires ≥2 keyword hits for confident match.
-    """
+    """Detect topic family from image metadata. Requires ≥2 hits."""
     if not text:
         return "generic"
     t = text.strip().lower()
@@ -406,7 +416,7 @@ def detect_meta_family(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# CandidateScore — per-candidate trace/score breakdown
+# CandidateScore — per-candidate trace
 # ---------------------------------------------------------------------------
 @dataclass
 class CandidateScore:
@@ -440,8 +450,13 @@ class CandidateScore:
     hard_reject: str = ""
     reject_reason: str = ""
     outcome: str = ""
-    fallback_level: str = ""     # "exact", "near", "family", "weak"
-    final_accept_reason: str = ""
+    fallback_level: str = ""
+    accept_reason: str = ""     # Human-readable: WHY accepted
+
+    # Backward compat alias
+    @property
+    def final_accept_reason(self) -> str:
+        return self.accept_reason
 
     def as_log_dict(self) -> dict:
         """Compact dict for structured logging."""
@@ -460,14 +475,13 @@ class CandidateScore:
             "exact_subj": self.exact_subject_score,
             "scene_sc": self.scene_match_score,
             "pc": self.post_centric_score,
-            "bonus": self.provider_bonus,
             "repeat": self.repeat_penalty,
             "final": self.final_score,
             "hard": self.hard_reject[:40] if self.hard_reject else "",
             "rej": self.reject_reason[:40] if self.reject_reason else "",
             "out": self.outcome,
             "fb_level": self.fallback_level,
-            "accept_reason": self.final_accept_reason[:40] if self.final_accept_reason else "",
+            "accept_reason": self.accept_reason[:60] if self.accept_reason else "",
         }
 
 
@@ -492,46 +506,32 @@ def check_wrong_sense(meta_text: str, intent: VisualIntentV2) -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# Generic stock penalty
+# Internal scoring helpers
 # ---------------------------------------------------------------------------
-def compute_generic_stock_penalty(
-    meta_text: str,
-    intent: VisualIntentV2,
+def _compute_generic_stock_penalty(
+    meta_lower: str,
+    subject_meta_hits: int,
 ) -> tuple[int, int]:
-    """Returns (penalty, hit_count). Penalty is 0 or negative."""
-    if not meta_text:
-        return 0, 0
-    meta_lower = meta_text.lower()
+    """Returns (penalty, hit_count)."""
     stock_hits = sum(1 for gs in _GENERIC_STOCK_SIGNALS if gs in meta_lower)
     if stock_hits == 0:
         return 0, 0
-
-    # Strong subject alignment softens the penalty
-    if intent.subject:
-        subject_words = intent.subject.lower().split()
-        subject_meta_hits = sum(1 for w in subject_words if w in meta_lower)
-        if subject_meta_hits >= 2:
-            return P_GENERIC_STOCK_MILD * stock_hits, stock_hits
-
+    if subject_meta_hits >= 2:
+        return P_GENERIC_STOCK_MILD * stock_hits, stock_hits
     return P_GENERIC_STOCK * min(stock_hits, 3), stock_hits
 
 
-# ---------------------------------------------------------------------------
-# Subject-specific hard filter check
-# ---------------------------------------------------------------------------
 def _check_subject_scene_rules(
-    meta_text: str,
+    meta_lower: str,
     intent: VisualIntentV2,
 ) -> tuple[int, int, int]:
     """Check subject-specific accept/reject rules.
-
     Returns (score_adjustment, reject_hits, weak_accept_hits).
     """
-    if not intent.subject or not meta_text:
+    if not intent.subject or not meta_lower:
         return 0, 0, 0
 
     subject_lower = intent.subject.lower()
-    meta_lower = meta_text.lower()
     total_adjustment = 0
     reject_hits = 0
     weak_accept_hits = 0
@@ -539,42 +539,25 @@ def _check_subject_scene_rules(
     for subj_key, rules in _SUBJECT_SCENE_RULES.items():
         if subj_key not in subject_lower:
             continue
-        # Check reject terms
         for term in rules.get("reject", ()):
             if term in meta_lower:
                 total_adjustment += P_SCENE_MISMATCH
                 reject_hits += 1
-        # Check deprioritize terms (softer than reject, but still penalised)
-        for term in rules.get("deprioritize", ()):
-            if term in meta_lower:
-                total_adjustment += P_SCENE_MISMATCH // 2  # Half penalty
-                weak_accept_hits += 1
-        # Check weak_accept (reduce score for ingredients-only matches)
         for term in rules.get("weak_accept", ()):
             if term in meta_lower:
                 weak_accept_hits += 1
-        # Check accept terms (bonus for exact subject match)
         accept_hits = sum(1 for t in rules.get("accept", ()) if t in meta_lower)
         if accept_hits > 0:
-            total_adjustment += accept_hits * 3  # Small bonus for subject-rule match
+            total_adjustment += accept_hits * 3
 
     return total_adjustment, reject_hits, weak_accept_hits
 
 
-# ---------------------------------------------------------------------------
-# Scene mismatch penalty check
-# ---------------------------------------------------------------------------
 def _check_scene_mismatch(
-    meta_text: str,
+    meta_lower: str,
     intent: VisualIntentV2,
 ) -> tuple[int, int]:
-    """Check for scene mismatch using global rules.
-
-    Returns (penalty, hit_count).
-    """
-    if not meta_text:
-        return 0, 0
-    meta_lower = meta_text.lower()
+    """Check for scene mismatch. Returns (penalty, hit_count)."""
     subject_lower = (intent.subject or "").lower()
     scene_lower = (intent.scene or "").lower()
     combined = f"{subject_lower} {scene_lower}"
@@ -582,11 +565,8 @@ def _check_scene_mismatch(
     total_penalty = 0
     total_hits = 0
     for post_signals, image_reject_signals, penalty in _SCENE_MISMATCH_RULES:
-        # Check if any post signal matches the intent
-        post_match = any(sig in combined for sig in post_signals)
-        if not post_match:
+        if not any(sig in combined for sig in post_signals):
             continue
-        # Check if any reject signal matches the image metadata
         for rej_sig in image_reject_signals:
             if rej_sig in meta_lower:
                 total_penalty += penalty
@@ -594,19 +574,12 @@ def _check_scene_mismatch(
     return total_penalty, total_hits
 
 
-# ---------------------------------------------------------------------------
-# Determine fallback level for scoring hierarchy
-# ---------------------------------------------------------------------------
 def _determine_fallback_level(
     subject_hits: int,
     scene_hits: int,
     family_term_hits: int,
     allowed_visual_hits: int,
 ) -> str:
-    """Classify match quality into hierarchical level.
-
-    Returns one of: "exact", "near", "family", "weak".
-    """
     if subject_hits >= 2 and scene_hits >= 1:
         return "exact"
     if subject_hits >= 1:
@@ -617,7 +590,7 @@ def _determine_fallback_level(
 
 
 # ---------------------------------------------------------------------------
-# Score a single candidate (post-centric, no provider influence)
+# Score a single candidate
 # ---------------------------------------------------------------------------
 def score_candidate(
     meta_text: str,
@@ -627,7 +600,6 @@ def score_candidate(
     """Score candidate purely on post-centric intent.
 
     Returns (score, reject_reason, candidate_score).
-    Provider bonus is handled separately by the pipeline.
     """
     cs = CandidateScore()
 
@@ -680,12 +652,12 @@ def score_candidate(
     # --- 4. Query token match ---
     query_token_hits = 0
     if query:
-        q_words = [w for w in query.lower().split() if len(w) >= 3]
         _stopwords = {
             "photo", "editorial", "realistic", "professional", "close",
             "fresh", "modern", "creative", "natural", "light",
         }
-        q_relevant = [w for w in q_words if w not in _stopwords]
+        q_relevant = [w for w in query.lower().split()
+                      if len(w) >= 3 and w not in _stopwords]
         query_token_hits = sum(1 for w in q_relevant if w in text)
         score += query_token_hits * W_QUERY_TOKEN
     cs.query_token_hits = query_token_hits
@@ -706,7 +678,7 @@ def score_candidate(
         score += allowed_hits * W_ALLOWED_VISUAL
     cs.allowed_visual_hits = allowed_hits
 
-    # --- 7. Blocked visual class penalty ---
+    # --- 7. Blocked visual class → hard penalty ---
     blocked = get_family_blocked_visuals(intent.post_family)
     if blocked:
         for cls in blocked:
@@ -723,7 +695,7 @@ def score_candidate(
             reject_reason = f"cross_family:{meta_family}"
 
     # --- 9. Generic stock penalty ---
-    stock_penalty, stock_hits = compute_generic_stock_penalty(text, intent)
+    stock_penalty, stock_hits = _compute_generic_stock_penalty(text, subject_hits)
     score += stock_penalty
     cs.generic_stock_hits = stock_hits
     if stock_penalty <= -40 and not reject_reason:
@@ -733,54 +705,43 @@ def score_candidate(
     filler_hits = sum(1 for f in _AUTOPOST_GENERIC_FILLER if f in text)
     cs.generic_filler_hits = filler_hits
     if filler_hits > 0 and subject_hits < 2:
-        score += filler_hits * P_GENERIC_FILLER_PER
+        score += filler_hits * P_GENERIC_FILLER
         if not reject_reason:
             reject_reason = "generic_filler"
 
-    # --- 11. Subject-specific scene rules (B: hard filters) ---
+    # --- 11. Subject-specific scene rules ---
     subj_adj, subj_reject_hits, weak_accept_hits = _check_subject_scene_rules(text, intent)
     score += subj_adj
     cs.subject_scene_reject_hits = subj_reject_hits
     if subj_reject_hits > 0 and not reject_reason:
         reject_reason = "subject_scene_reject"
 
-    # --- 12. Scene mismatch penalties (D) ---
+    # --- 12. Scene mismatch penalties ---
     scene_penalty, scene_mis_hits = _check_scene_mismatch(text, intent)
     score += scene_penalty
     cs.scene_mismatch_hits = scene_mis_hits
     if scene_mis_hits > 0 and not reject_reason:
         reject_reason = "scene_mismatch"
 
-    # --- 13. Determine fallback level (C: scoring hierarchy) ---
-    fb_level = _determine_fallback_level(
-        subject_hits, scene_hits, family_term_hits, allowed_hits,
-    )
+    # --- 13. Fallback level ---
+    fb_level = _determine_fallback_level(subject_hits, scene_hits,
+                                          family_term_hits, allowed_hits)
     cs.fallback_level = fb_level
 
-    # Apply hierarchy penalty: generic family match gets reduced score
-    # for dish/object-specific posts
+    # Family-only or weak match: cap score. No amount of weak signals
+    # can substitute for actual subject relevance.
     if fb_level == "family" and subject_hits == 0:
-        # Family-only match: reduce score significantly for specific subjects
-        if intent.subject:
-            score = min(score, MAX_SCORE_WITHOUT_AFFIRMATION + 5)
-            # Stronger penalty: if exact candidates exist for this subject,
-            # broad family should not win
-            if subj_reject_hits > 0 or scene_mis_hits > 0:
-                score = min(score, MAX_SCORE_WITHOUT_AFFIRMATION)
+        score = min(score, MAX_SCORE_WITHOUT_AFFIRMATION + 5)
+        if subj_reject_hits > 0 or scene_mis_hits > 0:
+            score = min(score, MAX_SCORE_WITHOUT_AFFIRMATION)
     if fb_level == "weak":
         score = min(score, MAX_SCORE_WITHOUT_AFFIRMATION)
 
-    # Weak-accept penalty: ingredients-only for dish posts
-    if weak_accept_hits > 0 and subject_hits == 0:
-        score = min(score, MAX_SCORE_WITHOUT_AFFIRMATION + 3)
-        if not reject_reason:
-            reject_reason = "weak_accept_only"
-
     # --- 14. Positive affirmation requirement ---
     has_affirmation = (
-        (subject_hits >= AFFIRMATION_MIN_SUBJECT_HITS)
-        or (allowed_hits >= AFFIRMATION_MIN_ALLOWED_HITS)
-        or (scene_hits >= AFFIRMATION_MIN_SCENE_HITS)
+        subject_hits >= AFFIRMATION_MIN_SUBJECT_HITS
+        or allowed_hits >= 1
+        or scene_hits >= 2
     )
     if not has_affirmation and score > 0:
         score = min(score, MAX_SCORE_WITHOUT_AFFIRMATION)
@@ -788,61 +749,22 @@ def score_candidate(
             reject_reason = "no_positive_affirmation"
 
     cs.post_centric_score = score
+    cs.final_score = score  # Also set final_score for direct determine_outcome() calls
     cs.reject_reason = reject_reason
     return score, reject_reason, cs
 
 
-# ---------------------------------------------------------------------------
-# Provider bonus (CAPPED secondary signal)
-# ---------------------------------------------------------------------------
-def compute_provider_bonus(provider_score: int) -> int:
-    """Compute capped provider bonus. Cannot rescue a weak candidate."""
-    return min(
-        int(max(provider_score, 0) * PROVIDER_BONUS_WEIGHT),
-        PROVIDER_BONUS_CAP,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Determine candidate outcome (mode-specific)
-# ---------------------------------------------------------------------------
-def determine_outcome(
-    cs: CandidateScore,
-    mode: str = "autopost",
-) -> str:
-    """Determine outcome for a scored candidate."""
-    if cs.hard_reject:
-        if "wrong_sense" in cs.hard_reject:
-            return OUTCOME_REJECT_WRONG_SENSE
-        return OUTCOME_REJECT_CROSS_FAMILY
-
-    # Hard reject repeated images in autopost
-    if mode == "autopost" and cs.repeat_penalty <= -200:
-        return OUTCOME_REJECT_REPEAT
-
-    min_score = AUTOPOST_MIN_SCORE if mode == "autopost" else EDITOR_MIN_SCORE
-    score = cs.final_score
-
-    if score < min_score:
-        if cs.generic_stock_hits >= 2:
-            return OUTCOME_REJECT_GENERIC_STOCK
-        if cs.reject_reason and "cross_family" in cs.reject_reason:
-            return OUTCOME_REJECT_CROSS_FAMILY
-        if cs.reject_reason and "wrong_sense" in cs.reject_reason:
-            return OUTCOME_REJECT_WRONG_SENSE
-        if cs.reject_reason and "generic_filler" in cs.reject_reason:
-            return OUTCOME_REJECT_GENERIC_FILLER
-        if score < EDITOR_MIN_SCORE:
-            return OUTCOME_REJECT_NO_MATCH
-        if mode == "autopost":
-            return OUTCOME_REJECT_LOW_CONFIDENCE
-        return OUTCOME_ACCEPT_FOR_EDITOR
-
-    if mode == "autopost":
-        return OUTCOME_ACCEPT_BEST
-    if score >= AUTOPOST_MIN_SCORE:
-        return OUTCOME_ACCEPT_BEST
-    return OUTCOME_ACCEPT_FOR_EDITOR
+# Backward compat
+def compute_generic_stock_penalty(meta_text: str, intent: VisualIntentV2) -> tuple[int, int]:
+    """Backward-compatible wrapper."""
+    if not meta_text:
+        return 0, 0
+    meta_lower = meta_text.strip().lower()
+    subject_hits = 0
+    if intent.subject:
+        subject_words = intent.subject.lower().split()
+        subject_hits = sum(1 for w in subject_words if w in meta_lower)
+    return _compute_generic_stock_penalty(meta_lower, subject_hits)
 
 
 # ---------------------------------------------------------------------------
@@ -855,24 +777,19 @@ def rank_candidates(
     history: ImageHistory,
     mode: str = "autopost",
 ) -> list[CandidateScore]:
-    """Score, apply diversity penalties, and rank all candidates.
+    """Score, apply anti-repeat, rank. Same logic for all modes.
 
-    Modifies candidates in-place and returns them sorted by final_score desc.
+    Modifies candidates in-place, returns sorted by final_score desc.
     """
     for cs in candidates:
         if cs.hard_reject:
             continue
 
-        # Apply provider bonus (capped)
-        cs.provider_bonus = compute_provider_bonus(cs.post_centric_score)
-        cs.final_score = cs.post_centric_score + cs.provider_bonus
+        cs.final_score = cs.post_centric_score
 
-        # Apply anti-repeat penalty from history (E: strengthened)
+        # Apply anti-repeat penalty
         domain = extract_domain(cs.url)
         visual_class = detect_meta_family(cs.meta_snippet)
-        # Compute scene_class from metadata for dedup
-        scene_class = visual_class
-        # Coarse pattern for visual pattern-level dedup
         coarse_pattern = f"{visual_class}_{intent.subject or 'generic'}".lower().replace(" ", "_")
         cs.repeat_penalty = history.compute_penalty(
             url=cs.url,
@@ -880,16 +797,31 @@ def rank_candidates(
             visual_class=visual_class,
             subject_bucket=intent.subject or "",
             domain=domain,
-            scene_class=scene_class,
+            scene_class=visual_class,
             coarse_pattern=coarse_pattern,
         )
         cs.final_score += cs.repeat_penalty
 
         # Determine outcome
-        cs.outcome = determine_outcome(cs, mode)
+        if cs.final_score >= ACCEPT_MIN_SCORE:
+            cs.outcome = "ACCEPT"
+        elif cs.hard_reject:
+            cs.outcome = "REJECT_HARD"
+        elif cs.generic_stock_hits >= 2:
+            cs.outcome = OUTCOME_REJECT_GENERIC_STOCK
+        elif cs.reject_reason and "cross_family" in cs.reject_reason:
+            cs.outcome = OUTCOME_REJECT_CROSS_FAMILY
+        elif cs.reject_reason and "wrong_sense" in cs.reject_reason:
+            cs.outcome = OUTCOME_REJECT_WRONG_SENSE
+        elif cs.reject_reason and "generic_filler" in cs.reject_reason:
+            cs.outcome = OUTCOME_REJECT_GENERIC_FILLER
+        elif cs.repeat_penalty <= -200:
+            cs.outcome = OUTCOME_REJECT_REPEAT
+        else:
+            cs.outcome = OUTCOME_REJECT_LOW_CONFIDENCE
 
-        # Set final_accept_reason for traceable logs (F)
-        if not cs.outcome.startswith("REJECT"):
+        # Build accept reason (runtime proof)
+        if cs.outcome == "ACCEPT":
             reasons = []
             if cs.subject_match > 0:
                 reasons.append(f"subject_hit={cs.subject_match}")
@@ -900,34 +832,64 @@ def rank_candidates(
             if cs.family_term_hits > 0:
                 reasons.append(f"family_term={cs.family_term_hits}")
             reasons.append(f"level={cs.fallback_level}")
-            cs.final_accept_reason = "; ".join(reasons)
+            reasons.append(f"score={cs.final_score}")
+            cs.accept_reason = "; ".join(reasons)
 
-            # Production accept log
             logger.info(
-                "IMAGE_ACCEPT_REASON url=%s score=%d reason=%s",
-                cs.url[:80], cs.final_score, cs.final_accept_reason,
-            )
-            logger.info(
-                "IMAGE_SUBJECT=%s IMAGE_SCENE=%s IMAGE_FALLBACK_LEVEL=%s",
-                (intent.subject or "")[:40], (intent.scene or "")[:40], cs.fallback_level,
+                "IMAGE_ACCEPT url=%s score=%d reason=%s",
+                cs.url[:80], cs.final_score, cs.accept_reason,
             )
         else:
-            # Production reject log
             logger.info(
-                "IMAGE_REJECT_REASON url=%s score=%d reason=%s outcome=%s",
-                cs.url[:80], cs.final_score, cs.reject_reason or cs.hard_reject, cs.outcome,
+                "IMAGE_REJECT url=%s score=%d reason=%s outcome=%s",
+                cs.url[:80], cs.final_score,
+                cs.reject_reason or cs.hard_reject, cs.outcome,
             )
-            if cs.scene_mismatch_hits > 0:
-                logger.info(
-                    "IMAGE_SCENE_MISMATCH url=%s hits=%d",
-                    cs.url[:80], cs.scene_mismatch_hits,
-                )
-            if cs.repeat_penalty < 0:
-                logger.info(
-                    "IMAGE_REPEAT_PENALTY url=%s penalty=%d",
-                    cs.url[:80], cs.repeat_penalty,
-                )
 
-    # Sort by final score descending
     candidates.sort(key=lambda c: c.final_score, reverse=True)
     return candidates
+
+
+# ---------------------------------------------------------------------------
+# Backward compat stubs (removed in new system but referenced by some tests)
+# ---------------------------------------------------------------------------
+def compute_provider_bonus(provider_score: int) -> int:
+    """Provider bonus removed — returns 0. Kept for backward compat."""
+    return 0
+
+
+def determine_outcome(cs: CandidateScore, mode: str = "autopost") -> str:
+    """Determine outcome from CandidateScore fields.
+
+    Same logic for all modes — unified threshold.
+    """
+    # If outcome already computed (e.g. by rank_candidates), return it
+    if cs.outcome:
+        return cs.outcome
+
+    # Hard reject takes priority
+    if cs.hard_reject:
+        if "wrong_sense" in cs.hard_reject:
+            return OUTCOME_REJECT_WRONG_SENSE
+        return OUTCOME_REJECT_CROSS_FAMILY
+
+    # Repeat penalty overrides even high score — a repeated image is never OK
+    if cs.repeat_penalty <= -200:
+        return OUTCOME_REJECT_REPEAT
+
+    score = cs.final_score
+
+    if score >= ACCEPT_MIN_SCORE:
+        return OUTCOME_ACCEPT_BEST
+
+    # Below threshold — classify the rejection reason
+    if cs.generic_stock_hits >= 2:
+        return OUTCOME_REJECT_GENERIC_STOCK
+    if cs.reject_reason and "cross_family" in cs.reject_reason:
+        return OUTCOME_REJECT_CROSS_FAMILY
+    if cs.reject_reason and "wrong_sense" in cs.reject_reason:
+        return OUTCOME_REJECT_WRONG_SENSE
+    if cs.reject_reason and "generic_filler" in cs.reject_reason:
+        return OUTCOME_REJECT_GENERIC_FILLER
+
+    return OUTCOME_REJECT_LOW_CONFIDENCE
