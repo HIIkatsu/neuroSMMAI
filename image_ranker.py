@@ -738,10 +738,12 @@ def score_candidate(
         score = min(score, MAX_SCORE_WITHOUT_AFFIRMATION)
 
     # --- 14. Positive affirmation requirement ---
+    # A candidate MUST demonstrate subject relevance.
+    # Scene-only matches are NOT sufficient — a matching scene without
+    # a confirmed subject leads to thematically wrong images.
     has_affirmation = (
         subject_hits >= AFFIRMATION_MIN_SUBJECT_HITS
         or allowed_hits >= 1
-        or scene_hits >= 2
     )
     if not has_affirmation and score > 0:
         score = min(score, MAX_SCORE_WITHOUT_AFFIRMATION)
@@ -862,6 +864,8 @@ def determine_outcome(cs: CandidateScore, mode: str = "autopost") -> str:
     """Determine outcome from CandidateScore fields.
 
     Same logic for all modes — unified threshold.
+    HARD RULE: subject_match >= 1 OR allowed_visual_hits >= 1 required for ACCEPT.
+    A wrong image is worse than no image.
     """
     # If outcome already computed (e.g. by rank_candidates), return it
     if cs.outcome:
@@ -880,6 +884,12 @@ def determine_outcome(cs: CandidateScore, mode: str = "autopost") -> str:
     score = cs.final_score
 
     if score >= ACCEPT_MIN_SCORE:
+        # HARD GATE: confirmed subject match required for acceptance.
+        # No amount of scene/query-token matches can substitute for subject
+        # relevance.  This prevents thematically wrong images
+        # (e.g., cow → dining room).
+        if cs.subject_match < 1 and cs.allowed_visual_hits < 1:
+            return OUTCOME_REJECT_LOW_CONFIDENCE
         return OUTCOME_ACCEPT_BEST
 
     # Below threshold — classify the rejection reason

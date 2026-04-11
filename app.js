@@ -974,7 +974,10 @@ function normalizeMediaRef(ref = '') {
     return url;
   }
   if (raw.startsWith('/api/media/telegram')) {
-    const url = buildAuthenticatedMediaUrl(raw);
+    // Already a telegram API path — strip old auth params and re-auth cleanly
+    // to prevent duplicate tgWebAppData from double-normalization.
+    const cleanUrl = raw.replace(/([&?])tgWebAppData=[^&]*/g, '').replace(/\?$/, '').replace(/&$/, '');
+    const url = buildAuthenticatedMediaUrl(cleanUrl);
     logPath('telegram_api', url);
     return url;
   }
@@ -3328,7 +3331,10 @@ async function deleteChannel(id, title) {
 function draftEditorHtml(draft = null) {
   const currentChannel = draft?.channel_target || activeChannel()?.channel_target || state.data?.settings?.channel_target || '';
   const currentTopic = draft?.topic || state.data?.settings?.topic || '';
-  const mediaRef = normalizeMediaRef(draft?.media_ref || '');
+  // Store RAW ref in hidden input — normalize only at render time to avoid
+  // double-normalization bugs (duplicate auth tokens, broken URLs).
+  const rawMediaRef = draft?.media_ref || '';
+  const mediaRef = normalizeMediaRef(rawMediaRef);
   const mediaType = draft?.media_type && draft?.media_type !== 'none' ? draft.media_type : guessMediaType(mediaRef);
   const mediaMetaJson = draft?.media_meta_json || '';
   const autoHashtagsEnabled = String(state.data?.settings?.auto_hashtags || '0') === '1';
@@ -3403,7 +3409,7 @@ function draftEditorHtml(draft = null) {
             </div>
 
             <input class="input hidden-file-input" id="dr-file" type="file" accept="image/*,video/*">
-            <input type="hidden" id="dr-media-ref" value="${escapeHtml(mediaRef)}">
+            <input type="hidden" id="dr-media-ref" value="${escapeHtml(rawMediaRef)}">
             <input type="hidden" id="dr-media-type" value="${escapeHtml(mediaType || 'none')}">
             <input type="hidden" id="dr-media-meta" value="${escapeHtml(mediaMetaJson || '')}">
 
@@ -4209,7 +4215,8 @@ function collectEditorPreviewDraft() {
     text: document.getElementById('dr-text')?.value || '',
     prompt: document.getElementById('dr-prompt')?.value || '',
     channel_target: document.getElementById('dr-channel')?.value || activeChannel()?.title || '',
-    media_ref: normalizeMediaRef(document.getElementById('dr-media-ref')?.value || ''),
+    // Pass raw ref — renderLivePreviewCard will normalize at render time
+    media_ref: document.getElementById('dr-media-ref')?.value || '',
     media_type: document.getElementById('dr-media-type')?.value || 'none',
     media_meta_json: document.getElementById('dr-media-meta')?.value || '',
     buttons_json: document.getElementById('dr-buttons')?.value || '[]',
