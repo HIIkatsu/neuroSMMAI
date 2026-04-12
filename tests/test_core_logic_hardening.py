@@ -458,35 +458,11 @@ class TestImageSearchSubjectFirst(unittest.TestCase):
         )
         self.assertEqual(intent.source, "post")
 
-    def test_image_scoring_prefers_post_subject(self):
-        """Image scoring gives higher score to images matching post subject vs channel topic."""
-        from image_ranker import score_candidate
-        from visual_intent_v2 import VisualIntentV2
-
-        # Visual intent about cars (post is about cars)
-        intent = VisualIntentV2(
-            subject="car automobile vehicle",
-            sense="automotive transport",
-            scene="car engine oil change maintenance",
-            post_family="cars",
-        )
-
-        # Candidate matching post subject (cars)
-        car_score, _, _ = score_candidate(
-            meta_text="car engine oil change service maintenance automobile",
-            intent=intent,
-            query="car oil change",
-        )
-
-        # Candidate matching channel topic (scooters)
-        scooter_score, _, _ = score_candidate(
-            meta_text="electric scooter repair battery charging station",
-            intent=intent,
-            query="electric scooter repair",
-        )
-
-        self.assertGreater(car_score, scooter_score,
-                           "Car image should score higher than scooter image for a post about cars")
+    def test_image_service_has_mode_constants(self):
+        """Image service exports mode constants for callers."""
+        from image_service import MODE_AUTOPOST, MODE_EDITOR
+        self.assertEqual(MODE_AUTOPOST, "autopost")
+        self.assertEqual(MODE_EDITOR, "editor")
 
 
 # ---------------------------------------------------------------------------
@@ -496,20 +472,21 @@ class TestImageSearchSubjectFirst(unittest.TestCase):
 class TestEditorCandidatesMismatchedTopics(unittest.TestCase):
     """Editor mode should return usable candidates even when channel ≠ post topic."""
 
-    def test_editor_threshold_equal_to_autopost(self):
-        """Editor and autopost now use the same threshold (unified ACCEPT_MIN_SCORE)."""
-        from image_ranker import AUTOPOST_MIN_SCORE, EDITOR_MIN_SCORE
-        self.assertEqual(EDITOR_MIN_SCORE, AUTOPOST_MIN_SCORE)
+    def test_image_validation_url_sanity(self):
+        """Image validation accepts valid URLs and rejects bad ones."""
+        from image_validation import validate_image_url
+        ok, _ = validate_image_url("https://images.pexels.com/photos/123/photo.jpg")
+        self.assertTrue(ok)
+        ok2, reason = validate_image_url("")
+        self.assertFalse(ok2)
 
-    def test_editor_accepts_moderate_match(self):
-        """Editor mode accepts candidates at or above ACCEPT_MIN_SCORE."""
-        from image_ranker import determine_outcome, CandidateScore, EDITOR_MIN_SCORE
-
-        # Create a candidate at the unified threshold
-        cs = CandidateScore(final_score=EDITOR_MIN_SCORE + 5, outcome="ACCEPT")
-        outcome = determine_outcome(cs, mode="editor")
-        self.assertIn("accept", outcome.lower(),
-                      f"Editor should accept score {cs.final_score}, got outcome: {outcome}")
+    def test_image_prompts_different_families(self):
+        """Image prompts must detect different families correctly."""
+        from image_prompts import build_generation_prompt
+        food = build_generation_prompt(title="Рецепт борща", body="Суп из свёклы")
+        cars = build_generation_prompt(title="Тест-драйв BMW", body="Мощный двигатель")
+        self.assertEqual(food["family"], "food")
+        self.assertEqual(cars["family"], "cars")
 
     def test_visual_intent_works_with_mismatched_channel(self):
         """Visual intent extraction works properly when channel ≠ post topic."""

@@ -15,8 +15,8 @@ from aiogram.types import FSInputFile
 
 import db
 from content import generate_post_bundle
-from image_gateway import get_post_image, validate_image, MODE_AUTOPOST, MODE_EDITOR, _LATIN_TOKEN_RE, trigger_unsplash_download
-from ai_image_generator import generate_ai_image, _heuristic_prompt
+from image_service import get_image, validate_image, trigger_unsplash_download, MODE_AUTOPOST, MODE_EDITOR, _LATIN_TOKEN_RE, ImageResult
+from image_prompts import build_generation_prompt
 from runtime_trace import new_trace_id, trace_text_generation, trace_image_selection, TraceTimer, debug_fields, is_debug_trace_enabled
 from safe_send import safe_send, safe_send_document, safe_send_photo, safe_send_video
 from topic_utils import detect_topic_family, detect_subfamily, get_family_image_queries, get_subfamily_image_queries
@@ -481,16 +481,15 @@ async def resolve_post_image(
     trace_id: str = "",
     mode: str = "",
 ) -> str:
-    """Resolve the best image for a post via the unified image gateway.
+    """Resolve the best image for a post via the generation-first image service.
 
-    All the logic is in get_post_image(). This function is just a thin
-    orchestration wrapper that maps legacy parameters and handles tracing.
+    Calls image_service.get_image() which tries AI generation first,
+    then falls back to stock photo search.
     """
     _tid = trace_id or new_trace_id()
     _timer = TraceTimer()
     _timer.__enter__()
 
-    # Determine the effective title: use explicit title, or raw user query, or query
     effective_title = title or raw_user_query or query or ""
     effective_body = post_text or ""
     effective_mode = mode if mode in (MODE_AUTOPOST, MODE_EDITOR) else MODE_AUTOPOST
@@ -502,57 +501,66 @@ async def resolve_post_image(
         (topic or "")[:60], effective_mode, _tid,
     )
 
+    api_key = getattr(config, "openrouter_api_key", "") if config else ""
+    model = getattr(config, "openrouter_model", "") if config else ""
+    base_url = getattr(config, "openrouter_base_url", None) if config else None
+
     try:
-        result = await get_post_image(
+        result: ImageResult = await get_image(
             title=effective_title,
             body=effective_body,
             channel_topic=topic,
-            used_refs=used_refs,
+            llm_image_prompt=ai_prompt,
+            api_key=api_key,
+            model=model,
+            base_url=base_url,
+            owner_id=owner_id,
             mode=effective_mode,
+            used_refs=used_refs,
         )
     except Exception as exc:
-        logger.exception("resolve_post_image gateway failed: %s", exc)
+        logger.exception("resolve_post_image service failed: %s", exc)
         _timer.__exit__(None, None, None)
         trace_image_selection(
             trace_id=_tid, route="resolve_post_image",
             title_excerpt=effective_title[:60], body_excerpt=effective_body[:100],
             visual_subject=raw_user_query or query, built_query=query,
-            provider_result_count=0, scoring_path="gateway_error",
+            provider_result_count=0, scoring_path="service_error",
             accept_outcome="no_image", reject_reason=str(exc)[:200],
             duration_ms=_timer.elapsed_ms,
         )
         return ""
 
-    image_ref = result.image_url or ""
+    image_ref = result.media_ref or ""
     _timer.__exit__(None, None, None)
 
     if image_ref:
         logger.info(
-            "resolve_post_image SELECTED url=%r score=%d mode=%s provider=%s",
-            image_ref[:80], result.score, effective_mode, result.source_provider,
+            "resolve_post_image SELECTED ref=%r source=%s mode=%s family=%s",
+            image_ref[:80], result.source, effective_mode, result.family,
         )
         trace_image_selection(
             trace_id=_tid, route="resolve_post_image",
             title_excerpt=effective_title[:60], body_excerpt=effective_body[:100],
-            visual_subject=result.matched_query or raw_user_query or query,
-            built_query=result.matched_query or query,
-            provider_result_count=result.candidates_evaluated,
-            scoring_path="unified_gateway",
+            visual_subject=raw_user_query or query,
+            built_query=query,
+            provider_result_count=1,
+            scoring_path=f"generation_first_{result.source}",
             accept_outcome="accepted", duration_ms=_timer.elapsed_ms,
         )
     else:
         logger.debug(
-            "resolve_post_image EMPTY reason=%s outcome=%s",
-            result.no_image_reason, result.outcome,
+            "resolve_post_image EMPTY reason=%s source=%s",
+            result.failure_reason, result.source,
         )
         trace_image_selection(
             trace_id=_tid, route="resolve_post_image",
             title_excerpt=effective_title[:60], body_excerpt=effective_body[:100],
             visual_subject=raw_user_query or query, built_query=query,
-            provider_result_count=result.candidates_evaluated,
-            scoring_path="unified_gateway",
+            provider_result_count=0,
+            scoring_path="generation_first",
             accept_outcome="no_image",
-            reject_reason=result.no_image_reason or "no_match",
+            reject_reason=result.failure_reason or "no_match",
             duration_ms=_timer.elapsed_ms,
         )
 
@@ -635,8 +643,11 @@ async def generate_post_payload(
     # image_prompt from LLM — creative metaphorical English prompt for image generation
     llm_image_prompt = str(bundle.get("image_prompt") or "").strip()
     if not llm_image_prompt:
-        # Fallback: use heuristic prompt based on topic/prompt/text
-        llm_image_prompt = _heuristic_prompt(channel_topic, prompt, text)
+        # Build a heuristic prompt from available context
+        prompt_data = build_generation_prompt(
+            title=title, body=body, channel_topic=channel_topic,
+        )
+        llm_image_prompt = prompt_data["prompt"]
 
     image_ref = ""
     post_intent = str(bundle.get("post_intent") or "").strip()
@@ -645,8 +656,6 @@ async def generate_post_payload(
     logger.debug("GENERATE_POST_PAYLOAD force_image=%s owner_id=%s prompt=%r topic=%r", force_image, owner_id, (prompt or "")[:200], (channel_topic or "")[:200])
     if force_image:
         try:
-            text_part = " ".join((text or "").split()[:24]).strip()
-            lead = body.split("\n", 1)[0].strip()[:160] if body else ""
             used_refs = {current_media_ref} if str(current_media_ref or "").strip() else set()
             # Wider dedup window for autopost to prevent repetitive images
             dedup_limit = 100 if generation_path == "autopost" else 50
@@ -661,58 +670,41 @@ async def generate_post_payload(
             except Exception:
                 pass
 
-            # First try AI image generation (HuggingFace) with the LLM-generated prompt
+            # Generation-first image flow via image_service
             try:
-                image_ref = await asyncio.wait_for(
-                    generate_ai_image(
-                        channel_topic,
-                        prompt,
-                        text,
+                result: ImageResult = await asyncio.wait_for(
+                    get_image(
+                        title=title,
+                        body=body,
+                        channel_topic=channel_topic,
+                        llm_image_prompt=llm_image_prompt,
                         api_key=getattr(config, "openrouter_api_key", ""),
                         model=getattr(config, "openrouter_model", ""),
                         base_url=getattr(config, "openrouter_base_url", None),
-                        prebuilt_prompt=llm_image_prompt,
                         owner_id=owner_id,
+                        mode=generation_path,
+                        used_refs=used_refs,
                     ),
-                    timeout=30.0,
-                ) or ""
+                    timeout=45.0,
+                )
+                image_ref = result.media_ref or ""
+                if image_ref:
+                    logger.info(
+                        "generate_post_payload image_ref=%r source=%s family=%s",
+                        image_ref[:80], result.source, result.family,
+                    )
+                else:
+                    logger.info(
+                        "generate_post_payload no_image reason=%s source=%s",
+                        result.failure_reason, result.source,
+                    )
             except asyncio.TimeoutError:
-                logger.warning("generate_post_payload AI image timed out owner_id=%s", owner_id)
+                logger.warning("generate_post_payload image timed out owner_id=%s", owner_id)
                 image_ref = ""
-            except Exception as ai_exc:
-                logger.info("generate_post_payload AI image failed, falling back to search: %s", ai_exc)
+            except Exception as img_exc:
+                logger.info("generate_post_payload image failed: %s", img_exc)
                 image_ref = ""
 
-            # Fall back to stock photo search.
-            # Priority: raw user input as primary query (literal-first),
-            # LLM-derived values (visual_brief, title, post_intent) as enriched fallback.
-            if not image_ref:
-                enriched_query = _compose_visual_query(visual_brief, title, lead, post_intent)
-                if not enriched_query:
-                    enriched_query = _compose_visual_query(effective_prompt, title, short, lead)
-                logger.info(
-                    "generate_post_payload image raw_user=%r enriched=%r",
-                    effective_prompt[:120], enriched_query[:120],
-                )
-                try:
-                    image_ref = await asyncio.wait_for(
-                        resolve_post_image(
-                            enriched_query,
-                            owner_id=owner_id,
-                            ai_prompt=llm_image_prompt or effective_prompt or enriched_query or text_part or "",
-                            topic=title or channel_topic,
-                            title=title,
-                            post_text=text or "",
-                            config=config,
-                            used_refs=used_refs,
-                            raw_user_query=effective_prompt,
-                            mode=generation_path,
-                        ),
-                        timeout=25.0,
-                    )
-                except asyncio.TimeoutError:
-                    logger.warning("generate_post_payload image search timed out, continuing without image owner_id=%s", owner_id)
-                    image_ref = ""
             logger.info("generate_post_payload image_ref=%r", image_ref)
             logger.debug("GENERATE_POST_PAYLOAD_IMAGE_RESULT image_ref=%r", image_ref or "")
         except Exception as exc:

@@ -116,128 +116,80 @@ class TestPreviewStability(unittest.TestCase):
 
 
 # ===================================================================
-# 2. Image pipeline scene mismatch tests
+# 2. Image service structure tests (replaces old image_ranker tests)
 # ===================================================================
 class TestImageSceneMismatch(unittest.TestCase):
-    """Image pipeline must reject confirmed production bad examples."""
+    """Image service must have proper structure for generation-first flow."""
 
-    def _score(self, meta_text, subject, scene="", family="generic"):
-        from image_ranker import score_candidate
-        from visual_intent_v2 import VisualIntentV2
-        intent = VisualIntentV2(
-            subject=subject,
-            sense="",
-            scene=scene,
-            forbidden_meanings=[],
-            imageability="high",
-            query_terms=[subject],
-            negative_terms=[],
-            post_family=family,
-        )
-        score, reason, cs = score_candidate(meta_text, intent)
-        return score, reason, cs
+    def test_image_service_exports(self):
+        """image_service must export all required symbols."""
+        import image_service
+        self.assertTrue(hasattr(image_service, 'get_image'))
+        self.assertTrue(hasattr(image_service, 'validate_image'))
+        self.assertTrue(hasattr(image_service, 'trigger_unsplash_download'))
+        self.assertTrue(hasattr(image_service, 'MODE_AUTOPOST'))
+        self.assertTrue(hasattr(image_service, 'MODE_EDITOR'))
 
-    def test_investment_rejects_beauty_cosmetics_flatlay(self):
-        """investments/investors → must reject cosmetics/beauty flatlay."""
-        score, reason, cs = self._score(
-            "beauty product flatlay cosmetics skincare cream makeup",
-            "investment", scene="office finance", family="finance",
-        )
-        self.assertLess(score, 10, "Beauty cosmetics should be rejected for investment topic")
-        # Either scene mismatch or subject-scene reject should fire
-        self.assertTrue(
-            cs.scene_mismatch_hits > 0 or cs.subject_scene_reject_hits > 0,
-            f"Expected mismatch hits, got scene_mis={cs.scene_mismatch_hits} subj_rej={cs.subject_scene_reject_hits}",
-        )
+    def test_image_prompts_builds_for_food(self):
+        """image_prompts must detect food family and build appropriate prompt."""
+        from image_prompts import build_generation_prompt
+        result = build_generation_prompt(title="Рецепт карбонары", body="Как приготовить пасту")
+        self.assertEqual(result["family"], "food")
+        self.assertTrue(len(result["prompt"]) > 20)
 
-    def test_entrepreneur_rejects_empty_clinic(self):
-        """entrepreneur/business → must reject clinic/empty treatment room."""
-        score, reason, cs = self._score(
-            "empty clinic treatment room medical examination white walls hospital",
-            "business", scene="office meeting", family="marketing",
-        )
-        self.assertLess(score, 10, "Clinic should be rejected for business topic")
-        self.assertTrue(
-            cs.scene_mismatch_hits > 0 or cs.subject_scene_reject_hits > 0,
-            "Expected mismatch for clinic vs business",
-        )
+    def test_image_prompts_builds_for_cars(self):
+        """image_prompts must detect cars family."""
+        from image_prompts import build_generation_prompt
+        result = build_generation_prompt(title="Обзор BMW X5", body="Тест-драйв")
+        self.assertEqual(result["family"], "cars")
 
-    def test_crocodile_car_rejects_soup_vegetables(self):
-        """crocodile + car context → must reject soup/kitchen/vegetables."""
-        score, reason, cs = self._score(
-            "vegetable soup cooking pot kitchen recipe healthy meal dinner",
-            "crocodile", scene="road danger", family="generic",
-        )
-        self.assertLess(score, 5, "Soup/vegetables should be hard rejected for crocodile topic")
-        self.assertTrue(
-            cs.subject_scene_reject_hits > 0 or cs.scene_mismatch_hits > 0,
-            "Expected reject hits for soup vs crocodile",
-        )
+    def test_image_validation_rejects_tiny_files(self):
+        """image_validation must reject files under minimum size."""
+        from image_validation import validate_image_bytes
+        ok, reason = validate_image_bytes(b"\x89PNG" + b"\x00" * 10)
+        self.assertFalse(ok)
+        self.assertIn("too_small", reason)
 
-    def test_fuel_car_deprioritizes_retro_postcard(self):
-        """fuel/car topic → retro postcard car should be weak fallback."""
-        score_retro, _, cs_retro = self._score(
-            "retro car vintage automobile classic car old postcard",
-            "fuel", scene="gas station", family="cars",
-        )
-        score_modern, _, cs_modern = self._score(
-            "fuel gasoline gas station pump car vehicle refueling",
-            "fuel", scene="gas station", family="cars",
-        )
-        self.assertGreater(
-            score_modern, score_retro,
-            f"Modern fuel station ({score_modern}) should outrank retro car ({score_retro})",
-        )
+    def test_image_validation_accepts_png(self):
+        """image_validation must accept valid PNG bytes."""
+        from image_validation import validate_image_bytes
+        data = b"\x89PNG" + b"\x00" * 2000
+        ok, reason = validate_image_bytes(data)
+        self.assertTrue(ok)
+        self.assertEqual(reason, "ok")
 
-    def test_kitchen_furniture_rejects_children_family_table(self):
-        """kitchen furniture/interior → must reject children eating/family table."""
-        score, reason, cs = self._score(
-            "children eating family breakfast kids at table family meal morning",
-            "kitchen", scene="kitchen interior", family="food",
-        )
-        self.assertLess(score, 10, "Family breakfast should be rejected for kitchen furniture topic")
-        self.assertTrue(
-            cs.subject_scene_reject_hits > 0 or cs.scene_mismatch_hits > 0,
-            "Expected reject for children eating vs kitchen furniture",
-        )
+    def test_image_validation_accepts_jpeg(self):
+        """image_validation must accept valid JPEG bytes."""
+        from image_validation import validate_image_bytes
+        data = b"\xff\xd8\xff" + b"\x00" * 2000
+        ok, reason = validate_image_bytes(data)
+        self.assertTrue(ok)
 
-    def test_exact_subject_outranks_broad_family(self):
-        """exact subject match must outrank broad family match."""
-        score_exact, _, cs_exact = self._score(
-            "investment portfolio chart financial growth stock market",
-            "investment", scene="office", family="finance",
-        )
-        score_family, _, cs_family = self._score(
-            "generic business people meeting teamwork office concept",
-            "investment", scene="office", family="finance",
-        )
-        self.assertGreater(
-            score_exact, score_family,
-            f"Exact investment ({score_exact}) should outrank generic business ({score_family})",
-        )
-        self.assertIn(cs_exact.fallback_level, ("exact", "near"))
-
-    def test_repeated_same_scene_penalized(self):
-        """Same scene class used recently should be penalized."""
-        from image_ranker import rank_candidates, CandidateScore
+    def test_image_history_dedup_works(self):
+        """image_history must detect duplicate content and prompts."""
         from image_history import ImageHistory
-        from visual_intent_v2 import VisualIntentV2
+        h = ImageHistory(maxlen=10, ttl=3600)
+        data = b"\x89PNG" + b"\x00" * 2000
+        self.assertFalse(h.is_duplicate_content(data))
+        h.record(image_bytes=data)
+        self.assertTrue(h.is_duplicate_content(data))
 
-        history = ImageHistory()
-        history.record(
-            url="https://example.com/prev.jpg",
-            content_hash="abc",
-            visual_class="cars",
-            subject_bucket="car",
-            domain="example.com",
-            scene_class="cars",
-            coarse_pattern="cars_car",
-        )
-        intent = VisualIntentV2(
-            subject="car", sense="", scene="highway",
-            forbidden_meanings=[], imageability="high",
-            query_terms=["car"], negative_terms=[], post_family="cars",
-        )
+    def test_image_history_prompt_dedup(self):
+        """image_history must detect duplicate prompts."""
+        from image_history import ImageHistory
+        h = ImageHistory(maxlen=10, ttl=3600)
+        prompt = "professional photo of investment office"
+        self.assertFalse(h.is_duplicate_prompt(prompt))
+        h.record(prompt=prompt)
+        self.assertTrue(h.is_duplicate_prompt(prompt))
+
+    def test_image_fallback_query_builder(self):
+        """image_prompts.build_fallback_search_query must return latin-only query."""
+        from image_prompts import build_fallback_search_query
+        q = build_fallback_search_query(title="Ремонт двигателя", channel_topic="Автосервис")
+        # Should be latin characters only (for stock photo APIs)
+        import re
+        self.assertTrue(re.match(r'^[a-zA-Z0-9\s]*$', q), f"Query should be latin-only: {q!r}")
         cs = CandidateScore(
             url="https://example.com/new.jpg",
             provider="pexels",
