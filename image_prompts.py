@@ -1,0 +1,157 @@
+"""
+image_prompts.py — Prompt builder for the generation-first image system.
+
+Converts post/channel/topic context into strong image generation prompts.
+No dependency on any deleted image modules.
+"""
+from __future__ import annotations
+
+import logging
+import re
+
+from topic_utils import detect_topic_family, detect_subfamily
+
+logger = logging.getLogger(__name__)
+
+# Style guidance per topic family — maps family to photographic style hints
+_FAMILY_STYLE: dict[str, str] = {
+    "massage": "professional spa photography, warm natural lighting, wellness atmosphere",
+    "food": "appetizing food photography, natural lighting, editorial composition",
+    "health": "clean health and wellness imagery, natural tones, professional medical context",
+    "beauty": "beauty and skincare photography, soft studio lighting, elegant composition",
+    "local_business": "authentic small business photography, warm inviting atmosphere",
+    "education": "modern education and learning imagery, bright inspiring environment",
+    "finance": "professional finance and business imagery, clean modern aesthetics",
+    "marketing": "creative marketing and branding visuals, bold modern design",
+    "lifestyle": "authentic lifestyle photography, candid warm moments",
+    "expert_blog": "thoughtful expert portrait or workspace, professional editorial style",
+    "cars": "automotive photography, dramatic lighting, professional car exterior or detail shot",
+    "gaming": "gaming culture imagery, dynamic lighting, modern tech aesthetics",
+    "hardware": "technology hardware photography, clean studio shots, detailed close-ups",
+    "tech": "modern technology and software visuals, clean minimalist design",
+    "business": "corporate professional photography, modern office environment",
+}
+
+_NEGATIVE_PROMPT = (
+    "blurry, low quality, text overlay, watermark, logo, clipart, cartoon, "
+    "illustration, 3d render, cgi, anime, painting, sketch, collage, "
+    "distorted, deformed, ugly, oversaturated, artificial neon, "
+    "stock photo cliché, generic handshake, thumbs up"
+)
+
+
+def build_generation_prompt(
+    *,
+    title: str = "",
+    body: str = "",
+    channel_topic: str = "",
+    llm_image_prompt: str = "",
+) -> dict[str, str]:
+    """Build a structured prompt for image generation.
+
+    Returns dict with keys:
+        prompt: str — the main generation prompt
+        negative_prompt: str — what to avoid
+        style_hint: str — photographic style guidance
+        family: str — detected topic family
+    """
+    # Detect family from all available text
+    combined_text = " ".join(filter(None, [title, body, channel_topic]))
+    family = detect_topic_family(combined_text) if combined_text.strip() else "generic"
+    style_hint = _FAMILY_STYLE.get(family, "professional editorial photography, natural lighting")
+
+    # Build the core prompt
+    # Priority: LLM-generated prompt > title + body summary > channel topic
+    if llm_image_prompt and llm_image_prompt.strip():
+        core = llm_image_prompt.strip()
+    elif title:
+        # Extract visual essence from title + first part of body
+        body_lead = (body or "").split("\n", 1)[0].strip()[:200] if body else ""
+        core = _extract_visual_essence(title, body_lead, family)
+    elif channel_topic:
+        core = f"Professional photo related to: {channel_topic}"
+    else:
+        core = "Professional editorial photograph"
+
+    # Compose the final prompt
+    prompt = f"{core}. {style_hint}. High quality, photorealistic, 4K."
+
+    logger.info(
+        "IMAGE_PROMPT_BUILT family=%s prompt_len=%d has_llm_prompt=%s title=%r",
+        family, len(prompt), bool(llm_image_prompt), (title or "")[:60],
+    )
+
+    return {
+        "prompt": prompt,
+        "negative_prompt": _NEGATIVE_PROMPT,
+        "style_hint": style_hint,
+        "family": family,
+    }
+
+
+def _extract_visual_essence(title: str, body_lead: str, family: str) -> str:
+    """Distill title and body lead into a concise visual description."""
+    # Clean up: remove emojis, special chars, keep meaningful words
+    clean_title = re.sub(r"[^\w\s.,!?-]", "", title or "").strip()
+    clean_lead = re.sub(r"[^\w\s.,!?-]", "", body_lead or "").strip()
+
+    # Combine and truncate
+    combined = f"{clean_title}. {clean_lead}".strip() if clean_lead else clean_title
+    # Limit to prevent overly long prompts
+    if len(combined) > 300:
+        combined = combined[:300].rsplit(" ", 1)[0]
+
+    return f"A professional photograph depicting: {combined}"
+
+
+def build_fallback_search_query(
+    *,
+    title: str = "",
+    body: str = "",
+    channel_topic: str = "",
+) -> str:
+    """Build a simple English search query for stock photo fallback.
+
+    Returns a clean Latin-only query string suitable for Pexels/Pixabay APIs.
+    """
+    combined = " ".join(filter(None, [title, body[:100] if body else "", channel_topic]))
+    family = detect_topic_family(combined) if combined.strip() else "generic"
+
+    # Use subfamily if available
+    subfamily = detect_subfamily(family, combined)
+
+    # Map to English search terms
+    _FAMILY_SEARCH: dict[str, str] = {
+        "massage": "massage therapy spa wellness",
+        "food": "food cooking dish meal",
+        "health": "health wellness medical",
+        "beauty": "beauty skincare cosmetics",
+        "cars": "car automotive vehicle",
+        "tech": "technology software digital",
+        "business": "business office professional",
+        "finance": "finance investment money",
+        "education": "education learning study",
+        "marketing": "marketing branding strategy",
+        "lifestyle": "lifestyle modern daily",
+        "gaming": "gaming esports controller",
+        "hardware": "computer hardware technology",
+        "expert_blog": "expert professional workspace",
+        "local_business": "small business workshop craft",
+    }
+
+    base_query = _FAMILY_SEARCH.get(family, "professional editorial photo")
+
+    # Add subfamily specifics if available
+    if subfamily:
+        base_query = f"{subfamily} {base_query}"
+
+    # Strip non-Latin characters for stock photo API compatibility
+    clean = re.sub(r"[^a-zA-Z0-9\s]", " ", base_query)
+    clean = re.sub(r"\s+", " ", clean).strip()
+
+    logger.debug(
+        "IMAGE_FALLBACK_QUERY family=%s subfamily=%s query=%r",
+        family, subfamily, clean[:80],
+    )
+
+    return clean[:180]

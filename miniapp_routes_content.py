@@ -18,7 +18,7 @@ from ai_client import ai_chat
 from competitor_service import analyse_competitor_and_generate
 from config import load_config
 from content import generate_post_bundle, generate_post_text, _remove_fabricated_refs, _safety_consistency_pass, _author_role_kwargs
-from image_gateway import trigger_unsplash_download
+from image_service import trigger_unsplash_download
 from miniapp_analytics_service import recent_channel_history
 from miniapp_media_service import extract_telegram_file_id_from_media_ref, find_inbox_item_for_media, find_inbox_item_for_video_media
 from miniapp_plan_service import days_label, generate_plan_items_ai, hashtags_text, normalized_post_text

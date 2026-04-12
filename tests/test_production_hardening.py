@@ -97,126 +97,58 @@ class TestPreviewResolver(unittest.TestCase):
 
 
 # ===================================================================
-# B. Image precision / subject-scene rules tests
+# B. Image service smoke tests (replaces old image_ranker tests)
 # ===================================================================
-class TestImagePrecisionRules(unittest.TestCase):
-    """B. Image precision: subject-scene rules enforce correct matching."""
+class TestImageServiceSmoke(unittest.TestCase):
+    """B. Image service: verify the new generation-first image system structure."""
 
-    def test_kitchen_furniture_rejects_family_breakfast(self):
-        """Test 6: kitchen furniture rejects family breakfast / children at table."""
-        from image_ranker import score_candidate
-        from visual_intent_v2 import VisualIntentV2
-        intent = VisualIntentV2(
-            subject="kitchen furniture cabinet",
-            scene="kitchen interior",
-            post_family="local_business",
+    def test_image_service_has_get_image(self):
+        """image_service must export get_image as the single entry point."""
+        import image_service
+        self.assertTrue(hasattr(image_service, 'get_image'))
+
+    def test_image_service_has_validate_image(self):
+        """image_service must export validate_image for quality gate."""
+        import image_service
+        self.assertTrue(hasattr(image_service, 'validate_image'))
+
+    def test_image_service_has_trigger_unsplash_download(self):
+        """image_service must export trigger_unsplash_download (no-op stub)."""
+        import image_service
+        self.assertTrue(hasattr(image_service, 'trigger_unsplash_download'))
+
+    def test_image_prompts_builds_prompt(self):
+        """image_prompts.build_generation_prompt must return structured dict."""
+        from image_prompts import build_generation_prompt
+        result = build_generation_prompt(
+            title="Как выбрать кухонный гарнитур",
+            body="Советы по выбору фасадов",
+            channel_topic="Ремонт",
         )
-        # Metadata describing children eating at table
-        meta = "family breakfast children eating at table morning meal kids"
-        score, reason, cs = score_candidate(meta, intent)
-        # Should be penalized for scene mismatch
-        self.assertLess(score, 15, "Children eating should be penalized for kitchen furniture")
-        self.assertTrue(
-            cs.scene_mismatch_hits > 0 or cs.subject_scene_reject_hits > 0,
-            f"Expected scene mismatch or subject reject hits, got mismatch={cs.scene_mismatch_hits} reject={cs.subject_scene_reject_hits}",
-        )
+        self.assertIn("prompt", result)
+        self.assertIn("negative_prompt", result)
+        self.assertIn("family", result)
+        self.assertTrue(len(result["prompt"]) > 10)
 
-    def test_chinese_car_prefers_modern_over_retro(self):
-        """Test 7: chinese car prefers modern automotive over retro scenic car."""
-        from image_ranker import score_candidate
-        from visual_intent_v2 import VisualIntentV2
-        intent = VisualIntentV2(
-            subject="chinese car modern car",
-            scene="dealership showroom",
-            post_family="cars",
-        )
-        # Modern car metadata
-        meta_modern = "modern suv crossover dealership new car showroom chinese brand"
-        score_modern, _, cs_modern = score_candidate(meta_modern, intent)
+    def test_image_validation_rejects_empty_bytes(self):
+        """image_validation must reject None and empty bytes."""
+        from image_validation import validate_image_bytes
+        ok, reason = validate_image_bytes(None)
+        self.assertFalse(ok)
+        self.assertEqual(reason, "null_data")
 
-        # Retro car metadata
-        meta_retro = "vintage car classic car retro postcard antique car decorative"
-        score_retro, _, cs_retro = score_candidate(meta_retro, intent)
+        ok2, reason2 = validate_image_bytes(b"tiny")
+        self.assertFalse(ok2)
+        self.assertIn("too_small", reason2)
 
-        self.assertGreater(
-            score_modern, score_retro,
-            f"Modern car ({score_modern}) should score higher than retro ({score_retro})",
-        )
-
-    def test_carbonara_prefers_plated_dish_over_market(self):
-        """Test 8: carbonara prefers plated dish over market/ingredient fallback."""
-        from image_ranker import score_candidate
-        from visual_intent_v2 import VisualIntentV2
-        intent = VisualIntentV2(
-            subject="carbonara pasta spaghetti",
-            scene="plated dish",
-            post_family="food",
-        )
-        # Plated dish
-        meta_plated = "spaghetti carbonara plated pasta dish italian food creamy"
-        score_plated, _, _ = score_candidate(meta_plated, intent)
-
-        # Market fallback
-        meta_market = "food market grocery store deli counter ingredients"
-        score_market, _, _ = score_candidate(meta_market, intent)
-
-        self.assertGreater(
-            score_plated, score_market,
-            f"Plated carbonara ({score_plated}) should score higher than market ({score_market})",
-        )
-
-    def test_scooter_brake_rejects_hiking_scenes(self):
-        """Test 9: scooter brake rejects hiking/forest/backpack scenes."""
-        from image_ranker import score_candidate
-        from visual_intent_v2 import VisualIntentV2
-        intent = VisualIntentV2(
-            subject="scooter brake",
-            scene="urban repair",
-            post_family="cars",
-        )
-        meta = "hiking forest trail backpack nature walk wilderness camping"
-        score, reason, cs = score_candidate(meta, intent)
-        self.assertLess(score, 10, "Hiking scene should be strongly penalized for scooter brake")
-
-    def test_exact_subject_outranks_broad_family(self):
-        """Test 10: exact subject match outranks broad family match."""
-        from image_ranker import score_candidate
-        from visual_intent_v2 import VisualIntentV2
-        intent = VisualIntentV2(
-            subject="carbonara pasta spaghetti",
-            scene="plated dish italian",
-            post_family="food",
-        )
-        # Exact subject match
-        meta_exact = "carbonara spaghetti pasta italian plated creamy guanciale"
-        score_exact, _, cs_exact = score_candidate(meta_exact, intent)
-
-        # Broad family match (food but not carbonara)
-        meta_family = "food restaurant dining meal kitchen cooking recipe"
-        score_family, _, cs_family = score_candidate(meta_family, intent)
-
-        self.assertGreater(
-            score_exact, score_family,
-            f"Exact subject ({score_exact}) should outrank family ({score_family})",
-        )
-        self.assertEqual(cs_exact.fallback_level, "exact")
-        self.assertIn(cs_family.fallback_level, ("family", "weak"))
-
-    def test_repeated_scene_gets_penalized(self):
-        """Test 11: repeated scene gets penalized by anti-repeat."""
+    def test_image_history_dedup(self):
+        """image_history must detect duplicate content."""
         from image_history import ImageHistory
         history = ImageHistory(maxlen=10, ttl=3600)
-        # Record same scene class twice
-        history.record(scene_class="food_plated", subject_bucket="carbonara", visual_class="food")
-        history.record(scene_class="food_plated", subject_bucket="carbonara", visual_class="food")
-
-        penalty = history.compute_penalty(
-            scene_class="food_plated",
-            subject_bucket="carbonara",
-            visual_class="food",
-        )
-        self.assertLess(penalty, 0, "Repeated scene should receive negative penalty")
-        self.assertLess(penalty, -20, "Repeated scene+subject should have significant penalty")
+        data = b"\x89PNG" + b"\x00" * 2000
+        self.assertFalse(history.is_duplicate_content(data))
+        history.record(image_bytes=data)
+        self.assertTrue(history.is_duplicate_content(data))
 
 
 # ===================================================================
@@ -351,20 +283,25 @@ class TestCrossPipelineAlignment(unittest.TestCase):
 
 
 # ===================================================================
-# E. Anti-repeat with coarse pattern dimension
+# E. Anti-repeat with new image_history
 # ===================================================================
 class TestAntiRepeatCoarsePattern(unittest.TestCase):
-    """E. Coarse pattern dedup prevents same visual pattern reuse."""
+    """E. New image_history dedup prevents same content reuse."""
 
-    def test_coarse_pattern_penalty(self):
-        """Test: same coarse visual pattern receives repeat penalty."""
+    def test_content_dedup(self):
+        """Test: same image content is detected as duplicate."""
         from image_history import ImageHistory
         history = ImageHistory(maxlen=10, ttl=3600)
-        history.record(coarse_pattern="food_carbonara", visual_class="food")
-        history.record(coarse_pattern="food_carbonara", visual_class="food")
+        data = b"\x89PNG" + b"\x00" * 2000
+        history.record(image_bytes=data)
+        self.assertTrue(history.is_duplicate_content(data))
 
-        penalty = history.compute_penalty(coarse_pattern="food_carbonara")
-        self.assertLess(penalty, 0, "Same coarse pattern should receive penalty")
+    def test_prompt_dedup(self):
+        """Test: same prompt signature is detected as duplicate."""
+        from image_history import ImageHistory
+        history = ImageHistory(maxlen=10, ttl=3600)
+        history.record(prompt="professional photo of a pasta dish")
+        self.assertTrue(history.is_duplicate_prompt("professional photo of a pasta dish"))
 
 
 # ===================================================================

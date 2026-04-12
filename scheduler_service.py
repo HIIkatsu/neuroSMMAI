@@ -36,7 +36,7 @@ from db import (
 import db  # For get_channel_settings, list_channel_profiles
 from content import generate_post_text, _remove_fabricated_refs  # kept for backward compatibility / news hooks
 from actions import publish_draft, resolve_post_image, generate_post_payload
-from image_gateway import validate_image
+from image_service import validate_image
 from news_service import fetch_latest_news, fetch_news_candidates, build_news_post, build_news_source_meta, is_source_confident
 from media_lifecycle import cleanup_temp_media
 from safe_send import safe_send as _safe_send_dm

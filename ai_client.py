@@ -214,12 +214,29 @@ async def ai_image_generate(
     background: Optional[str] = None,
     extra_body: Optional[dict] = None,
 ) -> bytes | None:
+    """Generate an image via the OpenAI-compatible images.generate API.
+
+    Requests b64_json response to avoid a URL round-trip when possible.
+    Falls back to downloading the URL if the provider returns a URL instead.
+
+    Returns raw image bytes on success, None on any failure.
+    Every failure is logged with a structured reason.
+    """
     if not api_key or not model or not prompt:
+        logger.warning(
+            "ai_image_generate skip: api_key=%s model=%s prompt_len=%d",
+            bool(api_key), bool(model), len(prompt or ""),
+        )
         return None
 
     client = await _get_shared_client(api_key, base_url)
     try:
-        kwargs: dict = {"model": model, "prompt": prompt, "size": size}
+        kwargs: dict = {
+            "model": model,
+            "prompt": prompt,
+            "size": size,
+            "response_format": "b64_json",  # Prefer inline to avoid URL fetch
+        }
         if quality:
             kwargs["quality"] = quality
         if background:
@@ -227,21 +244,36 @@ async def ai_image_generate(
         if extra_body:
             kwargs["extra_body"] = extra_body
 
+        logger.info(
+            "ai_image_generate START model=%s size=%s prompt_len=%d",
+            model, size, len(prompt),
+        )
+
         result = await client.images.generate(**kwargs)
         data = getattr(result, "data", None) or []
         if not data:
+            logger.warning("ai_image_generate EMPTY_RESPONSE model=%s", model)
             return None
 
         item = data[0]
+
+        # Prefer b64_json (no extra network hop)
         b64 = getattr(item, "b64_json", None)
         if b64:
-            return base64.b64decode(b64)
+            image_bytes = base64.b64decode(b64)
+            logger.info(
+                "ai_image_generate SUCCESS model=%s delivery=b64_json bytes=%d",
+                model, len(image_bytes),
+            )
+            return image_bytes
 
+        # Fallback: download from URL
         url = getattr(item, "url", None)
         if not url:
+            logger.warning("ai_image_generate NO_B64_NO_URL model=%s", model)
             return None
 
-        # Качаем изображение через отдельный async client
+        logger.info("ai_image_generate FETCHING_URL model=%s url=%r", model, url[:120])
         proxy = _resolve_proxy()
         fetch_timeout = httpx.Timeout(connect=20.0, read=120.0, write=60.0, pool=60.0)
         transport = httpx.AsyncHTTPTransport(retries=1)
@@ -256,10 +288,25 @@ async def ai_image_generate(
         async with httpx.AsyncClient(**fetch_kwargs) as http_client:
             resp = await http_client.get(url)
             resp.raise_for_status()
-            return resp.content
+            image_bytes = resp.content
+            logger.info(
+                "ai_image_generate SUCCESS model=%s delivery=url bytes=%d",
+                model, len(image_bytes),
+            )
+            return image_bytes
 
-    except (APITimeoutError, RateLimitError, APIConnectionError, APIError):
+    except (APITimeoutError, RateLimitError, APIConnectionError) as exc:
+        logger.warning(
+            "ai_image_generate TRANSIENT_ERROR model=%s error_type=%s error=%s",
+            model, type(exc).__name__, str(exc)[:200],
+        )
+        return None
+    except APIError as exc:
+        logger.warning(
+            "ai_image_generate API_ERROR model=%s status=%s error=%s",
+            model, getattr(exc, "status_code", "?"), str(exc)[:200],
+        )
         return None
     except Exception:
-        logger.exception("ai_image_generate unexpected error model=%s", model)
+        logger.exception("ai_image_generate UNEXPECTED_ERROR model=%s", model)
         return None

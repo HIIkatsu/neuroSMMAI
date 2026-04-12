@@ -2,11 +2,8 @@
 topic_utils.py — единый источник правды для тематических семей, политик генерации,
 image-policy и news-трансформации.
 
-Раньше логика была дублирована:
-  - content.py: _topic_family(topic, prompt) — своя версия
-  - image_search.py: detect_topic_family(query) — своя версия с другими терминами
-
-Теперь все используют эту библиотеку. Расхождений нет.
+Все модули (content.py, image_prompts.py, resolved_subject.py и др.)
+используют эту библиотеку. Расхождений нет.
 """
 from __future__ import annotations
 

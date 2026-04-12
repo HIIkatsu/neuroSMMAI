@@ -178,12 +178,8 @@ class Config:
     api_rate_limit_rpm: int = 240
     api_write_rate_limit_rpm: int = 90
 
-    hf_api_key: str = ""
-    hf_image_model: str = ""
     pexels_api_key: str = ""
     pixabay_api_key: str = ""
-    unsplash_access_key: str = ""
-    unsplash_app_name: str = ""
 
     # Web auth (standalone web mode alongside Telegram Mini App)
     web_auth_secret: str = ""       # JWT signing secret; auto-generated if empty
@@ -283,12 +279,8 @@ def load_config() -> Config:
     api_rate_limit_rpm = max(30, _env_int("API_RATE_LIMIT_RPM", default=240))
     api_write_rate_limit_rpm = max(20, _env_int("API_WRITE_RATE_LIMIT_RPM", default=90))
 
-    hf_api_key = _env_str("HF_API_KEY")
-    hf_image_model = _env_str("HF_IMAGE_MODEL")
     pexels_api_key = _env_str("PEXELS_API_KEY")
     pixabay_api_key = _env_str("PIXABAY_API_KEY")
-    unsplash_access_key = _env_str("UNSPLASH_ACCESS_KEY")
-    unsplash_app_name = _env_str("UNSPLASH_APP_NAME")
 
     payment_mode = _env_str("PAYMENT_MODE", default="test").lower()
     if payment_mode not in ("test", "production"):
@@ -352,12 +344,8 @@ def load_config() -> Config:
         enforce_origin_check=enforce_origin_check,
         api_rate_limit_rpm=api_rate_limit_rpm,
         api_write_rate_limit_rpm=api_write_rate_limit_rpm,
-        hf_api_key=hf_api_key,
-        hf_image_model=hf_image_model,
         pexels_api_key=pexels_api_key,
         pixabay_api_key=pixabay_api_key,
-        unsplash_access_key=unsplash_access_key,
-        unsplash_app_name=unsplash_app_name,
         yoo_shop_id=yoo_shop_id,
         yoo_secret_key=yoo_secret_key,
         yoo_return_url=yoo_return_url,

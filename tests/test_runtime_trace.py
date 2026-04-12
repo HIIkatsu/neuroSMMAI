@@ -2,7 +2,7 @@
 
 Validates that:
 1. All text generation flows go through the canonical ``generate_post_bundle``
-2. All image flows go through the canonical ``resolve_post_image`` → ``find_image``
+2. All image flows go through the canonical ``resolve_post_image`` → ``image_service.get_image``
 3. Channel label responses prefer ``display_label`` over raw target/id
 4. Runtime tracing emits structured trace events
 5. No stale fallback to legacy prompt builders
@@ -223,19 +223,19 @@ class TestCanonicalTextGenerationPath(unittest.TestCase):
 class TestCanonicalImagePath(unittest.TestCase):
     """Verify editor and autopost image selection go through canonical path."""
 
-    def test_resolve_post_image_calls_gateway(self):
-        """actions.resolve_post_image must call get_post_image from image_gateway."""
+    def test_resolve_post_image_calls_image_service(self):
+        """actions.resolve_post_image must call get_image from image_service."""
         import actions
         import inspect
         source = inspect.getsource(actions.resolve_post_image)
-        self.assertIn("get_post_image", source)
+        self.assertIn("get_image", source)
 
-    def test_generate_post_payload_uses_resolve_post_image(self):
-        """actions.generate_post_payload must call resolve_post_image for image search."""
+    def test_generate_post_payload_uses_image_service(self):
+        """actions.generate_post_payload must use the image service for image generation."""
         import actions
         import inspect
         source = inspect.getsource(actions.generate_post_payload)
-        self.assertIn("resolve_post_image", source)
+        self.assertIn("get_image", source)
 
     def test_resolve_post_image_has_trace_id_param(self):
         """resolve_post_image should accept trace_id for end-to-end tracing."""
@@ -244,14 +244,15 @@ class TestCanonicalImagePath(unittest.TestCase):
         sig = inspect.signature(actions.resolve_post_image)
         self.assertIn("trace_id", sig.parameters)
 
-    def test_image_pipeline_single_path(self):
-        """image_gateway.get_post_image should be the single entry point."""
-        import image_gateway
-        self.assertTrue(hasattr(image_gateway, 'get_post_image'))
-        # Verify it delegates to run_pipeline_v3
+    def test_image_service_single_entry_point(self):
+        """image_service.get_image should be the single entry point."""
+        import image_service
+        self.assertTrue(hasattr(image_service, 'get_image'))
         import inspect
-        source = inspect.getsource(image_gateway.get_post_image)
-        self.assertIn("run_pipeline_v3", source)
+        source = inspect.getsource(image_service)
+        # The module must use generate_image and search_stock_photo internally
+        self.assertIn("_try_generation", source)
+        self.assertIn("_try_fallback", source)
 
 
 # ---------------------------------------------------------------------------
