@@ -2,7 +2,7 @@
 
 Validates that:
 1. All text generation flows go through the canonical ``generate_post_bundle``
-2. All image flows go through the canonical ``resolve_post_image`` → ``find_image``
+2. All image flows go through the canonical ``resolve_post_image`` → ``image_service.get_image``
 3. Channel label responses prefer ``display_label`` over raw target/id
 4. Runtime tracing emits structured trace events
 5. No stale fallback to legacy prompt builders

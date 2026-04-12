@@ -405,3 +405,308 @@ class TestValidateImage(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# 9. Strengthened critical-path tests
+# ---------------------------------------------------------------------------
+class TestGenerationValidationRejection(unittest.TestCase):
+    """Generation that produces invalid bytes must be rejected, not silently accepted."""
+
+    def test_generation_returns_invalid_format_rejected(self):
+        """If AI returns non-image bytes, flow should reject and try fallback."""
+        from image_service import get_image
+
+        non_image_bytes = b"NOT_AN_IMAGE_JUST_TEXT" * 200  # >1KB but not image
+
+        with patch("image_service.generate_image", new_callable=AsyncMock) as mock_gen, \
+             patch("image_service.search_stock_photo", new_callable=AsyncMock) as mock_search:
+            mock_gen.return_value = non_image_bytes
+            mock_search.return_value = ""
+            result = asyncio.run(
+                get_image(title="Test", api_key="test-key")
+            )
+        # Should fail because validation rejects non-image bytes
+        self.assertEqual(result.source, "none")
+        self.assertTrue(result.failure_reason)
+
+    def test_generation_returns_tiny_data_rejected(self):
+        """If AI returns tiny data (<1KB), should be rejected."""
+        from image_service import get_image
+
+        tiny_png = b"\x89PNG" + b"\x00" * 10  # Valid magic but too small
+
+        with patch("image_service.generate_image", new_callable=AsyncMock) as mock_gen, \
+             patch("image_service.search_stock_photo", new_callable=AsyncMock) as mock_search:
+            mock_gen.return_value = tiny_png
+            mock_search.return_value = ""
+            result = asyncio.run(
+                get_image(title="Test", api_key="test-key")
+            )
+        self.assertEqual(result.source, "none")
+
+    def test_generation_exception_triggers_fallback(self):
+        """If generation raises, should fall through to fallback."""
+        from image_service import get_image
+
+        with patch("image_service.generate_image", new_callable=AsyncMock) as mock_gen, \
+             patch("image_service.search_stock_photo", new_callable=AsyncMock) as mock_search:
+            mock_gen.side_effect = RuntimeError("Provider down")
+            mock_search.return_value = "https://images.pexels.com/photos/999/fallback.jpeg"
+            result = asyncio.run(
+                get_image(title="Test", api_key="test-key")
+            )
+        self.assertEqual(result.source, "fallback")
+        self.assertTrue(result.media_ref)
+
+
+class TestStorageResultPath(unittest.TestCase):
+    """Storage must return correct media refs for the generated-images serving path."""
+
+    def test_storage_ref_format(self):
+        """Saved image ref must start with /generated-images/ and include owner_id."""
+        from image_storage import save_generated_image, GENERATED_DIR
+        data = b"\xff\xd8\xff" + b"\x00" * 2000  # JPEG
+        ref = save_generated_image(data, owner_id=42)
+        self.assertTrue(ref.startswith("/generated-images/"), f"Bad ref format: {ref}")
+        self.assertIn("42", ref)
+        self.assertTrue(ref.endswith(".jpg"))
+        # Cleanup
+        filename = ref.split("/")[-1]
+        (GENERATED_DIR / filename).unlink(missing_ok=True)
+
+    def test_storage_no_owner_uses_gen_prefix(self):
+        """Without owner_id, filename uses gen_ prefix."""
+        from image_storage import save_generated_image, GENERATED_DIR
+        data = b"\x89PNG" + b"\x00" * 2000
+        ref = save_generated_image(data, owner_id=None)
+        self.assertTrue(ref.startswith("/generated-images/gen_"))
+        filename = ref.split("/")[-1]
+        (GENERATED_DIR / filename).unlink(missing_ok=True)
+
+    def test_image_exists_check(self):
+        """image_exists should correctly detect saved files."""
+        from image_storage import save_generated_image, image_exists, GENERATED_DIR
+        data = b"\x89PNG" + b"\x00" * 2000
+        ref = save_generated_image(data, owner_id=77)
+        self.assertTrue(image_exists(ref))
+        # Cleanup
+        filename = ref.split("/")[-1]
+        (GENERATED_DIR / filename).unlink(missing_ok=True)
+        self.assertFalse(image_exists(ref))
+
+
+class TestCallerIntegration(unittest.TestCase):
+    """Verify that actions.py caller functions are correctly wired."""
+
+    def test_resolve_post_image_exists_and_is_async(self):
+        """actions.resolve_post_image must exist and be async."""
+        from actions import resolve_post_image
+        import inspect
+        self.assertTrue(inspect.iscoroutinefunction(resolve_post_image))
+
+    def test_resolve_post_image_signature_has_mode(self):
+        """resolve_post_image must accept mode parameter."""
+        from actions import resolve_post_image
+        import inspect
+        sig = inspect.signature(resolve_post_image)
+        self.assertIn("mode", sig.parameters)
+
+    def test_resolve_post_image_calls_get_image(self):
+        """resolve_post_image should delegate to image_service.get_image."""
+        import inspect
+        import actions
+        source = inspect.getsource(actions.resolve_post_image)
+        self.assertIn("get_image", source)
+
+    def test_generate_post_payload_imports_image_service(self):
+        """actions.py must import from image_service, not deleted modules."""
+        import actions
+        import inspect
+        source = inspect.getsource(actions)
+        self.assertIn("from image_service import", source)
+        self.assertNotIn("from image_gateway", source)
+        self.assertNotIn("from image_search", source)
+        self.assertNotIn("from image_pipeline", source)
+
+    def test_scheduler_imports_validate_image(self):
+        """scheduler_service.py must import validate_image from image_service."""
+        with open(os.path.join(os.path.dirname(__file__), "..", "scheduler_service.py")) as f:
+            source = f.read()
+        self.assertIn("from image_service import validate_image", source)
+
+    def test_miniapp_imports_trigger_unsplash(self):
+        """miniapp_routes_content.py must import trigger_unsplash_download from image_service."""
+        with open(os.path.join(os.path.dirname(__file__), "..", "miniapp_routes_content.py")) as f:
+            source = f.read()
+        self.assertIn("from image_service import trigger_unsplash_download", source)
+
+
+class TestFallbackBadUrlRejected(unittest.TestCase):
+    """Fallback URLs that fail validation should not be returned."""
+
+    def test_fallback_avatar_url_rejected(self):
+        """Fallback returning avatar URL should fail validation."""
+        from image_service import get_image
+
+        with patch("image_service.generate_image", new_callable=AsyncMock) as mock_gen, \
+             patch("image_service.search_stock_photo", new_callable=AsyncMock) as mock_search:
+            mock_gen.return_value = None
+            mock_search.return_value = "https://example.com/avatar/photo.jpg"
+            result = asyncio.run(
+                get_image(title="Test", api_key="test-key")
+            )
+        # Avatar URL fails validation — should be rejected
+        self.assertEqual(result.source, "none")
+
+    def test_fallback_empty_url_gives_no_result(self):
+        """Fallback returning empty URL should give no result."""
+        from image_service import get_image
+
+        with patch("image_service.generate_image", new_callable=AsyncMock) as mock_gen, \
+             patch("image_service.search_stock_photo", new_callable=AsyncMock) as mock_search:
+            mock_gen.return_value = None
+            mock_search.return_value = ""
+            result = asyncio.run(
+                get_image(title="Test", api_key="test-key")
+            )
+        self.assertEqual(result.source, "none")
+
+
+class TestAiImageGenerateContract(unittest.TestCase):
+    """ai_client.ai_image_generate contract tests."""
+
+    def test_no_api_key_returns_none(self):
+        from ai_client import ai_image_generate
+        result = asyncio.run(ai_image_generate("", "model", "prompt"))
+        self.assertIsNone(result)
+
+    def test_no_model_returns_none(self):
+        from ai_client import ai_image_generate
+        result = asyncio.run(ai_image_generate("key", "", "prompt"))
+        self.assertIsNone(result)
+
+    def test_no_prompt_returns_none(self):
+        from ai_client import ai_image_generate
+        result = asyncio.run(ai_image_generate("key", "model", ""))
+        self.assertIsNone(result)
+
+    def test_requests_b64_json_format(self):
+        """Should request b64_json response_format to avoid URL round-trip."""
+        from ai_client import ai_image_generate
+        import inspect
+        source = inspect.getsource(ai_image_generate)
+        self.assertIn("b64_json", source)
+
+
+class TestEndToEndGenerationSuccess(unittest.TestCase):
+    """Full end-to-end: generation produces valid image → stored → returned."""
+
+    def test_full_flow_png(self):
+        from image_service import get_image
+
+        fake_png = b"\x89PNG" + os.urandom(3000)  # Random valid-looking PNG bytes
+
+        with patch("image_service.generate_image", new_callable=AsyncMock) as mock_gen:
+            mock_gen.return_value = fake_png
+            result = asyncio.run(
+                get_image(
+                    title="Beautiful landscape",
+                    body="Mountain lake at sunset",
+                    channel_topic="Nature photography",
+                    api_key="test-key",
+                    owner_id=123,
+                    mode="editor",
+                )
+            )
+
+        self.assertEqual(result.source, "generation")
+        self.assertTrue(result.is_generated)
+        self.assertTrue(result.media_ref.startswith("/generated-images/"))
+        self.assertTrue(result.family)  # Family detection works
+        self.assertTrue(len(result.prompt_used) > 10)
+        self.assertEqual(result.failure_reason, "")
+
+        # Verify file exists on disk
+        from image_storage import image_exists, GENERATED_DIR
+        self.assertTrue(image_exists(result.media_ref))
+
+        # Cleanup
+        filename = result.media_ref.split("/")[-1]
+        (GENERATED_DIR / filename).unlink(missing_ok=True)
+
+    def test_full_flow_jpeg(self):
+        from image_service import get_image
+
+        fake_jpeg = b"\xff\xd8\xff" + os.urandom(3000)
+
+        with patch("image_service.generate_image", new_callable=AsyncMock) as mock_gen:
+            mock_gen.return_value = fake_jpeg
+            result = asyncio.run(
+                get_image(
+                    title="Рецепт блинов",
+                    body="Тонкие блины на молоке",
+                    api_key="test-key",
+                    owner_id=456,
+                )
+            )
+
+        self.assertEqual(result.source, "generation")
+        self.assertTrue(result.media_ref.endswith(".jpg"))
+        self.assertEqual(result.family, "food")
+
+        # Cleanup
+        from image_storage import GENERATED_DIR
+        filename = result.media_ref.split("/")[-1]
+        (GENERATED_DIR / filename).unlink(missing_ok=True)
+
+
+class TestNoDeletedModuleReferences(unittest.TestCase):
+    """Verify the new image system has zero references to deleted modules."""
+
+    _DELETED_MODULES = [
+        "image_gateway", "image_search", "image_pipeline",
+        "image_pipeline_v3", "image_ranker", "ai_image_generator",
+    ]
+
+    def _check_file(self, filepath):
+        with open(filepath) as f:
+            content = f.read()
+        for mod in self._DELETED_MODULES:
+            # Only check imports, not comments
+            for line in content.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("#"):
+                    continue
+                if f"from {mod}" in stripped or f"import {mod}" in stripped:
+                    self.fail(f"{filepath} has import of deleted module: {mod!r} in: {stripped!r}")
+
+    def test_image_service_clean(self):
+        self._check_file(os.path.join(os.path.dirname(__file__), "..", "image_service.py"))
+
+    def test_image_generation_clean(self):
+        self._check_file(os.path.join(os.path.dirname(__file__), "..", "image_generation.py"))
+
+    def test_image_prompts_clean(self):
+        self._check_file(os.path.join(os.path.dirname(__file__), "..", "image_prompts.py"))
+
+    def test_image_validation_clean(self):
+        self._check_file(os.path.join(os.path.dirname(__file__), "..", "image_validation.py"))
+
+    def test_image_storage_clean(self):
+        self._check_file(os.path.join(os.path.dirname(__file__), "..", "image_storage.py"))
+
+    def test_image_history_clean(self):
+        self._check_file(os.path.join(os.path.dirname(__file__), "..", "image_history.py"))
+
+    def test_image_fallback_clean(self):
+        self._check_file(os.path.join(os.path.dirname(__file__), "..", "image_fallback.py"))
+
+    def test_actions_clean(self):
+        self._check_file(os.path.join(os.path.dirname(__file__), "..", "actions.py"))
+
+    def test_scheduler_service_clean(self):
+        self._check_file(os.path.join(os.path.dirname(__file__), "..", "scheduler_service.py"))
+
+    def test_miniapp_routes_content_clean(self):
+        self._check_file(os.path.join(os.path.dirname(__file__), "..", "miniapp_routes_content.py"))

@@ -193,11 +193,16 @@ async def validate_image(
 
 
 async def trigger_unsplash_download(download_location: str) -> bool:
-    """No-op stub. Unsplash integration has been removed.
+    """No-op stub: Unsplash integration has been removed.
 
-    Kept as a no-op for caller compatibility:
-    miniapp_routes_content.py calls this on draft create/update/publish.
+    This stub exists ONLY because miniapp_routes_content.py calls it on
+    draft create/update/publish. Removing it would break those callers.
+    The stub always returns False and logs explicitly.
     """
+    logger.debug(
+        "IMAGE_UNSPLASH_NOOP download_location=%r reason=unsplash_removed",
+        (download_location or "")[:80],
+    )
     return False
 
 

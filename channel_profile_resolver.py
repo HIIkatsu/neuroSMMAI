@@ -9,7 +9,7 @@ channel_profile_resolver.py — центральный резолвер проф
       ↓
   resolve_channel_policy(owner_id) → ChannelPolicy
       ↓
-  content.py / image_search.py / news_service.py / scheduler_service.py / actions.py
+  content.py / image_service.py / news_service.py / scheduler_service.py / actions.py
 """
 from __future__ import annotations
 
@@ -611,24 +611,3 @@ def build_news_family_block(policy: ChannelPolicy, news_title: str = "", news_to
         parts.append(f"Аудитория канала: {policy.audience_type}")
 
     return "\n\n".join(parts)
-
-
-def build_image_search_context(policy: ChannelPolicy, post_topic: str = "") -> dict[str, Any]:
-    """
-    Builds image search context from the channel policy.
-    Used by image_search.py to get family-appropriate queries and filters.
-    """
-    queries = list(policy.image_queries)
-
-    # Add topic-specific query if topic is available
-    if post_topic or policy.topic_raw:
-        base = post_topic or policy.topic_raw
-        queries.insert(0, f"{base} editorial photography professional")
-
-    return {
-        "family": policy.topic_family,
-        "queries": queries,
-        "allowed_classes": policy.allowed_visual_classes,
-        "blocked_classes": policy.forbidden_visual_classes,
-        "visual_policy": policy.visual_policy,
-    }

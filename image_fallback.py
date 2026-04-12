@@ -4,8 +4,7 @@ image_fallback.py — Stock photo fallback when AI generation fails.
 This module is ONLY used when generation fails completely.
 It is NOT the main image path — see image_generation.py for that.
 
-Uses Pexels and Pixabay via image_providers.py (which is a live, non-deleted
-utility for stock photo API access).
+Searches Pexels and Pixabay directly via their public APIs.
 """
 from __future__ import annotations
 
