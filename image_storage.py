@@ -50,15 +50,23 @@ def save_generated_image(
     ext = detect_image_extension(image_bytes)
 
     # Build filename: {owner_id}_{content_hash}.{ext}
+    # All components are safe: owner_id is int, content_hash is hex, ext is from fixed set
     content_hash = hashlib.sha256(image_bytes).hexdigest()[:16]
     ts = int(time.time())
 
     if owner_id:
-        filename = f"{owner_id}_{content_hash}_{ts}{ext}"
+        filename = f"{int(owner_id)}_{content_hash}_{ts}{ext}"
     else:
         filename = f"gen_{content_hash}_{ts}{ext}"
 
+    # Sanitize: ensure no path traversal by stripping directory separators
+    filename = filename.replace("/", "").replace("\\", "").replace("..", "")
     filepath = GENERATED_DIR / filename
+
+    # Verify the resolved path stays within GENERATED_DIR
+    if not filepath.resolve().is_relative_to(GENERATED_DIR.resolve()):
+        logger.error("IMAGE_STORAGE_PATH_ESCAPE file=%s", filename)
+        return ""
 
     try:
         filepath.write_bytes(image_bytes)
