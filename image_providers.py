@@ -389,7 +389,7 @@ async def collect_candidates(
       2. Pixabay (secondary) — always queried
       3. Openverse (editor-only) — ONLY in editor mode + feature flag
 
-    Returns all candidates unsorted. Scoring/ranking is done by image_ranker.
+    Returns all candidates unsorted. Scoring/ranking is done by the caller.
     """
     used_fps = prepare_used_refs(used_refs)
     all_candidates: list[RawCandidate] = []

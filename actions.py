@@ -19,7 +19,6 @@ from image_service import get_image, validate_image, trigger_unsplash_download, 
 from image_prompts import build_generation_prompt
 from runtime_trace import new_trace_id, trace_text_generation, trace_image_selection, TraceTimer, debug_fields, is_debug_trace_enabled
 from safe_send import safe_send, safe_send_document, safe_send_photo, safe_send_video
-from topic_utils import detect_topic_family, detect_subfamily, get_family_image_queries, get_subfamily_image_queries
 from resolved_subject import resolve_post_subject, check_subject_alignment
 
 
@@ -55,7 +54,7 @@ def _is_local_media(media_ref: str) -> bool:
     media_ref = (media_ref or "").strip()
     if not media_ref:
         return False
-    # Absolute filesystem paths (e.g. returned by generate_ai_image) are always local.
+    # Absolute filesystem paths (e.g. returned by image generation) are always local.
     # They must never be forwarded to Telegram as an HTTP URL.
     if os.path.isabs(media_ref):
         return True
@@ -391,82 +390,6 @@ def generate_hashtags(topic: str, text: str) -> str:
 
 # ---------- КАРТИНКИ ----------
 
-
-_SERVICE_STOPWORDS = {
-    "что", "когда", "после", "перед", "тогда", "просто", "очень", "сейчас", "снова", "через", "почему",
-    "который", "которая", "которые", "делает", "делают", "человек", "люди", "обычно", "часто", "нужно",
-    "тема", "пост", "новый", "сильный", "полезный", "понятный", "спокойный", "результат", "польза",
-}
-
-
-def _query_family(text: str) -> str:
-    """Delegate to the canonical topic family detector from topic_utils."""
-    return detect_topic_family(text or "")
-
-
-def _extract_visual_tokens(*parts: str, limit: int = 8) -> list[str]:
-    text = re.sub(r"\s+", " ", " ".join(str(x or "") for x in parts)).strip().lower()
-    words = re.findall(r"[a-z0-9][a-z0-9+-]{2,}", text)
-    uniq: list[str] = []
-    for w in words:
-        if len(w) < 4:
-            continue
-        if w in _SERVICE_STOPWORDS:
-            continue
-        if w not in uniq:
-            uniq.append(w)
-    return uniq[:limit]
-
-
-def _family_visual_seed(family: str, text: str) -> list[str]:
-    """Build base visual semantic chunks for image search.
-
-    Delegates to centralized topic_utils for family and subfamily queries.
-    No more duplicated per-family logic here — topic_utils is the single source of truth.
-    """
-    subfamily = detect_subfamily(family, text)
-    # Subfamily-specific queries take priority when available
-    if subfamily:
-        sub_queries = get_subfamily_image_queries(family, subfamily)
-        if sub_queries:
-            return sub_queries[:3]
-    # Fall back to family-level image queries from topic_utils
-    family_queries = get_family_image_queries(family)
-    return family_queries[:3] if family_queries else ["professional editorial photo"]
-
-
-def _visual_search_query(query: str, topic: str = "", ai_prompt: str = "", post_text: str = "") -> str:
-    primary = re.sub(r"\s+", " ", " ".join(x for x in [query, ai_prompt] if x)).strip()
-    secondary = re.sub(r"\s+", " ", " ".join(x for x in [topic, post_text] if x)).strip()
-    source = primary or secondary
-    if not source:
-        return ""
-
-    family = _query_family(" ".join([primary, secondary]))
-    base_chunks = _family_visual_seed(family, " ".join([primary, secondary]))
-    semantic_tokens = _extract_visual_tokens(topic, ai_prompt, query, post_text, limit=8)
-
-    if family == "massage":
-        semantic_tokens = [t for t in semantic_tokens if t not in {"массаж", "massage", "полезный", "сильный"}]
-    if family == "cars":
-        semantic_tokens = [t for t in semantic_tokens if t not in {"машина", "машины", "авто", "car", "automotive"}]
-
-    chunks = []
-    for part in base_chunks + semantic_tokens:
-        if part and part not in chunks:
-            chunks.append(part)
-
-    out = re.sub(r"\s+", " ", " ".join(chunks)).strip()
-    # Strip any non-Latin tokens that may have leaked in before sending to stock photo APIs
-    out = " ".join(w for w in out.split() if _LATIN_TOKEN_RE.match(w))
-    return out[:180]
-
-def _compose_visual_query(*parts: str) -> str:
-    merged = " ".join(str(x or "") for x in parts)
-    merged = re.sub(r"\s+", " ", merged).strip()
-    # Strip non-Latin tokens before using in image API queries
-    merged = " ".join(w for w in merged.split() if _LATIN_TOKEN_RE.match(w))
-    return merged[:220]
 async def resolve_post_image(
     query: str,
     *,

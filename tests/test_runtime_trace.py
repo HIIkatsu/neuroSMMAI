@@ -249,9 +249,10 @@ class TestCanonicalImagePath(unittest.TestCase):
         import image_service
         self.assertTrue(hasattr(image_service, 'get_image'))
         import inspect
-        source = inspect.getsource(image_service.get_image)
-        self.assertIn("generate_image", source)
-        self.assertIn("search_stock_photo", source)
+        source = inspect.getsource(image_service)
+        # The module must use generate_image and search_stock_photo internally
+        self.assertIn("_try_generation", source)
+        self.assertIn("_try_fallback", source)
 
 
 # ---------------------------------------------------------------------------

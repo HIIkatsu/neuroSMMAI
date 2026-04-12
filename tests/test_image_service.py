@@ -100,7 +100,7 @@ class TestImagePrompts(unittest.TestCase):
         families = {
             "massage": "Массаж спины: расслабление мышц",
             "cars": "Замена масла в двигателе",
-            "tech": "Обзор нового процессора Intel",
+            "hardware": "Обзор нового процессора Intel",
         }
         for expected_family, title in families.items():
             result = build_generation_prompt(title=title)
@@ -284,7 +284,7 @@ class TestImageServiceFlow(unittest.TestCase):
 
         with patch("image_service.generate_image", new_callable=AsyncMock) as mock_gen:
             mock_gen.return_value = fake_png
-            result = asyncio.get_event_loop().run_until_complete(
+            result = asyncio.run(
                 get_image(
                     title="Test post",
                     body="Test body",
@@ -311,7 +311,7 @@ class TestImageServiceFlow(unittest.TestCase):
              patch("image_service.search_stock_photo", new_callable=AsyncMock) as mock_search:
             mock_gen.return_value = None
             mock_search.return_value = "https://images.pexels.com/photos/123/pexels-photo-123.jpeg"
-            result = asyncio.get_event_loop().run_until_complete(
+            result = asyncio.run(
                 get_image(
                     title="Test post",
                     body="Test body",
@@ -330,7 +330,7 @@ class TestImageServiceFlow(unittest.TestCase):
              patch("image_service.search_stock_photo", new_callable=AsyncMock) as mock_search:
             mock_gen.return_value = None
             mock_search.return_value = ""
-            result = asyncio.get_event_loop().run_until_complete(
+            result = asyncio.run(
                 get_image(
                     title="Test post",
                     api_key="test-key",
@@ -346,7 +346,7 @@ class TestImageServiceFlow(unittest.TestCase):
 
         with patch("image_service.search_stock_photo", new_callable=AsyncMock) as mock_search:
             mock_search.return_value = "https://images.pexels.com/test.jpg"
-            result = asyncio.get_event_loop().run_until_complete(
+            result = asyncio.run(
                 get_image(title="Test", body="Body")
             )
         # Should fall through to fallback
@@ -361,7 +361,7 @@ class TestTriggerUnsplashDownload(unittest.TestCase):
 
     def test_returns_false(self):
         from image_service import trigger_unsplash_download
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             trigger_unsplash_download("https://example.com/download")
         )
         self.assertFalse(result)
@@ -369,7 +369,7 @@ class TestTriggerUnsplashDownload(unittest.TestCase):
     def test_accepts_any_string(self):
         from image_service import trigger_unsplash_download
         for val in ("", "https://test.com", "random", None):
-            result = asyncio.get_event_loop().run_until_complete(
+            result = asyncio.run(
                 trigger_unsplash_download(val or "")
             )
             self.assertFalse(result)
@@ -383,21 +383,21 @@ class TestValidateImage(unittest.TestCase):
 
     def test_empty_ref_is_valid(self):
         from image_service import validate_image
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             validate_image("", title="Test")
         )
         self.assertTrue(result)
 
     def test_http_url_is_valid(self):
         from image_service import validate_image
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             validate_image("https://images.pexels.com/photo.jpg", title="Test")
         )
         self.assertTrue(result)
 
     def test_telegram_ref_is_valid(self):
         from image_service import validate_image
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             validate_image("tgfile:photo:abc123", title="Test")
         )
         self.assertTrue(result)

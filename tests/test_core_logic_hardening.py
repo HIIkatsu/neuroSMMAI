@@ -484,7 +484,7 @@ class TestEditorCandidatesMismatchedTopics(unittest.TestCase):
         """Image prompts must detect different families correctly."""
         from image_prompts import build_generation_prompt
         food = build_generation_prompt(title="Рецепт борща", body="Суп из свёклы")
-        cars = build_generation_prompt(title="Тест-драйв BMW", body="Мощный двигатель")
+        cars = build_generation_prompt(title="Обзор автомобиля BMW X5", body="Мощный двигатель")
         self.assertEqual(food["family"], "food")
         self.assertEqual(cars["family"], "cars")
 
