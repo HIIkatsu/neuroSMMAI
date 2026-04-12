@@ -17,6 +17,15 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any
 
+from content_modes import (
+    detect_content_mode,
+    get_mode_text_rules,
+    get_mode_creativity,
+    get_mode_reject_threshold,
+    is_factual_strict,
+    MODE_GENERIC,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -121,6 +130,7 @@ class GenerationSpec:
 
     # --- Generation context ---
     generation_mode: str = "manual"     # "manual" | "autopost" | "news"
+    content_mode: str = "generic"       # detected content mode (howto, food_cooking, news_factual, etc.)
 
     # --- Topic separation ---
     primary_topic: str = ""             # resolved topic for THIS post
@@ -256,6 +266,17 @@ def build_generation_spec(
     # --- Factual mode ---
     factual_mode = "cautious"  # default safe
 
+    # --- Content mode detection ---
+    content_mode = detect_content_mode(
+        title=rq,
+        body="",
+        channel_topic=ct,
+        generation_mode=generation_mode,
+    )
+    # Override factual_mode based on content mode
+    if is_factual_strict(content_mode):
+        factual_mode = "strict"
+
     # --- Opener dedup ---
     recent_openers = recent_opener_types or []
     # Forbid archetypes used in last 3 posts
@@ -286,6 +307,7 @@ def build_generation_spec(
 
     return GenerationSpec(
         generation_mode=generation_mode,
+        content_mode=content_mode,
         primary_topic=primary_topic,
         source_prompt=rq,
         request_subject=request_subject,

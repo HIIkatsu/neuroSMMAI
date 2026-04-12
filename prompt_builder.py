@@ -23,6 +23,11 @@ from generation_spec import (
     OPENING_ARCHETYPES,
     _PERSONAL_INPUT_KEYWORDS,
 )
+from content_modes import (
+    get_mode_prompt_hint,
+    is_factual_strict,
+    is_factual_cautious,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -64,14 +69,33 @@ def _build_voice_block(spec: GenerationSpec) -> str:
 
 
 def _build_factual_safety_block(spec: GenerationSpec) -> str:
-    """Factual safety constraints — universal, not niche-specific."""
+    """Factual safety constraints — mode-aware, not one-size-fits-all."""
     parts = ["ФАКТИЧЕСКАЯ БЕЗОПАСНОСТЬ:"]
+
+    # --- Mode-specific anti-hallucination rules ---
+    mode_hint = get_mode_prompt_hint(spec.content_mode)
+    if mode_hint:
+        parts.append(f"\n{mode_hint}")
+
+    # --- Universal rules (always apply) ---
     parts.append("- Если не уверен в факте — пиши осторожнее: «часто бывает», «по опыту», а НЕ «доказано» или «всегда»")
     parts.append("- ЗАПРЕЩЕНО: выдуманные проценты, статистика, исследования, кейсы клиентов")
     parts.append("- ЗАПРЕЩЕНО: точные технические/медицинские/юридические/финансовые диагнозы без явного основания")
     parts.append("- ЗАПРЕЩЕНО: «учёные доказали», «по статистике», «исследования показывают» без конкретного источника")
     parts.append("- Если тема незнакомая — пиши на уровне здравого смысла, без деталей, в которых не уверен")
     parts.append("- Лучше общее верное утверждение, чем конкретное выдуманное")
+
+    # --- Strict modes get additional restrictions ---
+    if is_factual_strict(spec.content_mode):
+        parts.append("\nДОПОЛНИТЕЛЬНЫЕ ОГРАНИЧЕНИЯ (строгий фактический режим):")
+        parts.append("- ЗАПРЕЩЕНО: любые числа, проценты, даты — если их нет в предоставленных фактах")
+        parts.append("- ЗАПРЕЩЕНО: «по данным...», «согласно...», «департамент...», «ведомство...» — без реального источника")
+        parts.append("- Если фактов нет — пиши как общее наблюдение: «по ощущениям», «обычно», «как правило»")
+        parts.append("- Предпочитай осторожные формулировки категоричным утверждениям")
+    elif is_factual_cautious(spec.content_mode):
+        parts.append("\nУМЕРЕННАЯ ОСТОРОЖНОСТЬ:")
+        parts.append("- Практические советы допустимы, но без выдуманной статистики")
+        parts.append("- Пиши на уровне здравого смысла и общепринятых рекомендаций")
 
     if spec.author_forbidden_claims:
         parts.append(f"- НЕЛЬЗЯ приписывать автору: {spec.author_forbidden_claims}")
