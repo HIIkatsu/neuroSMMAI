@@ -60,6 +60,7 @@ async def get_image(
     owner_id: int | None = None,
     mode: str = MODE_EDITOR,
     used_refs: set[str] | None = None,
+    content_mode: str = "",
 ) -> ImageResult:
     """Generate or find an image for a post.
 
@@ -77,6 +78,7 @@ async def get_image(
         owner_id: Owner ID for storage and access control
         mode: "editor" or "autopost"
         used_refs: Set of recently used image refs to avoid
+        content_mode: Detected content mode for mode-aware prompt building
 
     Returns:
         ImageResult with media_ref, source, and metadata
@@ -89,6 +91,7 @@ async def get_image(
         body=body,
         channel_topic=channel_topic,
         llm_image_prompt=llm_image_prompt,
+        content_mode=content_mode,
     )
     prompt = prompt_data["prompt"]
     family = prompt_data["family"]

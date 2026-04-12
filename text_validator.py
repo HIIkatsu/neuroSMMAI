@@ -79,6 +79,14 @@ _FAKE_NUMERIC_PATTERNS: list[tuple[re.Pattern, str]] = [
     # "по данным страховых компаний/банков/аналитиков"
     (re.compile(r"по\s+данным\s+(?:страховых\s+компаний|банков|автосалонов|сервисных\s+центров|производителей)", re.I),
      "fabricated_data_authority"),
+    # Municipal/government authority fabrication — city/transport mode critical
+    (re.compile(r"(?:по данным|согласно|по решению)\s+(?:департамент|управлени|администрац|мэри|комитет|министерств)", re.I),
+     "fabricated_government_reference"),
+    (re.compile(r"(?:департамент транспорта|управление транспорт|комитет по транспорт)\s+(?:решил|объявил|утвердил|сообщил|подтвердил)", re.I),
+     "fabricated_transport_department"),
+    # Fake local data — prices, tariffs, regulations without source
+    (re.compile(r"(?:тариф|стоимость проезда|цена билет|стоимость аренды)\s+(?:\w+\s+){0,3}(?:составляет|равна|достигает|выросла? до)\s+\d+", re.I),
+     "fabricated_local_tariff"),
 ]
 
 
@@ -279,6 +287,7 @@ def validate_generated_text(
     text: str,
     *,
     generation_mode: str = "manual",
+    content_mode: str = "",
     source_title: str = "",
     source_summary: str = "",
     source_facts: list[str] | None = None,
@@ -293,6 +302,7 @@ def validate_generated_text(
     Parameters:
         text: Generated text to validate
         generation_mode: "manual", "autopost", or "news"
+        content_mode: Detected content mode from content_modes.py (optional)
         source_title: News source title (news mode)
         source_summary: News source summary (news mode)
         source_facts: Extracted facts from source (news mode)
@@ -302,6 +312,23 @@ def validate_generated_text(
         recent_texts: Recent post texts for template repeat detection
         reject_threshold: Risk score threshold for rejection (default: 6)
     """
+    # Override reject_threshold if content_mode provides a stricter one
+    if content_mode:
+        try:
+            from content_modes import get_mode_reject_threshold, is_factual_strict
+            mode_threshold = get_mode_reject_threshold(content_mode)
+            if mode_threshold < reject_threshold:
+                reject_threshold = mode_threshold
+                logger.info(
+                    "TEXT_VALIDATOR_MODE_OVERRIDE content_mode=%s reject_threshold=%d",
+                    content_mode, reject_threshold,
+                )
+            # For strict factual modes, increase penalty weight on authority claims
+            _strict_mode = is_factual_strict(content_mode)
+        except ImportError:
+            _strict_mode = False
+    else:
+        _strict_mode = False
     result = TextValidationResult()
 
     if not text:
@@ -317,13 +344,16 @@ def validate_generated_text(
     )
     if numeric_violations:
         result.fake_numeric_claims = numeric_violations
-        risk += len(numeric_violations) * 3
+        # In strict factual modes, authority violations get higher penalty
+        base_penalty = 4 if _strict_mode else 3
+        risk += len(numeric_violations) * base_penalty
         # Categorize: authority-like reasons vs pure numeric reasons
         _authority_reasons = {
             "fabricated_authority_reference", "fabricated_study_claim",
             "fabricated_dated_study", "fabricated_industry_claim",
             "fabricated_scientific_proof", "fabricated_named_authority",
-            "fabricated_data_authority",
+            "fabricated_data_authority", "fabricated_government_reference",
+            "fabricated_transport_department", "fabricated_local_tariff",
         }
         for v in numeric_violations:
             if v in _authority_reasons:

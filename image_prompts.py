@@ -2,6 +2,7 @@
 image_prompts.py — Prompt builder for the generation-first image system.
 
 Converts post/channel/topic context into strong image generation prompts.
+Mode-aware: uses content_mode to ensure prompts match the post type.
 No dependency on any deleted image modules.
 """
 from __future__ import annotations
@@ -10,6 +11,13 @@ import logging
 import re
 
 from topic_utils import detect_topic_family, detect_subfamily
+from content_modes import (
+    detect_content_mode,
+    get_mode_image_rules,
+    check_image_prompt_relevance,
+    fix_image_prompt_for_mode,
+    MODE_GENERIC,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +54,7 @@ def build_generation_prompt(
     body: str = "",
     channel_topic: str = "",
     llm_image_prompt: str = "",
+    content_mode: str = "",
 ) -> dict[str, str]:
     """Build a structured prompt for image generation.
 
@@ -54,43 +63,73 @@ def build_generation_prompt(
         negative_prompt: str — what to avoid
         style_hint: str — photographic style guidance
         family: str — detected topic family
+        content_mode: str — detected or provided content mode
     """
     # Detect family from all available text
     combined_text = " ".join(filter(None, [title, body, channel_topic]))
     family = detect_topic_family(combined_text) if combined_text.strip() else "generic"
     style_hint = _FAMILY_STYLE.get(family, "professional editorial photography, natural lighting")
 
+    # Detect content mode if not provided
+    if not content_mode:
+        content_mode = detect_content_mode(
+            title=title, body=body, channel_topic=channel_topic,
+        )
+
+    # Get mode-specific image rules
+    mode_rules = get_mode_image_rules(content_mode)
+    mode_style = mode_rules.get("style", "")
+    mode_scene_hint = mode_rules.get("scene_hint", "")
+    mode_forbidden = mode_rules.get("forbidden_scenes", "")
+
     # Build the core prompt
     # Priority: LLM-generated prompt > title + body summary > channel topic
     if llm_image_prompt and llm_image_prompt.strip():
         core = llm_image_prompt.strip()
+        # Apply mode-aware relevance fix
+        core = fix_image_prompt_for_mode(core, title, content_mode)
     elif title:
         # Extract visual essence from title + first part of body
         body_lead = (body or "").split("\n", 1)[0].strip()[:200] if body else ""
-        core = _extract_visual_essence(title, body_lead, family)
+        core = _extract_visual_essence(title, body_lead, family, content_mode)
     elif channel_topic:
         core = f"Professional photo related to: {channel_topic}"
     else:
         core = "Professional editorial photograph"
 
-    # Compose the final prompt
-    prompt = f"{core}. {style_hint}. High quality, photorealistic, 4K."
+    # Compose the final prompt with mode-aware style
+    effective_style = mode_style if mode_style else style_hint
+    prompt = f"{core}. {effective_style}. High quality, photorealistic, 4K."
+
+    # Add scene hint for mode specificity
+    if mode_scene_hint and mode_scene_hint not in prompt:
+        prompt = f"{core}. {mode_scene_hint}. {effective_style}. High quality, photorealistic, 4K."
+
+    # Add forbidden scenes to negative prompt
+    negative = _NEGATIVE_PROMPT
+    if mode_forbidden:
+        negative = f"{_NEGATIVE_PROMPT}, {mode_forbidden}"
 
     logger.info(
-        "IMAGE_PROMPT_BUILT family=%s prompt_len=%d has_llm_prompt=%s title=%r",
-        family, len(prompt), bool(llm_image_prompt), (title or "")[:60],
+        "IMAGE_PROMPT_BUILT family=%s mode=%s prompt_len=%d has_llm_prompt=%s title=%r",
+        family, content_mode, len(prompt), bool(llm_image_prompt), (title or "")[:60],
     )
 
     return {
         "prompt": prompt,
-        "negative_prompt": _NEGATIVE_PROMPT,
-        "style_hint": style_hint,
+        "negative_prompt": negative,
+        "style_hint": effective_style,
         "family": family,
+        "content_mode": content_mode,
     }
 
 
-def _extract_visual_essence(title: str, body_lead: str, family: str) -> str:
-    """Distill title and body lead into a concise visual description."""
+def _extract_visual_essence(title: str, body_lead: str, family: str, content_mode: str = "") -> str:
+    """Distill title and body lead into a concise visual description.
+
+    Mode-aware: uses content_mode to ensure the visual description
+    matches the expected scene type.
+    """
     # Clean up: remove emojis, special chars, keep meaningful words
     clean_title = re.sub(r"[^\w\s.,!?-]", "", title or "").strip()
     clean_lead = re.sub(r"[^\w\s.,!?-]", "", body_lead or "").strip()
@@ -101,6 +140,12 @@ def _extract_visual_essence(title: str, body_lead: str, family: str) -> str:
     if len(combined) > 300:
         combined = combined[:300].rsplit(" ", 1)[0]
 
+    # Get mode-specific scene hint
+    mode_rules = get_mode_image_rules(content_mode) if content_mode else {}
+    scene_hint = mode_rules.get("scene_hint", "")
+
+    if scene_hint:
+        return f"A professional photograph depicting: {combined}. Context: {scene_hint}"
     return f"A professional photograph depicting: {combined}"
 
 

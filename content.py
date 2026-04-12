@@ -65,6 +65,7 @@ from prompt_builder import (
     build_targeted_rewrite_prompt,
 )
 from text_validator import validate_generated_text as validate_text_runtime
+from content_modes import get_mode_reject_threshold
 
 logger = logging.getLogger(__name__)
 _ERROR_PREFIXES = ("⚠️", "⏳", "🌐")
@@ -2853,8 +2854,8 @@ async def generate_post_bundle(
     )
 
     logger.info(
-        "GENERATE_POST_BUNDLE_ENTRY path=%s owner_id=%s literal_topic=%r channel_family=%s",
-        generation_path, owner_id, requested[:80], family,
+        "GENERATE_POST_BUNDLE_ENTRY path=%s owner_id=%s literal_topic=%r channel_family=%s content_mode=%s",
+        generation_path, owner_id, requested[:80], family, gen_spec.content_mode,
     )
 
     # Fetch recent post topics for anti-repetition channel memory
@@ -3027,12 +3028,13 @@ async def generate_post_bundle(
             _tv_result = validate_text_runtime(
                 _combined_text,
                 generation_mode=generation_mode,
+                content_mode=gen_spec.content_mode,
                 source_title="",
                 source_summary="",
                 source_text="",
                 input_text=requested,
                 allow_personal=bool(gen_spec.allow_personal if hasattr(gen_spec, "allow_personal") else False),
-                reject_threshold=6,
+                reject_threshold=get_mode_reject_threshold(gen_spec.content_mode),
             )
             if _tv_result.should_reject:
                 logger.warning(
@@ -3179,9 +3181,10 @@ async def generate_post_bundle(
     _best_tv = validate_text_runtime(
         _best_combined,
         generation_mode=generation_mode,
+        content_mode=gen_spec.content_mode,
         input_text=requested,
         allow_personal=bool(gen_spec.allow_personal if hasattr(gen_spec, "allow_personal") else False),
-        reject_threshold=6,
+        reject_threshold=get_mode_reject_threshold(gen_spec.content_mode),
     )
     if _best_tv.should_reject:
         logger.warning(
