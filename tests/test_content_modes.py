@@ -443,6 +443,8 @@ class TestImageRelevanceGuard(unittest.TestCase):
         )
         # The fixed prompt should contain relevant transport words
         self.assertIn("автобуса", fixed.lower())
+        # Irrelevant spa content should not be present
+        self.assertNotIn("spa", fixed.lower())
 
 
 # ---------------------------------------------------------------------------
@@ -723,6 +725,17 @@ class TestFabricationPatternCoverage(unittest.TestCase):
             any("tariff" in v for v in violations),
             f"Local tariff not caught: {violations}",
         )
+
+    def test_tariff_with_source_passes(self):
+        """Tariff mentioned with source grounding should pass."""
+        source = "тариф на проезд составляет 65"
+        violations = validate_numeric_claims(
+            "Тариф на проезд составляет 65 рублей.",
+            source_text=source,
+        )
+        tariff_violations = [v for v in violations if "tariff" in v]
+        self.assertEqual(len(tariff_violations), 0,
+                         "Tariff grounded in source should pass")
 
 
 # ---------------------------------------------------------------------------
