@@ -732,6 +732,16 @@ button:active:not(:disabled),
   line-height: 1;
 }
 
+.score-ring-note {
+  position: absolute;
+  left: 50%;
+  bottom: 6px;
+  transform: translateX(-50%);
+  font-size: 10px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
 .score-ring-sm .score-ring-label {
   font-size: 15px;
 }
@@ -3160,6 +3170,10 @@ body.modal-open {
   color: var(--text);
   min-width: 36px;
   text-align: right;
+}
+
+.analytics-chart-row-dim {
+  opacity: .58;
 }
 
 @keyframes progress-bar-fill {
