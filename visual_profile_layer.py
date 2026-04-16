@@ -3,7 +3,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-LATIN_RE = re.compile(r"[^a-zA-Z0-9\s-]")
+QUERY_CLEAN_RE = re.compile(r"[^a-zA-Z0-9\s-]")
+TOKEN_RE = re.compile(r"[^a-zA-Zа-яА-Я0-9\s-]")
 
 
 @dataclass
@@ -150,11 +151,76 @@ _DOMAIN_PRIMARY_KEYWORD = {
     "real_estate": "property house",
 }
 
+_SEMANTIC_STOPWORDS = {
+    "как", "для", "или", "это", "этот", "этом", "чтобы", "что", "про", "без", "with", "from", "that", "this",
+    "post", "news", "update", "guide", "tips", "совет", "новости", "обзор", "почему", "когда",
+}
+
+_SEMANTIC_SCENE_HINTS: dict[str, list[str]] = {
+    "street scene": ["улиц", "город", "дорог", "road", "street", "urban", "traffic"],
+    "workshop scene": ["ремонт", "service", "garage", "engine", "repair", "диагност"],
+    "office desk": ["документ", "финанс", "bank", "deposit", "budget", "table", "office"],
+    "clinic room": ["врач", "clinic", "doctor", "patient", "medical", "health"],
+    "garden field": ["почв", "семен", "сад", "урож", "garden", "soil", "plant"],
+    "home interior": ["дом", "квартир", "home", "room", "kitchen", "interior"],
+    "education space": ["школ", "курс", "студент", "teacher", "study", "learning"],
+}
+
+_QUERY_ALIASES: dict[str, str] = {
+    "риск": "risk",
+    "рисков": "risk",
+    "инвест": "investment",
+    "вклад": "deposit",
+    "депозит": "deposit",
+    "самокат": "scooter",
+    "сервер": "server",
+    "город": "city",
+    "локал": "local",
+    "новост": "news",
+    "бизн": "business",
+    "почв": "soil",
+    "семен": "seeds",
+}
+
 
 def _tokens(text: str) -> list[str]:
-    clean = LATIN_RE.sub(" ", (text or "").lower())
+    clean = TOKEN_RE.sub(" ", (text or "").lower())
     clean = re.sub(r"\s+", " ", clean).strip()
     return [t for t in clean.split(" ") if len(t) >= 3]
+
+
+def _semantic_terms(*parts: str, limit: int = 8) -> list[str]:
+    seen: list[str] = []
+    for part in parts:
+        for tok in _tokens(part):
+            if tok in _SEMANTIC_STOPWORDS:
+                continue
+            if tok not in seen:
+                seen.append(tok)
+            if len(seen) >= limit:
+                return seen
+    return seen
+
+
+def _infer_scene_from_semantics(*parts: str) -> str:
+    text = " ".join(parts).lower()
+    if not text.strip():
+        return "editorial"
+    for scene, hints in _SEMANTIC_SCENE_HINTS.items():
+        if any(h in text for h in hints):
+            return scene
+    return "editorial"
+
+
+def _semantic_query_aliases(*parts: str, limit: int = 4) -> list[str]:
+    text = " ".join(parts).lower()
+    out: list[str] = []
+    for needle, alias in _QUERY_ALIASES.items():
+        if needle in text and alias not in out:
+            out.append(alias)
+        if len(out) >= limit:
+            break
+    return out
 
 
 def _extract_priority_context(*, title: str, channel_topic: str, onboarding_summary: str, post_intent: str, body: str) -> list[tuple[str, str]]:
@@ -210,8 +276,12 @@ def build_visual_profile(
     primary_anchor = " ".join(part for part in [title, channel_topic, onboarding_summary, post_intent] if part).strip()
     body_tokens = _tokens(body)[:5]
     primary_tokens = _tokens(primary_anchor)[:8]
+    semantic_tokens = _semantic_terms(title, body, post_intent, channel_topic, limit=10)
+    semantic_aliases = _semantic_query_aliases(title, body, post_intent, channel_topic, limit=4)
     primary_subject = (rule.get("subject") or "editorial scene")
-    if primary_tokens:
+    if semantic_tokens:
+        primary_subject = f"{primary_subject} {' '.join(semantic_tokens[:3])}".strip()
+    elif primary_tokens:
         primary_subject = f"{primary_subject} {' '.join(primary_tokens[:3])}".strip()
 
     secondaries: list[str] = []
@@ -219,7 +289,12 @@ def build_visual_profile(
         if tok not in secondaries:
             secondaries.append(tok)
 
-    scene = str(rule.get("scene") or "editorial")
+    scene = str(rule.get("scene") or "")
+    semantic_scene = _infer_scene_from_semantics(title, body, post_intent, channel_topic)
+    if semantic_scene != "editorial":
+        scene = semantic_scene
+    if not scene:
+        scene = "editorial"
     must_have = [str(x) for x in (rule.get("must_have") or [])]
     must_not = [str(x) for x in (rule.get("must_not") or [])]
     if content_exclusions:
@@ -227,9 +302,11 @@ def build_visual_profile(
     if content_constraints:
         must_have.extend(_tokens(content_constraints)[:4])
 
-    domain_hint = _DOMAIN_PRIMARY_KEYWORD.get(domain, domain.replace("_", " "))
-    primary_terms = [domain_hint, scene, primary_subject] + must_have[:3] + secondaries[:3]
-    backup_terms = [domain_hint, primary_subject, domain.replace("_", " ")] + secondaries[:5]
+    domain_hint = _DOMAIN_PRIMARY_KEYWORD.get(domain, "")
+    semantic_query_head = " ".join(semantic_aliases[:2] or semantic_tokens[:3]).strip()
+    channel_topic_anchor = " ".join(_tokens(channel_topic)[:2]).strip()
+    primary_terms = [semantic_query_head, channel_topic_anchor, scene, primary_subject, domain_hint] + must_have[:3] + secondaries[:3]
+    backup_terms = [semantic_query_head, channel_topic_anchor, primary_subject, scene, domain.replace("_", " ")] + secondaries[:5]
 
     return VisualProfile(
         domain_family=domain,
@@ -246,7 +323,7 @@ def build_visual_profile(
 def profile_search_queries(profile: VisualProfile) -> tuple[str, str]:
     def _build(terms: list[str]) -> str:
         raw = " ".join(terms)
-        clean = LATIN_RE.sub(" ", raw)
+        clean = QUERY_CLEAN_RE.sub(" ", raw)
         clean = re.sub(r"\s+", " ", clean).strip().lower()
         return clean[:180] if clean else "editorial photo"
 
