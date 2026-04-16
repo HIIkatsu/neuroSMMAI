@@ -74,6 +74,42 @@ class TestPR3QualityGuards(unittest.TestCase):
         )
         self.assertTrue(any("репутационно опасная" in i for i in issues))
 
+    def test_request_fit_penalizes_generic_editorial_advice_when_query_specific(self):
+        from content import assess_text_quality
+
+        _, reasons, dims = assess_text_quality(
+            title="Как выбрать масло для двигателя зимой",
+            body=(
+                "В современном мире важно понимать базовые вещи. "
+                "Каждому стоит делать правильный выбор и задуматься о подходе. "
+                "Это важно для всех, потому что универсальные советы работают всегда."
+            ),
+            cta="Подумайте об этом и сделайте выводы.",
+            channel_topic="автосервис",
+            requested="как выбрать масло для двигателя зимой",
+            generation_mode="manual",
+        )
+        self.assertLessEqual(dims.get("request_fit", 10), 5)
+        self.assertTrue(any("обобщённая редакционная подача" in r for r in reasons))
+
+    def test_alignment_penalty_when_cta_not_tied_to_title_and_body(self):
+        from content import assess_text_quality
+
+        _, reasons, dims = assess_text_quality(
+            title="Износ тормозных колодок: 3 ранних признака",
+            body=(
+                "Если тормоза начинают скрипеть, а педаль стала мягче, "
+                "проверьте колодки и толщину фрикционного слоя. "
+                "При неравномерном износе лучше сделать диагностику суппортов."
+            ),
+            cta="Какой у вас любимый цвет машины?",
+            channel_topic="автосервис",
+            requested="признаки износа тормозных колодок",
+            generation_mode="manual",
+        )
+        self.assertLessEqual(dims.get("publish_ready", 10), 8)
+        self.assertTrue(any("CTA не продолжает тему" in r for r in reasons))
+
 
 class TestPR3RewriteOnboardingInfluence(unittest.TestCase):
     def test_rewrite_prompt_uses_channel_profile_fields(self):
@@ -88,4 +124,3 @@ class TestPR3RewriteOnboardingInfluence(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
