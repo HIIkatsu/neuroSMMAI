@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import os
 import httpx
+import re
 
 from visual_profile_layer import ProviderCandidate
 
@@ -21,6 +22,22 @@ PIXABAY_API_KEY = (os.getenv("PIXABAY_API_KEY") or "").strip()
 
 _CONNECT_TIMEOUT = 5.0
 _READ_TIMEOUT = 10.0
+
+
+def _extract_tags(text: str, *, limit: int = 8) -> list[str]:
+    """Extract lightweight normalized tags from provider text fields."""
+    raw = re.sub(r"[^a-zA-Z0-9\s,;-]", " ", text or "").lower()
+    pieces = re.split(r"[,;\s]+", raw)
+    out: list[str] = []
+    for piece in pieces:
+        token = piece.strip(" -_")
+        if len(token) < 3:
+            continue
+        if token not in out:
+            out.append(token)
+        if len(out) >= max(1, int(limit)):
+            break
+    return out
 
 async def search_stock_photo(query: str) -> str:
     """Search stock photo providers for a relevant image.
