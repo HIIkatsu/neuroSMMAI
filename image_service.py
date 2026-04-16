@@ -13,10 +13,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 from dataclasses import dataclass
 
-from image_prompts import build_generation_prompt, build_fallback_search_query
+from image_prompts import build_generation_prompt, build_fallback_search_query, build_subject_rerank_profile
 from image_generation import generate_image
 from image_validation import (
     validate_image_bytes,
@@ -26,7 +27,7 @@ from image_validation import (
 )
 from image_storage import save_generated_image
 from image_history import get_image_history
-from image_fallback import search_stock_photo
+from image_fallback import StockCandidate, search_stock_photo, search_stock_candidates
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,7 @@ _LATIN_TOKEN_RE = re.compile(r"^[A-Za-z0-9][\w.+-]*$")
 # Generation timeout
 _GENERATION_TIMEOUT = float(30.0)
 _FALLBACK_TIMEOUT = float(15.0)
+_IMAGE_SEARCH_ONLY = (os.getenv("IMAGE_SEARCH_ONLY", "").strip().lower() in {"1", "true", "yes", "on"})
 
 
 @dataclass
@@ -162,7 +164,10 @@ async def get_image(
         # We still generate — dedup is advisory for prompts, not blocking
 
     generated_ref = ""
-    if history.is_duplicate_visual_pattern(prompt):
+    search_only_mode = _IMAGE_SEARCH_ONLY or normalized_mode == MODE_EDITOR
+    if search_only_mode:
+        logger.info("IMAGE_SERVICE_SEARCH_FIRST mode=%s image_search_only=%s", normalized_mode, _IMAGE_SEARCH_ONLY)
+    elif history.is_duplicate_visual_pattern(prompt):
         logger.info("IMAGE_SERVICE_PATTERN_DEDUP owner_id=%s", owner_id)
     else:
         # 3. Try AI generation (primary path)
@@ -215,6 +220,7 @@ async def get_image(
         canonical_family=family,
         onboarding_summary=onboarding_summary,
         content_constraints=content_constraints,
+        llm_image_prompt=llm_image_prompt,
     )
 
     if fallback_ref:
@@ -373,8 +379,22 @@ async def _try_fallback(
     canonical_family: str = "",
     onboarding_summary: str = "",
     content_constraints: str = "",
+    llm_image_prompt: str = "",
 ) -> str:
     """Attempt stock photo fallback. Returns image URL or empty string."""
+    rerank_profile = build_subject_rerank_profile(
+        title=title,
+        body=body,
+        channel_topic=channel_topic,
+        onboarding_summary=onboarding_summary,
+        post_intent=resolved_intent,
+        text_quality_flagged=text_quality_flagged,
+    )
+    positive_tokens = [str(x) for x in (rerank_profile.get("positive_tokens") or [])]
+    negative_tokens = [str(x) for x in (rerank_profile.get("negative_tokens") or [])]
+    subject_key = str(rerank_profile.get("subject") or "generic")
+    used_body = bool(rerank_profile.get("used_body_for_search"))
+    used_llm = bool(llm_image_prompt and llm_image_prompt.strip() and not text_quality_flagged and mode != MODE_EDITOR)
     query = build_fallback_search_query(
         title=title,
         body=body,
@@ -383,68 +403,153 @@ async def _try_fallback(
         content_constraints=content_constraints,
         post_intent=resolved_intent,
         text_quality_flagged=text_quality_flagged,
+        llm_image_prompt=(llm_image_prompt if used_llm else ""),
+        query_family="primary",
+    )
+    fallback_query = build_fallback_search_query(
+        title=title,
+        body=body,
+        channel_topic=channel_topic,
+        onboarding_summary=onboarding_summary,
+        content_constraints=content_constraints,
+        post_intent=resolved_intent,
+        text_quality_flagged=text_quality_flagged,
+        llm_image_prompt="",
+        query_family="fallback",
     )
 
     if not query:
         logger.warning("IMAGE_FALLBACK_NO_QUERY")
         return ""
 
-    try:
-        url = await asyncio.wait_for(
-            search_stock_photo(query),
-            timeout=_FALLBACK_TIMEOUT,
+    all_candidates = []
+    for q, qf in ((query, "primary"), (fallback_query, "fallback")):
+        if not q:
+            continue
+        try:
+            candidates = await asyncio.wait_for(
+                search_stock_candidates(q, query_family=qf),
+                timeout=_FALLBACK_TIMEOUT,
+            )
+            all_candidates.extend([(q, c) for c in candidates])
+        except asyncio.TimeoutError:
+            logger.warning("IMAGE_FALLBACK_TIMEOUT query=%r query_family=%s", q[:40], qf)
+        except Exception as exc:
+            logger.error("IMAGE_FALLBACK_ERROR query=%r query_family=%s error=%s", q[:40], qf, exc)
+        if not any(existing.query_family == qf for _, existing in all_candidates):
+            try:
+                legacy_url = await asyncio.wait_for(search_stock_photo(q), timeout=_FALLBACK_TIMEOUT)
+                if legacy_url:
+                    all_candidates.append((q, StockCandidate(url=legacy_url, provider="unknown", query_family=qf)))
+            except Exception:
+                pass
+
+    if not all_candidates:
+        logger.info(
+            "IMAGE_PIPELINE_DECISION final_decision=no_image reject_reason=no_candidates anchor_family=%s fallback_query_family=%s used_body_for_search=%s used_llm_image_prompt_for_search=%s",
+            subject_key, "fallback", used_body, used_llm,
         )
-    except asyncio.TimeoutError:
-        logger.warning("IMAGE_FALLBACK_TIMEOUT query=%r", query[:40])
-        return ""
-    except Exception as exc:
-        logger.error("IMAGE_FALLBACK_ERROR query=%r error=%s", query[:40], exc)
         return ""
 
-    if not url:
-        return ""
+    for candidate_query, candidate in all_candidates:
+        url = candidate.url
+        # Validate URL
+        is_valid, reason = validate_image_url(url)
+        if not is_valid:
+            logger.warning("IMAGE_FALLBACK_INVALID_URL provider=%s url=%r reason=%s", candidate.provider, url[:60], reason)
+            continue
 
-    # Validate URL
-    is_valid, reason = validate_image_url(url)
-    if not is_valid:
-        logger.warning("IMAGE_FALLBACK_INVALID_URL url=%r reason=%s", url[:60], reason)
-        return ""
+        # Check dedup
+        if history.is_duplicate_ref(url):
+            logger.info("IMAGE_FALLBACK_DEDUP_HIT provider=%s url=%r", candidate.provider, url[:60])
+            continue
 
-    # Check dedup
-    if history.is_duplicate_ref(url):
-        logger.info("IMAGE_FALLBACK_DEDUP_HIT url=%r", url[:60])
-        return ""
+        # Check against used_refs
+        if used_refs and url in used_refs:
+            logger.info("IMAGE_FALLBACK_ALREADY_USED provider=%s url=%r", candidate.provider, url[:60])
+            continue
 
-    # Check against used_refs
-    if used_refs and url in used_refs:
-        logger.info("IMAGE_FALLBACK_ALREADY_USED url=%r", url[:60])
-        return ""
+        stable_visual_context = " ".join(
+            x.strip()
+            for x in [normalized_visual_prompt, title, channel_topic, resolved_intent, candidate_query]
+            if (x or "").strip()
+        )
+        candidate_ok, candidate_reason = validate_image_candidate(
+            prompt=stable_visual_context or candidate_query,
+            title=title,
+            body=body,
+            channel_topic=channel_topic,
+            family_context_hint=family_context_hint,
+            content_mode=content_mode,
+            media_ref=url,
+            allow_family_mismatch_penalty=False,
+            enforce_min_prompt_len=False,
+            ignore_body_for_family_context=text_quality_flagged,
+            canonical_family="",
+        )
+        rerank_ok, rerank_reason = _rerank_candidate_by_subject(
+            media_ref=url,
+            candidate_query=candidate_query,
+            positive_tokens=positive_tokens,
+            negative_tokens=negative_tokens,
+        )
+        if not rerank_ok:
+            logger.warning(
+                "IMAGE_PIPELINE_DECISION final_decision=rejected reject_reason=%s provider=%s anchor_family=%s fallback_query_family=%s used_body_for_search=%s used_llm_image_prompt_for_search=%s",
+                rerank_reason, candidate.provider, subject_key, candidate.query_family, used_body, used_llm,
+            )
+            continue
+        if not candidate_ok:
+            if rerank_ok and candidate_reason.startswith("family_mismatch_post_"):
+                logger.info(
+                    "IMAGE_PIPELINE_DECISION final_decision=accepted reject_reason=family_mismatch_overridden_by_subject_rerank provider=%s anchor_family=%s fallback_query_family=%s used_body_for_search=%s used_llm_image_prompt_for_search=%s",
+                    candidate.provider, subject_key, candidate.query_family, used_body, used_llm,
+                )
+                return url
+            logger.warning(
+                "IMAGE_PIPELINE_DECISION final_decision=rejected reject_reason=%s provider=%s anchor_family=%s fallback_query_family=%s used_body_for_search=%s used_llm_image_prompt_for_search=%s",
+                candidate_reason, candidate.provider, subject_key, candidate.query_family, used_body, used_llm,
+            )
+            continue
+        if "family_mismatch_penalty_" in candidate_reason:
+            logger.info("IMAGE_FALLBACK_PENALTY reason=%s url=%r", candidate_reason, url[:80])
+        logger.info(
+            "IMAGE_PIPELINE_DECISION final_decision=accepted reject_reason= provider=%s anchor_family=%s fallback_query_family=%s used_body_for_search=%s used_llm_image_prompt_for_search=%s",
+            candidate.provider, subject_key, candidate.query_family, used_body, used_llm,
+        )
+        return url
 
-    stable_visual_context = " ".join(
-        x.strip()
-        for x in [normalized_visual_prompt, title, channel_topic, resolved_intent, query]
-        if (x or "").strip()
+    logger.info(
+        "IMAGE_PIPELINE_DECISION final_decision=no_image reject_reason=all_candidates_rejected provider=none anchor_family=%s fallback_query_family=%s used_body_for_search=%s used_llm_image_prompt_for_search=%s",
+        subject_key, "fallback", used_body, used_llm,
     )
-    candidate_ok, candidate_reason = validate_image_candidate(
-        prompt=stable_visual_context or query,
-        title=title,
-        body=body,
-        channel_topic=channel_topic,
-        family_context_hint=family_context_hint,
-        content_mode=content_mode,
-        media_ref=url,
-        allow_family_mismatch_penalty=(text_quality_flagged or mode == MODE_EDITOR),
-        enforce_min_prompt_len=False,
-        ignore_body_for_family_context=text_quality_flagged,
-        canonical_family=canonical_family,
-    )
-    if not candidate_ok:
-        logger.warning("IMAGE_FALLBACK_REJECT reason=%s url=%r", candidate_reason, url[:80])
-        return ""
-    if "family_mismatch_penalty_" in candidate_reason:
-        logger.info("IMAGE_FALLBACK_PENALTY reason=%s url=%r", candidate_reason, url[:80])
+    return ""
 
-    return url
+
+def _rerank_candidate_by_subject(
+    *,
+    media_ref: str,
+    candidate_query: str,
+    positive_tokens: list[str],
+    negative_tokens: list[str],
+) -> tuple[bool, str]:
+    source_url = (media_ref or "").lower()
+    source_query = (candidate_query or "").lower()
+    source_url_words = source_url.replace("-", " ").replace("_", " ")
+    pos_hits_url = sum(1 for tok in positive_tokens[:10] if tok and tok in source_url)
+    pos_hits_query = sum(1 for tok in positive_tokens[:10] if tok and tok in source_query)
+    pos_hits = pos_hits_url + (1 if pos_hits_query > 0 else 0)
+    neg_hits = sum(1 for tok in negative_tokens[:10] if tok and (tok in source_url or tok in source_url_words))
+    score = (pos_hits * 2) - (neg_hits * 3)
+    if not positive_tokens and not negative_tokens:
+        return True, "subject_rerank_skip_no_profile"
+    if neg_hits >= 1 and pos_hits_url == 0:
+        return False, f"subject_rerank_negative_domains pos={pos_hits} neg={neg_hits}"
+    if pos_hits == 0 and neg_hits == 0:
+        return True, "subject_rerank_neutral"
+    if score < 0:
+        return False, f"subject_rerank_low_score pos={pos_hits} neg={neg_hits} score={score}"
+    return True, f"subject_rerank_ok pos={pos_hits} neg={neg_hits} score={score}"
 
 
 def _normalize_mode(mode: str) -> str:
