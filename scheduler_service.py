@@ -457,6 +457,7 @@ class SchedulerService:
                         _make_per_owner_cfg(api_key, model, base_url, cfg),
                         prompt,
                         owner_id=owner_id,
+                        channel_profile_id=channel_profile_id or None,
                         force_image=auto_image,
                         generation_path="autopost",
                     )
@@ -563,6 +564,7 @@ class SchedulerService:
                 _make_per_owner_cfg(api_key, model, base_url, cfg),
                 prompt_text,
                 owner_id=owner_id,
+                channel_profile_id=channel_profile_id or None,
                 force_image=auto_image,
                 generation_path="autopost",
             )

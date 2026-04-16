@@ -497,6 +497,7 @@ async def generate_post_payload(
     prompt: str = "",
     *,
     owner_id: int | None = 0,
+    channel_profile_id: int | None = None,
     force_image: bool = True,
     current_media_ref: str = "",
     generation_path: str = "editor",
@@ -507,7 +508,7 @@ async def generate_post_payload(
 
     # Use channel-scoped settings instead of owner-level get_setting()
     # to respect per-channel audience/style/rubrics when user has multiple channels
-    ch_settings = await db.get_channel_settings(owner_id)
+    ch_settings = await db.get_channel_settings(owner_id, channel_profile_id=channel_profile_id)
     channel_topic = ch_settings.get("topic") or ""
     effective_prompt = (prompt or channel_topic or "").strip()
 
@@ -720,18 +721,20 @@ async def create_generated_draft(
     prompt: str,
     *,
     owner_id: int | None = 0,
+    channel_profile_id: int | None = None,
     force_image: bool = True,
 ) -> int:
     if await db.count_drafts(owner_id=owner_id, status="draft") >= max(1, int(getattr(config, "max_active_drafts_per_user", 25))):
         raise ValueError(f"Достигнут лимит черновиков: {getattr(config, 'max_active_drafts_per_user', 25)}")
 
-    ch_settings = await db.get_channel_settings(owner_id)
+    ch_settings = await db.get_channel_settings(owner_id, channel_profile_id=channel_profile_id)
     channel = ch_settings.get("channel_target") or ""
 
     payload = await generate_post_payload(
         config,
         prompt,
         owner_id=owner_id,
+        channel_profile_id=channel_profile_id,
         force_image=force_image,
         generation_path="editor",
     )

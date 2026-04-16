@@ -265,11 +265,12 @@ async def generate_draft(
     await _require_feature_quota(telegram_user_id, "generate", "Генерация черновика")
     await ensure_drafts_capacity(telegram_user_id)
     config = load_config()
-    history = await recent_channel_history(telegram_user_id)
+    cpid = await _active_channel_profile_id(telegram_user_id)
     draft_id = await actions.create_generated_draft(
         config,
         data.prompt,
         owner_id=telegram_user_id,
+        channel_profile_id=cpid,
         force_image=True,
     )
     await db.increment_generations_used(telegram_user_id)
@@ -501,6 +502,7 @@ async def ai_generate_post(
                     config,
                     source_prompt,
                     owner_id=telegram_user_id,
+                    channel_profile_id=cpid,
                     force_image=should_force_image,
                     current_media_ref=existing_media_ref,
                     generation_path="editor",
@@ -996,5 +998,3 @@ async def competitor_spy(
 
     cache_invalidate(telegram_user_id, 'drafts', 'core', 'bootstrap')
     return {"ok": True, "drafts": saved_drafts, "count": len(saved_drafts)}
-
-
