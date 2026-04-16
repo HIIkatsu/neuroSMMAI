@@ -264,6 +264,62 @@ def build_channel_analytics(
     else:
         unavailable.append({'key':'views','label':'Просмотры и вовлечение','hint':'Пока недостаточно накопленной статистики.','action':'Дай системе накопить больше публикаций.','available':False})
 
+    # Honest score model (UI-facing): use only observable data and mark confidence.
+    # This is intentionally independent from configuration completeness score above.
+    topic_diversity_base = max(0, min(100, 100 - min(80, round(repeat_rate * 1.5))))
+    factors: list[dict[str, Any]] = [
+        {
+            'key': 'regularity',
+            'label': 'Регулярность публикаций',
+            'value': max(0, min(100, min(100, posted_last_7d * 20 + (20 if schedules_total > 0 else 0)))),
+            'weight': 0.25,
+            'available': bool(posted_last_7d > 0 or schedules_total > 0 or total_posts >= 3),
+            'hint': f'{posted_last_7d} публикаций за 7 дней · {schedules_total} активных слотов',
+        },
+        {
+            'key': 'volume',
+            'label': 'Посты и черновики',
+            'value': max(0, min(100, min(100, total_posts * 5 + drafts_count * 18))),
+            'weight': 0.2,
+            'available': bool(total_posts > 0 or drafts_count > 0),
+            'hint': f'{total_posts} постов всего · {drafts_count} черновиков',
+        },
+        {
+            'key': 'activity',
+            'label': 'Активность канала',
+            'value': max(0, min(100, round((min(posted_last_7d, 7) / 7.0) * 70 + (30 if views_known else 0)))),
+            'weight': 0.2,
+            'available': bool(posted_last_7d > 0 or views_known or total_posts >= 1),
+            'hint': ('есть статистика просмотров' if views_known else 'без статистики просмотров'),
+        },
+        {
+            'key': 'topics',
+            'label': 'Разнообразие тем',
+            'value': topic_diversity_base,
+            'weight': 0.2,
+            'available': bool(sample_size >= 3 or len(top_topics) >= 2),
+            'hint': f'{len(top_topics)} топ-тем · повторы текста {text_repeat_rate}%',
+        },
+        {
+            'key': 'plan',
+            'label': 'Контент-план',
+            'value': max(0, min(100, min(100, plan_count * 20))),
+            'weight': 0.15,
+            'available': bool(plan_count > 0),
+            'hint': f'{plan_count} идей в плане',
+        },
+    ]
+    available_factors = [x for x in factors if x.get('available')]
+    weight_total = sum(float(x.get('weight') or 0) for x in available_factors)
+    weighted = sum(float(x.get('value') or 0) * float(x.get('weight') or 0) for x in available_factors)
+    honest_score = int(round(weighted / weight_total)) if weight_total > 0 else 0
+    if len(available_factors) <= 1:
+        score_status = 'insufficient'
+    elif len(available_factors) <= 3:
+        score_status = 'preliminary'
+    else:
+        score_status = 'stable'
+
     weakest = min(signals, key=lambda x: int(x.get('value') or 0)) if signals else None
     strongest = max(signals, key=lambda x: int(x.get('value') or 0)) if signals else None
 
@@ -281,8 +337,8 @@ def build_channel_analytics(
     else:
         next_step = clean_text(str(weakest.get('action') if weakest else 'Усиль профиль и запас контента'))
     summary = {
-        'score': score,
-        'readiness': score,
+        'score': honest_score,
+        'readiness': honest_score,
         'repeat_rate': repeat_rate,
         'text_repeat_rate': text_repeat_rate,
         'media_repeat_rate': media_repeat_rate,
@@ -300,10 +356,15 @@ def build_channel_analytics(
         'schedule_count': schedules_total,
         'onboarding_completed': 1 if onboarding_done else 0,
         'active_channel': 1 if active_channel else 0,
+        'score_status': score_status,
+        'score_confident': 1 if score_status == 'stable' else 0,
+        'available_factors': len(available_factors),
+        'required_factors': len(factors),
     }
     return {
-        'score': score,
-        'readiness': score,
+        'score': honest_score,
+        'readiness': honest_score,
+        'score_status': score_status,
         'repeat_rate': repeat_rate,
         'next_step': next_step,
         'strongest_area': strongest,
@@ -314,7 +375,7 @@ def build_channel_analytics(
         'summary': summary,
         'top_topics': top_topics,
         'unavailable': unavailable,
+        'score_factors': factors,
         'rubrics': formats,
         'rhythm': 'сильный' if posted_last_7d >= 5 else ('стабильный' if posted_last_7d >= 2 else 'слабый'),
     }
-

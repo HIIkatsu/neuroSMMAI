@@ -1213,13 +1213,14 @@ function buildRhythmSparkline(points = []) {
     </div>`;
 }
 
-function renderScoreRing(value = 0, sizeClass = 'score-ring-sm') {
-  const score = Math.max(0, Math.min(100, Math.round(Number(value || 0))));
+function renderScoreRing(value = 0, sizeClass = 'score-ring-sm', scoreLabel = '') {
+  const hasScore = Number.isFinite(Number(value));
+  const score = hasScore ? Math.max(0, Math.min(100, Math.round(Number(value || 0)))) : 0;
   const radius = 42;
   const circumference = 2 * Math.PI * radius;
   const offset = Number((circumference * (1 - score / 100)).toFixed(3));
   return `
-    <div class="score-ring ${sizeClass}" aria-label="Готовность ${score}%" data-score="${score}" style="--ring-offset:${offset};--circumference:${circumference.toFixed(3)};">
+    <div class="score-ring ${sizeClass}" aria-label="Готовность ${hasScore ? score : 'н/д'}%" data-score="${score}" style="--ring-offset:${offset};--circumference:${circumference.toFixed(3)};">
       <svg viewBox="0 0 120 120" role="presentation" aria-hidden="true">
         <defs>
           <linearGradient id="ringGradient" x1="0%" y1="0%" x2="100%" y2="100%">
@@ -1230,7 +1231,8 @@ function renderScoreRing(value = 0, sizeClass = 'score-ring-sm') {
         <circle class="score-ring-track" cx="60" cy="60" r="${radius}"></circle>
         <circle class="score-ring-value" cx="60" cy="60" r="${radius}" stroke-dasharray="${circumference.toFixed(3)}"></circle>
       </svg>
-      <div class="score-ring-label">${score}%</div>
+      <div class="score-ring-label">${hasScore ? `${score}%` : '—'}</div>
+      ${scoreLabel ? `<div class="score-ring-note">${escapeHtml(scoreLabel)}</div>` : ''}
     </div>`;
 }
 
@@ -1255,6 +1257,45 @@ function buildActivityMiniBars(items = []) {
         <div class="mini-bar-label">${escapeHtml(item.label || '')}</div>
       </div>`;
   }).join('');
+}
+
+function analyticsScoreMeta(analytics = null) {
+  const a = analytics || {};
+  const summary = a.summary || {};
+  const status = String(a.score_status || summary.score_status || 'preliminary');
+  if (status === 'stable') return { label: 'Оценка по данным', hint: 'Собрано достаточно сигналов, оценка устойчивее.' };
+  if (status === 'insufficient') return { label: 'Недостаточно данных', hint: 'Показываем только факты без точного score.' };
+  return { label: 'Предварительная оценка', hint: 'Данных пока мало, score может заметно меняться.' };
+}
+
+function buildScoreFactorRows(factors = []) {
+  return (factors || []).map(item => {
+    const value = Math.max(0, Math.min(100, Number(item?.value || 0)));
+    const dim = item?.available ? '' : ' analytics-chart-row-dim';
+    return `
+      <div class="analytics-chart-row${dim}">
+        <div class="analytics-chart-label">${escapeHtml(item?.label || '')}</div>
+        <div class="analytics-chart-track"><span style="width:${item?.available ? value : 0}%"></span></div>
+        <div class="analytics-chart-value">${item?.available ? `${value}%` : 'н/д'}</div>
+      </div>`;
+  }).join('');
+}
+
+function buildAdviceCard(analytics = null) {
+  const a = analytics || {};
+  const recommendations = Array.isArray(a.recommendations) ? a.recommendations.filter(Boolean) : [];
+  const summary = a.summary || {};
+  let text = recommendations[0] || a.next_step || '';
+  if (!text) {
+    text = Number(summary.active_channel || 0) === 0
+      ? 'Подключи канал, и мы дадим персональные рекомендации по росту.'
+      : 'Данных пока мало — опубликуй 2–3 поста, добавь план и вернись за персональным советом.';
+  }
+  return `
+    <div class="card analytics-overlay-insight"><div class="card-inner stack compact-section-card">
+      <div class="section-title small-title">Совет</div>
+      <div class="section-desc">${escapeHtml(text)}</div>
+    </div></div>`;
 }
 
 
@@ -2160,14 +2201,26 @@ function computeFallbackAnalytics(settings, activeChannel, stats, drafts, plan, 
     { key:'media', label:'Медиарезерв', value: Math.max(0, Math.min(100, Math.min(85, mediaCount*22) - Math.min(20, dupRate))), hint:`${mediaCount} файлов · повторы ${dupRate}%`, action:'Добавь больше разных медиа' },
     { key:'autopost', label:'Автопостинг', value: Math.max(0, Math.min(100, (activeChannel?25:0)+(frequency?15:0)+Math.min(30, scheduleCount*25)+Math.min(30, postedLast7d*6))), hint:`${scheduleCount} слотов · ${postedLast7d} публикаций за 7 дней`, action:'Настрой ритм публикаций' },
   ];
+  const factors = [
+    { key:'regularity', label:'Регулярность публикаций', value: Math.max(0, Math.min(100, postedLast7d * 20 + (scheduleCount > 0 ? 20 : 0))), available: postedLast7d > 0 || scheduleCount > 0 || totalPosts >= 3 },
+    { key:'volume', label:'Посты и черновики', value: Math.max(0, Math.min(100, totalPosts * 5 + draftsCount * 18)), available: totalPosts > 0 || draftsCount > 0 },
+    { key:'activity', label:'Активность канала', value: Math.max(0, Math.min(100, Math.round((Math.min(postedLast7d, 7) / 7) * 100))), available: postedLast7d > 0 || totalPosts > 0 },
+    { key:'topics', label:'Разнообразие тем', value: Math.max(0, Math.min(100, 100 - Math.min(80, Math.round(dupRate * 1.4)))), available: totalPosts + draftsCount >= 3 },
+    { key:'plan', label:'Контент-план', value: Math.max(0, Math.min(100, planCount * 20)), available: planCount > 0 },
+  ];
+  const availableFactors = factors.filter(x => x.available);
+  const honestScore = availableFactors.length ? Math.round(availableFactors.reduce((acc, x) => acc + Number(x.value || 0), 0) / availableFactors.length) : 0;
+  const scoreStatus = availableFactors.length <= 1 ? 'insufficient' : (availableFactors.length <= 3 ? 'preliminary' : 'stable');
   const weakest = signals.slice().sort((a,b)=>a.value-b.value)[0];
   return {
-    score,
+    score: honestScore,
+    score_status: scoreStatus,
     summary: { onboarding_completed: onboardingDone ? 1 : 0, plan_count: planCount, drafts_count: draftsCount, media_count: mediaCount, schedule_count: scheduleCount },
     signals,
     next_step: weakest?.action || 'Усиль профиль и запас контента',
     weakest_key: weakest?.key || 'profile',
     recommendations: signals.filter(x => x.value < 70).map(x => x.action),
+    score_factors: factors,
     rubrics: formats,
   };
 }
@@ -2197,10 +2250,12 @@ function buildSmartAnalytics() {
   const weakest = useBackend ? (analytics.weakest_area || signals.slice().sort((a,b)=>Number(a.value||0)-Number(b.value||0))[0]) : signals.slice().sort((a,b)=>Number(a.value||0)-Number(b.value||0))[0];
   return {
     score: Math.max(0, Math.min(100, score || 0)),
+    score_status: String((useBackend ? analytics.score_status : fallback.score_status) || (Number(score || 0) > 0 ? 'preliminary' : 'insufficient')),
     next_step: String((useBackend ? analytics.next_step : fallback.next_step) || weakest?.action || 'Усиль профиль и запас контента'),
     weakest_key: String((useBackend ? analytics.weakest_key : fallback.weakest_key) || weakest?.key || ''),
     signals,
     recommendations: useBackend ? (Array.isArray(analytics.recommendations) ? analytics.recommendations : []) : fallback.recommendations,
+    score_factors: Array.isArray(analytics.score_factors) && analytics.score_factors.length ? analytics.score_factors : (fallback.score_factors || []),
     rubrics: Array.isArray(analytics.rubrics) && analytics.rubrics.length ? analytics.rubrics : (fallback.rubrics || []),
     summary: { ...(analytics.summary || {}), ...liveSummary }
   };
@@ -2246,7 +2301,7 @@ function openAnalyticsDetails() {
   const a = buildSmartAnalytics();
   const stats = state.data?.stats || {};
   const summary = a.summary || {};
-  const scaleMap = { '7d': 1, '30d': 2, '90d': 3.2 };
+  const scaleMap = { '7d': 1, '30d': 1, '90d': 1 };
   const scale = Number(scaleMap[period] || 1);
   const activityItems = [
     { key: 'posts_total', label: 'Посты', value: Math.round(Number(stats.total_posts || 0) * scale), hint: 'Оценка активности' },
@@ -2256,11 +2311,17 @@ function openAnalyticsDetails() {
   ];
   const sparkline = buildRhythmSparkline(activityItems);
   const periodLabel = period === '30d' ? '30 дней' : period === '90d' ? '90 дней' : '7 дней';
-  const totalReach = Math.max(1, Math.round((Number(stats.total_posts || 0) * 920 + Number(summary.drafts_count || 0) * 1800) * scale));
-  const subscribers = Math.max(1, Math.round((Number(stats.total_posts || 0) * 140 + Number(summary.plan_count || 0) * 220 + 1200) * (period === '90d' ? 1.25 : period === '30d' ? 1.08 : 1)));
-  const engagement = Math.max(0.1, Math.min(99.9, (Number(a.score || 0) / 10 + (period === '90d' ? 0.7 : period === '30d' ? 0.3 : 0)).toFixed(1)));
-  const bestHour = period === '90d' ? '8:30 AM' : period === '30d' ? '8:45 AM' : '9:00 AM';
-  const bestDay = 'Tuesdays';
+  const scoreMeta = analyticsScoreMeta(a);
+  const scoreDisplay = String(a.score_status || '') === 'insufficient' ? null : Number(a.score);
+  const emptyData = Number(stats.total_posts || 0) === 0 && Number(summary.drafts_count || 0) === 0 && Number(summary.plan_count || 0) === 0;
+  const factors = Array.isArray(a.score_factors) ? a.score_factors : [];
+  const availableFactors = factors.filter(x => x?.available);
+  const factorRows = buildScoreFactorRows(factors);
+  const emptyBlock = emptyData
+    ? `<div class="empty-state-card"><div class="empty-state-icon">◌</div><div class="empty-state-title">Пока нет данных</div><div class="empty-state-text">Добавь план, создай черновики или опубликуй первый пост — тогда аналитика станет персональной.</div></div>`
+    : (availableFactors.length < factors.length
+      ? `<div class="section-desc empty-hint">Данные частично доступны: ${availableFactors.length} из ${Math.max(1, factors.length)} факторов.</div>`
+      : '');
   const body = `
     <div class="stack analytics-overlay-sheet analytics-overlay-sheet-clean">
       <div class="analytics-period-row">
@@ -2271,32 +2332,19 @@ function openAnalyticsDetails() {
         </div>
       </div>
       <div class="card analytics-modal-chart-card analytics-overlay-chart-card analytics-hero-card"><div class="card-inner stack compact-dashboard-card">
-        <div class="analytics-overlay-kpi-title">ACCOUNT REACH</div>
-        <div class="analytics-overlay-kpi-value">${compactNum(totalReach)}</div>
-        ${sparkline}
+        <div class="analytics-overlay-kpi-title">ОЦЕНКА ГОТОВНОСТИ</div>
+        <div class="analytics-overlay-kpi-value">${Number.isFinite(Number(scoreDisplay)) ? `${Math.round(Number(scoreDisplay))}%` : '—'}</div>
+        <div class="section-desc">${escapeHtml(scoreMeta.label)} · ${escapeHtml(scoreMeta.hint)}</div>
       </div></div>
-      <div class="analytics-grid analytics-grid-modal analytics-overlay-kpi-grid">
-        <div class="analytics-item analytics-item-modal analytics-item-soft">
-          <div class="analytics-item-top"><b>${compactNum(subscribers)}</b><span>+2.4%</span></div>
-          <div class="analytics-item-hint">SUBSCRIBERS</div>
+      <div class="card analytics-overlay-chart-card"><div class="card-inner stack compact-dashboard-card">
+        <div class="section-title mini-title">Разбивка оценки</div>
+        <div class="analytics-chart-list compact-chart-list">
+          ${factorRows || '<div class="empty">Недостаточно данных для разбивки.</div>'}
         </div>
-        <div class="analytics-item analytics-item-modal analytics-item-soft">
-          <div class="analytics-item-top"><b>${compactNum(totalReach)}</b><span>+14.1%</span></div>
-          <div class="analytics-item-hint">TOTAL REACH</div>
-        </div>
-        <div class="analytics-item analytics-item-modal analytics-item-soft">
-          <div class="analytics-item-top"><b>${engagement}%</b><span>+0.6%</span></div>
-          <div class="analytics-item-hint">ENGAGEMENT</div>
-        </div>
-        <div class="analytics-item analytics-item-modal analytics-item-soft">
-          <div class="analytics-item-top"><b>${bestHour}</b><span>${bestDay}</span></div>
-          <div class="analytics-item-hint">BEST TIME</div>
-        </div>
+        ${emptyBlock}
       </div>
-      <div class="card analytics-overlay-insight"><div class="card-inner stack compact-section-card">
-        <div class="section-title small-title">AI Insight</div>
-        <div class="section-desc">${escapeHtml(a.next_step || 'Проверь слабые сигналы и усили резерв контента.')}</div>
-      </div></div>
+      ${buildAdviceCard(a)}
+      <div class="card analytics-overlay-chart-card"><div class="card-inner stack compact-dashboard-card">${sparkline}</div></div>
       <div class="section-desc analytics-overlay-footnote">Период: ${escapeHtml(periodLabel)} · Источник: текущие данные канала</div>
       <div class="analytics-modal-close-row">
         <button class="btn primary" data-action="closeModal">Закрыть</button>
@@ -2316,6 +2364,9 @@ function analyticsBlock() {
   const a = buildSmartAnalytics();
   const stats = state.data?.stats || {};
   const summary = a.summary || {};
+  const scoreMeta = analyticsScoreMeta(a);
+  const factors = Array.isArray(a.score_factors) ? a.score_factors : [];
+  const availableFactors = factors.filter(x => x?.available).length;
   const activityItems = [
     { key: 'posts_total', label: 'Посты', value: Number(stats.total_posts || 0), hint: 'Всего опубликовано' },
     { key: 'posts_week', label: '7 дней', value: Number(stats.posted_last_7d || 0), hint: 'Публикации за неделю' },
@@ -2328,16 +2379,18 @@ function analyticsBlock() {
       <div class="section-head-inline analytics-head-inline">
         <div>
           <div class="section-title small-title">Умная аналитика</div>
-          <div class="section-desc">Показывает, где канал уже собран, а где ещё проседает.</div>
+          <div class="section-desc">${escapeHtml(scoreMeta.label)} · ${escapeHtml(scoreMeta.hint)}</div>
         </div>
         <div class="analytics-badge-inline">${a.next_step ? escapeHtml(a.next_step) : 'Открыть детали'}</div>
       </div>
       ${sparkline}
+      <div class="section-desc">Факторы в расчёте: ${availableFactors}/${Math.max(1, factors.length)}</div>
       <div class="analytics-visual-split analytics-visual-split-single">
         <div class="analytics-chart-list compact-chart-list">
           ${buildAnalyticsChartRows(a.signals)}
         </div>
       </div>
+      ${buildAdviceCard(a)}
       <div class="analytics-inline-link">Открыть детали</div>
     </div></div>
   `;
@@ -2357,7 +2410,9 @@ function dashboardView() {
   const planCount = Number(smartAnalytics.summary.plan_count || plan.filter(x => !x.posted).length || 0);
   const draftsCount = Number(smartAnalytics.summary.drafts_count || drafts.length || 0);
   const mediaCount = Number(smartAnalytics.summary.media_count || 0);
-  const readinessScore = Math.max(0, Math.min(100, Number(smartAnalytics.score || 0)));
+  const readinessScoreRaw = Math.max(0, Math.min(100, Number(smartAnalytics.score || 0)));
+  const readinessScore = String(smartAnalytics.score_status || '') === 'insufficient' ? null : readinessScoreRaw;
+  const scoreMeta = analyticsScoreMeta(smartAnalytics);
   const autopilotReady = Boolean(
     Number(smartAnalytics.summary.onboarding_completed || 0) === 1 &&
     activeChannelData &&
@@ -2384,8 +2439,8 @@ function dashboardView() {
           <div class="dashboard-top-glow"></div>
         </div>
         <button class="dashboard-score-panel" data-action="openAnalyticsDetails" title="Открыть аналитику">
-          ${renderScoreRing(readinessScore, 'score-ring-lg')}
-          <div class="dashboard-score-label">Готовность</div>
+          ${renderScoreRing(readinessScore, 'score-ring-lg', scoreMeta.label)}
+          <div class="dashboard-score-label">${escapeHtml(scoreMeta.label)}</div>
         </button>
       </div></div>
 
@@ -3638,19 +3693,21 @@ function buildAIAssistantFallback(question = '') {
   const mediaCount = Number(summary.media_count || 0);
   const scheduleCount = Number(summary.schedule_count || 0);
   const score = Number(analytics.score || 0);
+  const scoreMeta = analyticsScoreMeta(analytics);
+  const scoreText = analytics.score_status === 'insufficient' ? 'недостаточно данных' : `${score}%`;
   const weakest = (analytics.signals || []).slice().sort((a, b) => Number(a.value || 0) - Number(b.value || 0))[0] || null;
 
-  if (!q) return `Готовность канала ${score}%. В запасе ${draftsCount} черновиков, ${planCount} идей и ${mediaCount} медиа.`;
+  if (!q) return `Готовность канала: ${scoreText} (${scoreMeta.label}). В запасе ${draftsCount} черновиков, ${planCount} идей и ${mediaCount} медиа.`;
   if (q.includes('автопилот') || q.includes('автопост')) {
     if (!channel) return 'Сначала подключи и активируй канал. Без активного канала автопилот не запустится.';
     if (scheduleCount < 1) return 'Сейчас нет слотов публикации. Добавь хотя бы один слот в настройках.';
-    return `Автопилот сейчас на уровне ${score}%. Слабое место: ${weakest?.label || 'аналитика'}. ${weakest?.action || ''}`.trim();
+    return `Автопилот: ${scoreText}. Слабое место: ${weakest?.label || 'аналитика'}. ${weakest?.action || ''}`.trim();
   }
   if (q.includes('чернов')) return draftsCount > 0 ? `Сейчас ${draftsCount} черновиков. Для устойчивости держи хотя бы 2–4.` : 'Черновиков нет. Создай хотя бы 2 заготовки.';
   if (q.includes('план') || q.includes('иде')) return planCount > 0 ? `В плане ${planCount} идей. Нормальный запас — 5–10.` : 'План пустой. Сгенерируй хотя бы 5 идей.';
   if (q.includes('медиа')) return mediaCount > 0 ? `В медиарезерве ${mediaCount} файлов. Держи запас под ближайшие публикации.` : 'Медиарезерв пустой. Добавь несколько изображений или видео.';
   if (q.includes('канал')) return channel ? `Сейчас активен канал «${resolveChannelLabel(channel.title || channel.channel_target || '')}».` : 'Активный канал не выбран.';
-  return `Канал сейчас готов на ${score}%. ${analytics.next_step || 'Открой аналитику и усили самое слабое место.'}`;
+  return `Канал сейчас: ${scoreText}. ${analytics.next_step || 'Открой аналитику и усили самое слабое место.'}`;
 }
 
 
@@ -3857,13 +3914,15 @@ function buildAIAssistantFallback(question = '') {
   const mediaCount = Number(summary.media_count || 0);
   const scheduleCount = Number(summary.schedule_count || 0);
   const score = Number(analytics.score || 0);
+  const scoreMeta = analyticsScoreMeta(analytics);
+  const scoreText = analytics.score_status === 'insufficient' ? 'недостаточно данных' : `${score}%`;
   const weakest = (analytics.signals || []).slice().sort((a, b) => Number(a.value || 0) - Number(b.value || 0))[0] || null;
 
-  if (!q) return `Готовность канала ${score}%. В запасе ${draftsCount} черновиков, ${planCount} идей и ${mediaCount} медиа.`;
+  if (!q) return `Готовность канала: ${scoreText} (${scoreMeta.label}). В запасе ${draftsCount} черновиков, ${planCount} идей и ${mediaCount} медиа.`;
   if (q.includes('автопилот') || q.includes('автопост')) {
     if (!channel) return 'Сначала подключи и активируй канал. Без активного канала автопилот не запустится.';
     if (scheduleCount < 1) return 'Сейчас нет слотов публикации. Добавь хотя бы один слот в настройках.';
-    return `Автопилот сейчас на уровне ${score}%. Слабое место: ${weakest?.label || 'аналитика'}. ${weakest?.action || ''}`.trim();
+    return `Автопилот: ${scoreText}. Слабое место: ${weakest?.label || 'аналитика'}. ${weakest?.action || ''}`.trim();
   }
   if (q.includes('чернов')) return draftsCount > 0 ? `Сейчас ${draftsCount} черновиков. Для устойчивости держи хотя бы 2–4.` : 'Черновиков нет. Создай хотя бы 2 заготовки.';
   if (q.includes('план') || q.includes('иде')) return planCount > 0 ? `В плане ${planCount} идей. Нормальный запас — 5–10.` : 'План пустой. Сгенерируй хотя бы 5 идей.';
@@ -3871,7 +3930,7 @@ function buildAIAssistantFallback(question = '') {
   if (q.includes('канал')) return channel ? `Сейчас активен канал «${resolveChannelLabel(channel.title || channel.channel_target || '')}».` : 'Активный канал не выбран.';
 
   const parts = [];
-  parts.push(`Канал сейчас готов на ${score}%.`);
+  parts.push(`Канал сейчас: ${scoreText} (${scoreMeta.label}).`);
   if (weakest) {
     parts.push(`Слабее всего сейчас «${weakest.label}» — ${weakest.value}%.`);
     if (weakest.action) parts.push(`Что сделать: ${weakest.action}.`);
