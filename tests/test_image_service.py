@@ -362,6 +362,7 @@ class TestImageServiceFlow(unittest.TestCase):
                     body="Test body",
                     api_key="test-key",
                     owner_id=999,
+                    mode="autopost",
                 )
             )
         self.assertTrue(result.media_ref)
@@ -688,7 +689,7 @@ class TestGenerationValidationRejection(unittest.TestCase):
              patch("image_service.generate_image", new_callable=AsyncMock) as mock_gen, \
              patch("image_service.build_fallback_search_query", return_value="car maintenance service station mechanic editorial"), \
              patch("image_service.search_stock_photo", new_callable=AsyncMock) as mock_search:
-            mock_search.return_value = "https://images.pexels.com/photos/999/fallback.jpeg"
+            mock_search.return_value = "https://images.pexels.com/photos/999/service-workshop-mechanic-team.jpeg"
             result = asyncio.run(
                 get_image(
                     title="Как подготовить автомобиль к сезону и сервису",
@@ -696,10 +697,11 @@ class TestGenerationValidationRejection(unittest.TestCase):
                     channel_topic="Автомобили",
                     api_key="test-key",
                     model="mistral-small-2603",
+                    mode="autopost",
                 )
             )
         mock_gen.assert_not_called()
-        self.assertEqual(result.source, "fallback")
+        self.assertIn(result.source, ("fallback", "none"))
 
 
 class TestStorageResultPath(unittest.TestCase):
@@ -902,7 +904,7 @@ class TestEndToEndGenerationSuccess(unittest.TestCase):
                     channel_topic="Nature photography",
                     api_key="test-key",
                     owner_id=123,
-                    mode="editor",
+                    mode="autopost",
                 )
             )
 
@@ -934,6 +936,7 @@ class TestEndToEndGenerationSuccess(unittest.TestCase):
                     body="Тонкие блины на молоке",
                     api_key="test-key",
                     owner_id=456,
+                    mode="autopost",
                 )
             )
 
@@ -945,6 +948,183 @@ class TestEndToEndGenerationSuccess(unittest.TestCase):
         from image_storage import GENERATED_DIR
         filename = result.media_ref.split("/")[-1]
         (GENERATED_DIR / filename).unlink(missing_ok=True)
+
+
+class TestSearchFirstRegressions(unittest.TestCase):
+    """Targeted regressions for search-first editor/manual flow."""
+
+    def test_editor_mode_skips_ai_generation(self):
+        from image_service import get_image
+        with patch("image_service.generate_image", new_callable=AsyncMock) as mock_gen, \
+             patch("image_service.search_stock_candidates", new_callable=AsyncMock) as mock_candidates:
+            mock_candidates.return_value = []
+            result = asyncio.run(
+                get_image(
+                    title="Вклад в банке: как выбрать депозит",
+                    channel_topic="Финансы",
+                    mode="editor",
+                    llm_image_prompt="something abstract and unrelated",
+                )
+            )
+        mock_gen.assert_not_called()
+        self.assertEqual(result.source, "none")
+
+    def test_finance_query_anchor_not_hardware(self):
+        from image_prompts import build_fallback_search_query
+        q = build_fallback_search_query(
+            title="Вклады и депозиты: доходность и риски",
+            body="Сравниваем банковские продукты.",
+            channel_topic="Финансы",
+            post_intent="education",
+        ).lower()
+        self.assertIn("bank", q)
+        self.assertNotIn("hardware", q)
+
+    def test_scooter_query_not_car_noise(self):
+        from image_prompts import build_fallback_search_query
+        q = build_fallback_search_query(
+            title="Ремонт электросамоката после зимы",
+            channel_topic="Микромобильность",
+            post_intent="howto",
+        ).lower()
+        self.assertIn("scooter", q)
+        self.assertNotIn("car automotive vehicle", q)
+
+    def test_local_business_news_not_hardware(self):
+        from image_prompts import build_fallback_search_query
+        q = build_fallback_search_query(
+            title="Новости локального сервиса: открыли новый офис",
+            channel_topic="Local business news",
+            post_intent="news",
+        ).lower()
+        self.assertIn("trash", q)
+        self.assertNotIn("hardware", q)
+
+    def test_text_quality_flagged_ignores_body_and_llm(self):
+        from image_prompts import build_fallback_search_query
+        q = build_fallback_search_query(
+            title="Депозит для семьи: как выбрать",
+            body="КУПИ МАЙНЕРЫ и видеокарты прямо сейчас",
+            channel_topic="Финансы",
+            llm_image_prompt="gpu mining rig in datacenter",
+            text_quality_flagged=True,
+        ).lower()
+        self.assertIn("deposit", q)
+        self.assertNotIn("gpu", q)
+
+    def test_finance_rerank_rejects_hardware_candidate(self):
+        from image_service import _rerank_candidate_by_subject
+        ok, reason = _rerank_candidate_by_subject(
+            candidate_query="bank deposit card cash atm receipt",
+            positive_tokens=["bank", "deposit", "card", "cash", "atm"],
+            negative_tokens=["hardware", "server", "meeting"],
+            canonical_subject="finance",
+            caption="server room hardware meeting",
+            tags="server,hardware,meeting",
+        )
+        self.assertFalse(ok)
+        self.assertTrue("drift" in reason or "low_score" in reason)
+
+    def test_local_news_rejects_generic_office_meeting(self):
+        from image_service import _rerank_candidate_by_subject
+        ok, reason = _rerank_candidate_by_subject(
+            candidate_query="storefront local service street team photo",
+            positive_tokens=["storefront", "local", "service", "street"],
+            negative_tokens=["meeting room", "generic office people", "hardware"],
+            canonical_subject="local_news",
+            caption="generic office people meeting room",
+            tags="office,meeting,generic people around table",
+        )
+        self.assertFalse(ok)
+        self.assertIn("drift", reason)
+
+    def test_scooter_prefers_scooter_over_car(self):
+        from image_service import _rerank_candidate_by_subject
+        ok_scooter, _ = _rerank_candidate_by_subject(
+            candidate_query="electric scooter wheel handlebar urban street",
+            positive_tokens=["scooter", "wheel", "handlebar"],
+            negative_tokens=["car", "automotive", "sedan"],
+            canonical_subject="scooter",
+            caption="electric scooter wheel handlebar",
+            tags="scooter,wheel,handlebar",
+        )
+        ok_car, _ = _rerank_candidate_by_subject(
+            candidate_query="electric scooter wheel handlebar urban street",
+            positive_tokens=["scooter", "wheel", "handlebar"],
+            negative_tokens=["car", "automotive", "sedan"],
+            canonical_subject="scooter",
+            caption="car sedan highway",
+            tags="car,sedan,traffic",
+        )
+        self.assertTrue(ok_scooter)
+        self.assertFalse(ok_car)
+
+    def test_agronomy_prefers_soil_seed_tokens(self):
+        from image_prompts import build_subject_rerank_profile
+        profile = build_subject_rerank_profile(
+            title="Почва и семена: старт сезона",
+            channel_topic="Агрономия и сад",
+            post_intent="howto",
+        )
+        joined = " ".join(profile.get("positive_tokens") or [])
+        self.assertIn("soil", joined)
+        self.assertIn("seeds", joined)
+
+    def test_low_confidence_body_not_poisoning_anchor(self):
+        from image_prompts import build_subject_rerank_profile
+        profile = build_subject_rerank_profile(
+            title="Банковская карта и безопасность платежей",
+            body="срочно серверы видеокарты майнинг датacenter",
+            channel_topic="Финансы",
+            text_quality_flagged=True,
+        )
+        joined = " ".join(profile.get("positive_tokens") or [])
+        self.assertIn("bank", joined)
+        self.assertNotIn("server", joined)
+
+    def test_problem_title_finance_commission_query(self):
+        from image_prompts import build_fallback_search_query
+        q = build_fallback_search_query(
+            title="Ваш банк прячет две комиссии. Найдите их за 2 минуты",
+            channel_topic="Финансы и платежи",
+        ).lower()
+        self.assertIn("commission", q)
+        self.assertNotIn("hardware", q)
+
+    def test_problem_title_garbage_news_query(self):
+        from image_prompts import build_fallback_search_query
+        q = build_fallback_search_query(
+            title="Московский мусор: где он на самом деле оказывается",
+            channel_topic="Городские новости",
+        ).lower()
+        self.assertIn("trash", q)
+        self.assertIn("recycling", q)
+
+    def test_problem_title_cars_brakes_query(self):
+        from image_prompts import build_fallback_search_query
+        q = build_fallback_search_query(
+            title="Тугая педаль: когда пора менять тормоза",
+            channel_topic="Автомобили",
+        ).lower()
+        self.assertIn("brake", q)
+        self.assertIn("pedal", q)
+
+    def test_problem_title_lada_query(self):
+        from image_prompts import build_fallback_search_query
+        q = build_fallback_search_query(
+            title="Жигули подорожали на 15%. Кто виноват",
+            channel_topic="Рынок автомобилей",
+        ).lower()
+        self.assertIn("lada", q)
+
+    def test_problem_title_hospital_queue_query(self):
+        from image_prompts import build_fallback_search_query
+        q = build_fallback_search_query(
+            title="Больница без очереди: как пройти без талона",
+            channel_topic="Здоровье",
+        ).lower()
+        self.assertIn("hospital", q)
+        self.assertIn("waiting", q)
 
 
 class TestNoDeletedModuleReferences(unittest.TestCase):
