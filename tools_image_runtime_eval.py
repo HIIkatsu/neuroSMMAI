@@ -15,6 +15,7 @@ class Case:
     body: str = ""
     text_quality_flagged: bool = False
     problematic: bool = False
+    source: str = "synthetic"  # synthetic | production_replay
 
 
 def make_candidate(domain_tag: str, *, good: bool, provider: str = "pexels") -> ProviderCandidate:
@@ -44,6 +45,22 @@ def classify_result(expected_domain: str, picked: ProviderCandidate | None) -> s
         return "no_image"
     text = f"{picked.caption} {' '.join(picked.tags)}".lower()
     return "relevant" if expected_domain in text else "wrong_image"
+
+
+def classify_generic_safety(picked: ProviderCandidate | None) -> str:
+    if not picked:
+        return "no_image"
+    text = f"{picked.caption} {' '.join(picked.tags)}".lower()
+    generic_markers = ("generic office", "stock photo", "meeting", "handshake")
+    return "generic_but_safe" if any(m in text for m in generic_markers) else "truly_relevant"
+
+
+def classify_domain_drift(case: Case, profile_domain: str) -> str:
+    expected = (case.domain or "").strip().lower()
+    actual = (profile_domain or "").strip().lower()
+    if expected and actual and expected != actual:
+        return "domain_drift"
+    return "domain_ok"
 
 
 def legacy_pick(candidates: list[ProviderCandidate]) -> ProviderCandidate | None:
@@ -113,31 +130,59 @@ CASES: list[Case] = [
 ]
 
 
-if __name__ == "__main__":
-    rows = []
-    wrong_count = 0
-    no_image_count = 0
+PRODUCTION_REPLAY_CASES: list[Case] = [
+    # real failed titles/log-like cases from production regressions
+    Case("Вклад в банке: как выбрать депозит", "Финансы", "finance", "relevant", [make_candidate("cars", good=False), make_candidate("finance", good=True)], problematic=True, source="production_replay"),
+    Case("Как выбрать правильный самокат для города", "Микромобильность", "scooter", "relevant", [make_candidate("cars", good=False), make_candidate("scooter", good=True)], problematic=True, source="production_replay"),
+    Case("Почва и семена: старт сезона", "Агрономия и сад", "gardening", "relevant", [make_candidate("finance", good=False), make_candidate("gardening", good=True)], problematic=True, source="production_replay"),
+    Case("Технический обзор серверов для дата-центра", "Технологии", "electronics", "relevant", [make_candidate("cars", good=False), make_candidate("electronics", good=True)], problematic=True, source="production_replay"),
+    Case("Город открыл новую автобусную полосу", "Локальные новости", "local_news", "relevant", [make_candidate("electronics", good=False), make_candidate("local_news", good=True)], problematic=True, source="production_replay"),
+]
 
-    for case in CASES:
+
+if __name__ == "__main__":
+    all_cases = CASES + PRODUCTION_REPLAY_CASES
+    rows = []
+    metrics = {
+        "relevant": 0,
+        "wrong_image": 0,
+        "no_image": 0,
+        "domain_drift": 0,
+        "generic_but_safe": 0,
+        "truly_relevant": 0,
+    }
+
+    for case in all_cases:
         profile, query, picked, decision, reason = current_pick(case)
         final = classify_result(case.domain, picked)
-        if final == "wrong_image":
-            wrong_count += 1
-        if final == "no_image":
-            no_image_count += 1
-        rows.append((case, profile, query, picked, decision, reason, final))
+        generic_class = classify_generic_safety(picked)
+        drift_class = classify_domain_drift(case, profile.domain_family)
 
-    print(f"TOTAL={len(rows)} WRONG={wrong_count} NO_IMAGE={no_image_count}")
-    print("| title | canonical profile / primary subject | search query | provider | candidate caption/tags | final decision | accepted/rejected reason | итог |")
-    print("|---|---|---|---|---|---|---|---|")
-    for case, profile, query, picked, decision, reason, final in rows:
+        metrics[final] += 1
+        if generic_class == "generic_but_safe":
+            metrics["generic_but_safe"] += 1
+        elif generic_class == "truly_relevant":
+            metrics["truly_relevant"] += 1
+        if drift_class == "domain_drift":
+            metrics["domain_drift"] += 1
+
+        rows.append((case, profile, query, picked, decision, reason, final, generic_class, drift_class))
+
+    print(
+        "METRICS "
+        + " ".join(f"{k.upper()}={v}" for k, v in metrics.items())
+        + f" TOTAL={len(rows)}"
+    )
+    print("| source | title | canonical profile / primary subject | search query | provider | candidate caption/tags | final decision | accepted/rejected reason | итог | generic-vs-relevant | drift |")
+    print("|---|---|---|---|---|---|---|---|---|---|---|")
+    for case, profile, query, picked, decision, reason, final, generic_class, drift_class in rows:
         caption_tags = "-" if not picked else f"{picked.caption} / {','.join(picked.tags)}"
         provider = "-" if not picked else picked.provider
-        print(f"| {case.title} | {profile.domain_family} / {profile.primary_subject[:48]} | {query[:72]} | {provider} | {caption_tags[:84]} | {decision} | {reason} | {final} |")
+        print(f"| {case.source} | {case.title} | {profile.domain_family} / {profile.primary_subject[:48]} | {query[:72]} | {provider} | {caption_tags[:84]} | {decision} | {reason} | {final} | {generic_class} | {drift_class} |")
 
     print("\n| problematic title | before (legacy first-valid) | after (current scoring) |")
     print("|---|---|---|")
-    for case in CASES:
+    for case in all_cases:
         if not case.problematic:
             continue
         before = classify_result(case.domain, legacy_pick(case.candidates))
