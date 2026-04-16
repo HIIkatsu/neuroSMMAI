@@ -424,6 +424,15 @@ class TestContentRoutesPinChannelId(unittest.TestCase):
         from miniapp_routes_content import ai_generate_post
         source = inspect.getsource(ai_generate_post)
         self.assertIn("_active_channel_profile_id", source)
+        self.assertIn("channel_profile_id=cpid", source)
+
+    def test_generate_draft_pins_cpid(self):
+        """generate_draft should pin channel_profile_id for draft generation path."""
+        import inspect
+        from miniapp_routes_content import generate_draft
+        source = inspect.getsource(generate_draft)
+        self.assertIn("_active_channel_profile_id", source)
+        self.assertIn("channel_profile_id=cpid", source)
 
     def test_plan_generate_pins_cpid(self):
         """generate_plan should pin channel_profile_id."""
@@ -483,6 +492,15 @@ class TestAutopostDisabledGuard(unittest.TestCase):
         source = inspect.getsource(scheduler_service)
         # The _job_post_regular method must check posts_enabled
         self.assertIn("posts_enabled", source, "Scheduler must check posts_enabled")
+
+    def test_scheduler_passes_cpid_to_generation(self):
+        """Scheduler autopost paths should forward channel_profile_id to generation payload."""
+        import inspect
+        import scheduler_service
+        regular = inspect.getsource(scheduler_service.SchedulerService._job_post_regular)
+        plan_item = inspect.getsource(scheduler_service.SchedulerService._job_post_plan_item)
+        self.assertIn("channel_profile_id=channel_profile_id or None", regular)
+        self.assertIn("channel_profile_id=channel_profile_id or None", plan_item)
 
 
 if __name__ == "__main__":
