@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -46,6 +47,7 @@ class ImageHistory:
         self._content_hashes: deque[_HistoryEntry] = deque(maxlen=maxlen)
         self._prompt_sigs: deque[_HistoryEntry] = deque(maxlen=maxlen)
         self._media_refs: deque[_HistoryEntry] = deque(maxlen=maxlen)
+        self._visual_patterns: deque[_HistoryEntry] = deque(maxlen=maxlen)
 
     def _is_recent(self, entry: _HistoryEntry) -> bool:
         return (time.monotonic() - entry.ts) < self._ttl
@@ -78,6 +80,14 @@ class ImageHistory:
         self._purge_expired(self._media_refs)
         return any(e.key == ref for e in self._media_refs)
 
+    def is_duplicate_visual_pattern(self, prompt: str) -> bool:
+        """Check if prompt repeats the same visual pattern/archetype."""
+        if not prompt:
+            return False
+        pattern_sig = _visual_pattern_signature(prompt)
+        self._purge_expired(self._visual_patterns)
+        return any(e.key == pattern_sig for e in self._visual_patterns)
+
     def record(
         self,
         *,
@@ -95,6 +105,9 @@ class ImageHistory:
             self._prompt_sigs.append(_HistoryEntry(key=sig, ts=now))
         if media_ref:
             self._media_refs.append(_HistoryEntry(key=media_ref.strip().lower(), ts=now))
+        if prompt:
+            pattern_sig = _visual_pattern_signature(prompt)
+            self._visual_patterns.append(_HistoryEntry(key=pattern_sig, ts=now))
 
     @property
     def size(self) -> int:
@@ -106,6 +119,19 @@ def _prompt_signature(prompt: str) -> str:
     # Normalize: lowercase, collapse whitespace, sort words
     words = sorted(set(prompt.lower().split()))
     normalized = " ".join(words)
+    return hashlib.md5(normalized.encode()).hexdigest()[:16]
+
+
+def _visual_pattern_signature(prompt: str) -> str:
+    """Create archetype signature to catch repeated visual patterns."""
+    tokens = re.findall(r"[a-zA-Z]{3,}", (prompt or "").lower())
+    stop = {
+        "professional", "photo", "photograph", "editorial", "quality", "high",
+        "photorealistic", "natural", "lighting", "realistic", "image", "show",
+        "scene", "with", "from", "about", "the", "and", "for", "clean",
+    }
+    meaningful = sorted(set(t for t in tokens if t not in stop))[:10]
+    normalized = " ".join(meaningful)
     return hashlib.md5(normalized.encode()).hexdigest()[:16]
 
 

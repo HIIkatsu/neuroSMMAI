@@ -55,6 +55,15 @@ def build_generation_prompt(
     channel_topic: str = "",
     llm_image_prompt: str = "",
     content_mode: str = "",
+    channel_style: str = "",
+    channel_audience: str = "",
+    channel_subniche: str = "",
+    onboarding_summary: str = "",
+    content_constraints: str = "",
+    content_exclusions: str = "",
+    visual_style: str = "",
+    forbidden_visuals: str = "",
+    post_intent: str = "",
 ) -> dict[str, str]:
     """Build a structured prompt for image generation.
 
@@ -97,18 +106,34 @@ def build_generation_prompt(
     else:
         core = "Professional editorial photograph"
 
+    onboarding_context = _compose_onboarding_context(
+        channel_style=channel_style,
+        channel_audience=channel_audience,
+        channel_subniche=channel_subniche,
+        onboarding_summary=onboarding_summary,
+        visual_style=visual_style,
+        post_intent=post_intent,
+    )
+    hard_limits = _compose_hard_limits(
+        content_constraints=content_constraints,
+        content_exclusions=content_exclusions,
+        forbidden_visuals=forbidden_visuals,
+    )
+
     # Compose the final prompt with mode-aware style
     effective_style = mode_style if mode_style else style_hint
-    prompt = f"{core}. {effective_style}. High quality, photorealistic, 4K."
+    prompt = f"{core}. {effective_style}. {onboarding_context}. High quality, photorealistic, 4K."
 
     # Add scene hint for mode specificity
     if mode_scene_hint and mode_scene_hint not in prompt:
-        prompt = f"{core}. {mode_scene_hint}. {effective_style}. High quality, photorealistic, 4K."
+        prompt = f"{core}. {mode_scene_hint}. {effective_style}. {onboarding_context}. High quality, photorealistic, 4K."
 
     # Add forbidden scenes to negative prompt
     negative = _NEGATIVE_PROMPT
     if mode_forbidden:
         negative = f"{_NEGATIVE_PROMPT}, {mode_forbidden}"
+    if hard_limits:
+        negative = f"{negative}, {hard_limits}"
 
     logger.info(
         "IMAGE_PROMPT_BUILT family=%s mode=%s prompt_len=%d has_llm_prompt=%s title=%r",
@@ -122,6 +147,49 @@ def build_generation_prompt(
         "family": family,
         "content_mode": content_mode,
     }
+
+
+def _compose_onboarding_context(
+    *,
+    channel_style: str = "",
+    channel_audience: str = "",
+    channel_subniche: str = "",
+    onboarding_summary: str = "",
+    visual_style: str = "",
+    post_intent: str = "",
+) -> str:
+    parts: list[str] = []
+    if channel_subniche:
+        parts.append(f"Subniche focus: {channel_subniche[:120]}")
+    if channel_audience:
+        parts.append(f"Audience context: {channel_audience[:140]}")
+    if channel_style:
+        parts.append(f"Channel tone: {channel_style[:140]}")
+    if visual_style:
+        parts.append(f"Visual style preference: {visual_style[:120]}")
+    if onboarding_summary:
+        parts.append(f"Onboarding profile: {onboarding_summary[:180]}")
+    if post_intent:
+        parts.append(f"Post intent: {post_intent[:100]}")
+    return " ".join(parts) if parts else "Brand-safe author-reputation friendly editorial scene"
+
+
+def _compose_hard_limits(
+    *,
+    content_constraints: str = "",
+    content_exclusions: str = "",
+    forbidden_visuals: str = "",
+) -> str:
+    parts: list[str] = []
+    if content_constraints:
+        parts.append(content_constraints[:150])
+    if content_exclusions:
+        parts.append(content_exclusions[:150])
+    if forbidden_visuals:
+        parts.append(forbidden_visuals[:150])
+    if not parts:
+        return "no cringe, no absurd scenes, no controversial symbols, no reputational risk visuals"
+    return ", ".join(parts)
 
 
 def _extract_visual_essence(title: str, body_lead: str, family: str, content_mode: str = "") -> str:
