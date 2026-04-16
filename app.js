@@ -786,6 +786,25 @@ function modal(title, bodyHtml, actionsHtml = '') {
   root.onclick = (e) => { if (e.target === root) closeModal(); };
 }
 
+function analyticsModal(bodyHtml) {
+  let root = document.getElementById('modal-root');
+  if (!root) {
+    root = document.createElement('div');
+    root.id = 'modal-root';
+    root.className = 'modal-backdrop';
+    document.body.appendChild(root);
+  }
+  root.innerHTML = `
+    <div class="modal analytics-clean-modal">
+      <div class="stack modal-body-stack analytics-clean-body">${bodyHtml}</div>
+    </div>
+  `;
+  root.classList.add('open');
+  document.body.classList.add('modal-open');
+  syncViewportHeight();
+  root.onclick = (e) => { if (e.target === root) closeModal(); };
+}
+
 function showPaywallModal(message, code = 'limit_reached') {
   let title, icon;
   if (code === 'upgrade_required') {
@@ -2243,18 +2262,15 @@ function openAnalyticsDetails() {
   const bestHour = period === '90d' ? '8:30 AM' : period === '30d' ? '8:45 AM' : '9:00 AM';
   const bestDay = 'Tuesdays';
   const body = `
-    <div class="stack analytics-overlay-sheet">
-      <div class="analytics-modal-head analytics-modal-head-v2 analytics-overlay-head">
-        <div class="analytics-overlay-title-wrap">
-          <div class="section-title">Stats</div>
-        </div>
+    <div class="stack analytics-overlay-sheet analytics-overlay-sheet-clean">
+      <div class="analytics-period-row">
         <div class="analytics-period-switch" role="tablist" aria-label="Период аналитики">
           <button class="analytics-period-btn ${period === '7d' ? 'active' : ''}" data-action="setAnalyticsPeriod" data-action-arg="7d">7d</button>
           <button class="analytics-period-btn ${period === '30d' ? 'active' : ''}" data-action="setAnalyticsPeriod" data-action-arg="30d">30d</button>
           <button class="analytics-period-btn ${period === '90d' ? 'active' : ''}" data-action="setAnalyticsPeriod" data-action-arg="90d">90d</button>
         </div>
       </div>
-      <div class="card analytics-modal-chart-card analytics-overlay-chart-card"><div class="card-inner stack compact-dashboard-card">
+      <div class="card analytics-modal-chart-card analytics-overlay-chart-card analytics-hero-card"><div class="card-inner stack compact-dashboard-card">
         <div class="analytics-overlay-kpi-title">ACCOUNT REACH</div>
         <div class="analytics-overlay-kpi-value">${compactNum(totalReach)}</div>
         ${sparkline}
@@ -2282,8 +2298,11 @@ function openAnalyticsDetails() {
         <div class="section-desc">${escapeHtml(a.next_step || 'Проверь слабые сигналы и усили резерв контента.')}</div>
       </div></div>
       <div class="section-desc analytics-overlay-footnote">Период: ${escapeHtml(periodLabel)} · Источник: текущие данные канала</div>
+      <div class="analytics-modal-close-row">
+        <button class="btn primary" data-action="closeModal">Закрыть</button>
+      </div>
     </div>`;
-  modal('Умная аналитика', body, `<button class="btn primary" data-action="closeModal">Закрыть</button>`);
+  analyticsModal(body);
 }
 
 function setAnalyticsPeriod(period = '7d') {

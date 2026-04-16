@@ -3868,6 +3868,15 @@ body.modal-open {
   gap: 14px;
 }
 
+.analytics-overlay-sheet-clean {
+  gap: 12px;
+}
+
+.analytics-period-row {
+  display: flex;
+  justify-content: flex-start;
+}
+
 .analytics-overlay-head {
   align-items: center;
 }
@@ -3942,6 +3951,23 @@ body.modal-open {
   opacity: 0.85;
 }
 
+.analytics-hero-card .card-inner {
+  gap: 8px;
+}
+
+.analytics-modal-close-row {
+  display: flex;
+  justify-content: stretch;
+}
+
+.analytics-modal-close-row .btn {
+  width: 100%;
+}
+
+.analytics-clean-modal .modal-body-stack.analytics-clean-body {
+  padding-top: 16px;
+}
+
 .analytics-modal-visual-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -3961,6 +3987,7 @@ body.modal-open {
 
 .analytics-grid-modal {
   gap: 10px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .analytics-item {
@@ -4126,6 +4153,7 @@ body.modal-open {
   .onboarding-card { padding: 22px 18px; }
 
   .analytics-grid { grid-template-columns: 1fr; }
+  .analytics-grid.analytics-grid-modal { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .analytics-modal-head { flex-direction: column; align-items: stretch; }
   .analytics-overlay-title-wrap .section-title { font-size: 48px; }
   .analytics-overlay-kpi-grid .analytics-item-top b { font-size: 28px; }
