@@ -107,8 +107,6 @@ const _ACTION_ALLOWLIST = Object.freeze(new Set([
   'generatePostFromPlan', 'openAIAssistant', 'webLogout',
   // Source chips UI
   'addNewsSource', 'removeNewsSource',
-  // Stats / Channel refreshed UI
-  'setStatsPeriod', 'openDisconnectActiveChannel',
   // Welcome screen
   'welcomeSaveChannel', 'welcomeGoToAddChannel',
 ]));
@@ -177,15 +175,6 @@ document.addEventListener('change', function(e) {
   else fn(el.value);
 });
 
-// Delegation: compact settings toggles in refreshed Channel screen.
-document.addEventListener('change', function(e) {
-  const el = e.target.closest('[data-setting-toggle]');
-  if (!el) return;
-  const key = el.getAttribute('data-setting-toggle');
-  if (!key) return;
-  toggleSettingField(key, !!el.checked);
-});
-
 // Delegation: Enter key in source add input triggers addNewsSource
 document.addEventListener('keydown', function(e) {
   if (e.key === 'Enter' && e.target.id === 'news-source-input') {
@@ -224,7 +213,6 @@ const state = {
   editorHistory: { undo: [], redo: [], lastCapturedHash: '' },
   pendingDeletedDraftIds: new Set(),
   pendingDeletedPlanIds: new Set(),
-  statsPeriod: '7d',
 };
 
 const UI_STATE_KEY = 'neurosmm_miniapp_ui_v1';
@@ -270,14 +258,6 @@ function safeJsonParse(raw, fallback = null) {
 function parseNewsSource(draft) {
   if (!draft || String(draft.draft_source || '') !== 'news_sniper') return null;
   return safeJsonParse(draft.news_source_json, null);
-}
-
-function formatCompactNumber(value) {
-  const num = Number(value || 0);
-  return new Intl.NumberFormat('en', {
-    notation: 'compact',
-    maximumFractionDigits: 1,
-  }).format(num);
 }
 
 function saveUiState() {
@@ -1994,10 +1974,10 @@ function _buildNavButtons() {
     channels:  '<svg viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>',
     autopost:  '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>',
   };
-  return navBtn('dashboard', 'Stats', icons.dashboard) +
+  return navBtn('dashboard', 'Главная', icons.dashboard) +
     navBtn('posts', 'Посты', icons.posts) +
     navBtn('plan', 'План', icons.plan) +
-    navBtn('channels', 'Channel', icons.channels) +
+    navBtn('channels', 'Каналы', icons.channels) +
     navBtn('autopost', 'Автопост', icons.autopost);
 }
 
@@ -2325,44 +2305,102 @@ function dashboardView() {
   const settings = state.data?.settings || {};
   const smartAnalytics = buildSmartAnalytics();
   const activeChannelData = state.data?.active_channel || null;
+  const nextPlan = plan.find(x => !x.posted) || null;
+  const latestDraft = drafts[0] || null;
   const postsCount = Number(stats.total_posts || 0);
   const postedLast7d = Number(stats.posted_last_7d || 0);
   const planCount = Number(smartAnalytics.summary.plan_count || plan.filter(x => !x.posted).length || 0);
   const draftsCount = Number(smartAnalytics.summary.drafts_count || drafts.length || 0);
-  const schedules = (state.data?.schedules || []).filter(x => Number(x?.enabled ?? 1) !== 0);
+  const mediaCount = Number(smartAnalytics.summary.media_count || 0);
   const readinessScore = Math.max(0, Math.min(100, Number(smartAnalytics.score || 0)));
+  const autopilotReady = Boolean(
+    Number(smartAnalytics.summary.onboarding_completed || 0) === 1 &&
+    activeChannelData &&
+    String(settings.topic || '').trim() &&
+    readinessScore >= 55
+  );
+  const channelLabel = activeChannelData
+    ? resolveChannelLabel(activeChannelData.title || activeChannelData.channel_target || '')
+    : 'Канал не выбран';
+  const topicLabel = String(settings.topic || '').trim() || 'Тема не указана';
   const nextAction = getDashboardImprovementAction(settings, smartAnalytics, activeChannelData, planCount, draftsCount);
 
-  const period = state.statsPeriod || '7d';
-  const channelSubscribers = Number(activeChannelData?.subscribers || activeChannelData?.subscribers_count || activeChannelData?.members_count || 0);
-  const subscribers = channelSubscribers > 0 ? channelSubscribers : null;
-  const reach = Number(stats.total_posts || 0);
-  const engagement = Number(stats.avg_posts_per_week || 0);
-  const bestHour = schedules.length ? schedules[0].time_hhmm : '09:00';
-
   return `
-    <div class="stack page-stack-tight stats-refresh-screen">
-      <div class="stats-refresh-head">
-        <div class="section-title stats-main-title">Stats</div>
-        <div class="stats-period-switch">
-          ${['7d','30d','90d'].map((item) => `<button class="${period === item ? 'active' : ''}" data-action="setStatsPeriod" data-action-arg="${item}">${item}</button>`).join('')}
+    <div class="home-stage stack home-stage-reset home-dashboard-v6">
+      <div class="card dashboard-top-card glass-card"><div class="card-inner dashboard-top-inner">
+        <div class="dashboard-top-copy">
+          <div class="dashboard-top-eyebrow">Активный канал</div>
+          <div class="dashboard-channel-name">${escapeHtml(channelLabel)}</div>
+          <div class="dashboard-topic-line">${escapeHtml(topicLabel)}</div>
+          <div class="dashboard-meta-pills dashboard-meta-pills-top">
+            <span class="meta-pill ${autopilotReady ? 'is-good' : ''}">${autopilotReady ? '● Автопилот готов' : '○ Автопилот не готов'}</span>
+            ${mediaCount ? `<span class="meta-pill">Медиа: ${mediaCount}</span>` : ''}
+          </div>
+          <div class="dashboard-top-glow"></div>
         </div>
+        <button class="dashboard-score-panel" data-action="openAnalyticsDetails" title="Открыть аналитику">
+          ${renderScoreRing(readinessScore, 'score-ring-lg')}
+          <div class="dashboard-score-label">Готовность</div>
+        </button>
+      </div></div>
+
+      <div class="dashboard-quick-row quick-actions-row-top quick-actions-row-main">
+        <button class="quick-chip quick-chip-compact active" data-action="openDraftEditor"><span>✎</span><b>Новый пост</b></button>
+        <button class="quick-chip quick-chip-compact" data-action="switchTab" data-action-arg="plan"><span>▣</span><b>План</b></button>
+        <button class="quick-chip quick-chip-compact" data-action="switchTab" data-action-arg="channels"><span>◎</span><b>Каналы</b></button>
+        <button class="quick-chip quick-chip-compact" data-action="openChannelProfile"><span>⚙</span><b>Профиль</b></button>
       </div>
-      <button class="stats-hero-card" data-action="openAnalyticsDetails">
-        <div class="stats-hero-label">Account Reach</div>
-        <div class="stats-hero-value">${formatCompactNumber(reach)}</div>
-        <svg class="stats-wave" viewBox="0 0 100 32" preserveAspectRatio="none" aria-hidden="true">
-          <path d="M0,22 C8,26 14,25 22,20 C30,16 37,21 44,17 C51,13 58,19 65,20 C72,21 79,19 86,13 C92,8 96,10 100,12 L100,32 L0,32 Z"></path>
-          <polyline points="0,22 10,24 22,20 34,19 44,17 55,20 66,20 78,19 90,12 100,12"></polyline>
-        </svg>
-      </button>
-      <div class="stats-metric-grid">
-        <div class="stats-metric-card"><div class="stats-metric-trend">${postedLast7d} in 7d</div><div class="stats-metric-value">${subscribers === null ? '—' : formatCompactNumber(subscribers)}</div><div class="stats-metric-label">Subscribers</div></div>
-        <div class="stats-metric-card"><div class="stats-metric-trend">${planCount} queued</div><div class="stats-metric-value">${formatCompactNumber(reach)}</div><div class="stats-metric-label">Total reach</div></div>
-        <div class="stats-metric-card"><div class="stats-metric-trend">${draftsCount} drafts</div><div class="stats-metric-value">${engagement > 0 ? engagement.toFixed(1) : '—'}</div><div class="stats-metric-label">Engagement</div></div>
-        <div class="stats-metric-card"><div class="stats-metric-trend">${period}</div><div class="stats-metric-value">${bestHour}</div><div class="stats-metric-label">Best time</div></div>
+
+      <div class="card next-action-hero-card glass-card"><div class="card-inner next-action-hero-inner">
+        <div class="next-action-hero-copy">
+          <div class="next-action-hero-label">${escapeHtml(nextAction.label)}</div>
+          <div class="next-action-hero-hint">${escapeHtml(nextAction.hint)}</div>
+          <div class="hero-micro-pills">
+            <span class="hero-micro-pill">${draftsCount} черновиков</span>
+            <span class="hero-micro-pill">${planCount} идей</span>
+            <span class="hero-micro-pill">${postedLast7d} за 7 дней</span>
+          </div>
+        </div>
+        <button class="btn primary next-action-hero-btn" data-hero-action="${escapeHtml(nextAction.actionKey)}">${escapeHtml(nextAction.cta)}</button>
+      </div></div>
+
+      <div class="dashboard-stat-row">
+        <button class="dashboard-stat-pill" data-action="switchTab" data-action-arg="posts"><span>${postsCount}</span><small>опубликовано</small></button>
+        <button class="dashboard-stat-pill ${draftsCount < 2 ? 'low' : ''}" data-action="switchTab" data-action-arg="posts"><span>${draftsCount}</span><small>черновиков</small></button>
+        <button class="dashboard-stat-pill ${planCount < 3 ? 'low' : ''}" data-action="switchTab" data-action-arg="plan"><span>${planCount}</span><small>в плане</small></button>
+        <button class="dashboard-stat-pill" data-action="switchTab" data-action-arg="channels"><span>${postedLast7d}</span><small>за 7 дней</small></button>
       </div>
-      <div class="stats-insight-card"><div class="stats-insight-title">AI Insight</div><div class="stats-insight-text">${escapeHtml(nextAction.hint || 'Держите регулярный ритм публикаций, чтобы стабильно наращивать охват и вовлечение.')}</div></div>
+
+      <div class="dashboard-secondary-grid">
+        <div class="card interactive-card glass-card" data-action="${nextPlan ? 'switchTab' : 'openPlanGenerator'}" ${nextPlan ? 'data-action-arg="plan"' : ''}><div class="card-inner compact-dashboard-card stack">
+          <div class="dashboard-card-head">
+            <div class="section-title mini-title">Ближайшая идея</div>
+            <span class="card-arrow">→</span>
+          </div>
+          ${nextPlan
+            ? `<div class="meta-brief-title clamp-3">${escapeHtml((nextPlan.prompt || nextPlan.topic || 'Идея публикации').slice(0, 140))}</div>
+               <div class="section-desc">${escapeHtml(formatDateTime(nextPlan.dt))}</div>
+               <div class="card-inline-action">Открыть план</div>`
+            : `<div class="section-desc empty-hint">Добавь несколько идей в план — бот наберёт запас и перестанет останавливаться.</div>
+               <div class="card-inline-action">Сгенерировать план</div>`
+          }
+        </div></div>
+        <div class="card interactive-card glass-card" data-action="openDraftEditor" ${latestDraft ? `data-action-arg="${latestDraft.id}"` : ''}><div class="card-inner compact-dashboard-card stack">
+          <div class="dashboard-card-head">
+            <div class="section-title mini-title">Последний черновик</div>
+            <span class="card-arrow">→</span>
+          </div>
+          ${latestDraft
+            ? `<div class="meta-brief-title clamp-3">${escapeHtml(((latestDraft.text || latestDraft.prompt || 'Черновик')).slice(0, 140))}</div>
+               <div class="section-desc">Готов к доработке и публикации.</div>
+               <div class="card-inline-action">Открыть редактор</div>`
+            : `<div class="section-desc empty-hint">Черновиков пока нет — открой редактор и создай первый пост.</div>
+               <div class="card-inline-action">Создать черновик</div>`
+          }
+        </div></div>
+      </div>
+
+      ${analyticsBlock()}
     </div>
   `;
 }
@@ -2370,45 +2408,80 @@ function dashboardView() {
 function channelsView() {
   const channels = state.data?.channels || [];
   const activeId = state.data?.active_channel?.id;
-  const active = channels.find((ch) => Number(ch.id) === Number(activeId)) || state.data?.active_channel || null;
-  const s = state.data?.settings || {};
-  const postingModeLabel = { both: 'Creative', posts: 'Posts only', news: 'News only' }[String(s.posting_mode || 'both')] || 'Creative';
+  const tier = state.data?.subscription?.subscription_tier || 'free';
+  const maxChannels = state.data?.limits?.channels_max || (tier === 'max' ? 10 : tier === 'pro' ? 3 : 1);
+  // Next tier locked slot preview counts (upsell motivation)
+  const nextTierMax = tier === 'free' ? 3 : tier === 'pro' ? 10 : 0;
+  const emptySlots = Math.max(0, maxChannels - channels.length);
+  const lockedSlots = Math.max(0, nextTierMax - maxChannels);
+
+  const filledHtml = channels.map(ch => `
+    <div class="item item-strong channel-item-pro channel-item-single-shell ${activeId === ch.id ? 'channel-item-active' : ''}">
+      <div class="item-row">
+        <div>
+          <div class="item-title">${escapeHtml(ch.title || 'Без названия')}</div>
+          <div class="item-sub">${escapeHtml(ch.topic || 'Тема не указана')}</div>
+        </div>
+        ${activeId === ch.id ? '<div class="badge badge-accent">Активный</div>' : '<div class="badge">Канал</div>'}
+      </div>
+      <div class="item-actions">
+        ${activeId === ch.id
+          ? `<button class="btn small ghost" data-action="openChannelProfile">Профиль канала</button>`
+          : `<button class="btn small primary" data-action="activateChannel" data-action-arg="${ch.id}">Сделать активным</button>`}
+        <button class="btn small danger" data-delete-channel="${ch.id}" data-channel-name="${escapeHtml(ch.title || 'канал')}">Удалить</button>
+      </div>
+    </div>`).join('');
+
+  const emptyHtml = Array.from({ length: emptySlots }, () => `
+    <div class="channel-slot channel-slot-empty" data-action="openChannelModal">
+      <div class="channel-slot-icon">＋</div>
+      <div class="channel-slot-text">
+        <b>Добавить канал</b>
+        <span>Слот доступен на вашем тарифе</span>
+      </div>
+    </div>`).join('');
+
+  const lockedHtml = Array.from({ length: lockedSlots }, () => `
+    <div class="channel-slot channel-slot-locked" data-action="showTariffsModal">
+      <div class="channel-slot-icon">🔒</div>
+      <div class="channel-slot-text">
+        <b>Заблокированный слот</b>
+        <span>Доступен на тарифе ${tier === 'free' ? 'PRO' : 'MAX'} — нажмите для апгрейда</span>
+      </div>
+    </div>`).join('');
+
+  // Linked channels / mirror publishing hint (show when 2+ channels exist)
+  const linkedHint = channels.length >= 2 ? `
+    <div class="channel-linked-hint card">
+      <div class="card-inner">
+        <div class="channel-linked-header">
+          <span class="channel-linked-icon">🔗</span>
+          <div>
+            <strong>Связанная публикация</strong>
+            <div class="channel-linked-desc">Публикуйте один пост сразу в несколько каналов. При публикации из редактора вы можете выбрать дополнительные каналы для одновременной отправки.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  ` : '';
 
   return `
-    <div class="stack page-stack-tight channel-refresh-screen">
-      <div class="section-title channel-main-title">Channel</div>
-      <div class="channel-hero-card">
-        <div class="channel-avatar-ring">◌</div>
-        <div class="channel-hero-name">${escapeHtml(active ? ('@' + (active.title || active.channel_target || 'channel').replace(/^@/, '')) : '@channel_not_connected')}</div>
-        <div class="channel-hero-meta"><span class="dot"></span>${active ? 'Connected' : 'Not connected'} • ${Number(active?.subscribers || active?.subscribers_count || active?.members_count || 0) > 0 ? formatCompactNumber(Number(active?.subscribers || active?.subscribers_count || active?.members_count || 0)) : '—'} subs</div>
-        <button class="channel-hero-btn" data-action="openChannelProfile">View Channel ↗</button>
+    <div class="stack page-stack-tight">
+      <div class="section-head">
+        <div>
+          <div class="section-title">Каналы</div>
+          <div class="section-desc">Слоты каналов по вашему тарифу. Добавляйте и управляйте каналами.</div>
+        </div>
+        ${channels.length < maxChannels
+          ? '<button class="btn primary" data-action="openChannelModal">Добавить канал</button>'
+          : '<button class="btn ghost" data-action="showTariffsModal">Улучшить тариф</button>'}
       </div>
-
-      <div class="channel-group-title">AI CONFIGURATION</div>
-      <div class="channel-group-card">
-        <div class="channel-row">
-          <div class="channel-row-title">Default Tone</div>
-          <button class="channel-row-value" data-action="openSettingsModal">${escapeHtml(postingModeLabel)}</button>
-        </div>
-        <div class="channel-row">
-          <div><div class="channel-row-title">Auto-Formatting</div><div class="channel-row-sub">Add emojis and hashtags</div></div>
-          <label class="switch modern-switch channel-switch"><input type="checkbox" data-setting-toggle="source_auto_draft" ${(s.source_auto_draft === '1' || s.source_auto_draft === undefined) ? 'checked' : ''}/><span class="switch-ui"></span></label>
-        </div>
+      <div class="channel-slots-grid">
+        ${filledHtml}
+        ${emptyHtml}
+        ${lockedHtml}
       </div>
-
-      <div class="channel-group-title">SYSTEM</div>
-      <div class="channel-group-card">
-        <div class="channel-row">
-          <div class="channel-row-title">Notifications</div>
-          <label class="switch modern-switch channel-switch"><input type="checkbox" data-setting-toggle="news_enabled" ${s.news_enabled === '1' ? 'checked' : ''}/><span class="switch-ui"></span></label>
-        </div>
-        <div class="channel-row">
-          <div class="channel-row-title">Posting Defaults</div>
-          <button class="channel-row-value" data-action="openSettingsModal">Open</button>
-        </div>
-      </div>
-
-      <button class="channel-disconnect-card" data-action="openDisconnectActiveChannel">Disconnect Channel</button>
+      ${linkedHint}
     </div>
   `;
 }
@@ -2549,93 +2622,35 @@ function planCard(item) {
   `;
 }
 
-function _weekdayChipLabel(dt, fallbackIndex) {
-  const date = dt ? new Date(dt) : new Date(Date.now() + fallbackIndex * 86400000);
-  const dayLabel = new Intl.DateTimeFormat('en-US', { weekday: 'short' }).format(date).toUpperCase();
-  const dayNum = new Intl.DateTimeFormat('en-US', { day: '2-digit' }).format(date);
-  const key = new Intl.DateTimeFormat('sv-SE', { dateStyle: 'short' }).format(date);
-  return { dayLabel, dayNum, key };
-}
-
-function _timelineStatus(item) {
-  if (item.posted) return 'published';
-  if (String(item.status || '').toLowerCase() === 'draft') return 'draft';
-  return 'scheduled';
-}
-
 function planView() {
   const items = visiblePlanItems().slice().sort((a, b) => (a.dt > b.dt ? 1 : -1));
-  const schedules = (state.data?.schedules || []).filter(x => Number(x?.enabled ?? 1) !== 0);
-  const dateChips = [];
-  const byDay = new Map();
-
-  items.forEach((item) => {
-    const chip = _weekdayChipLabel(item.dt, dateChips.length);
-    if (!byDay.has(chip.key)) {
-      byDay.set(chip.key, { chip, items: [] });
-      dateChips.push(chip);
-    }
-    byDay.get(chip.key).items.push(item);
-  });
-  while (dateChips.length < 6) {
-    const chip = _weekdayChipLabel(null, dateChips.length);
-    if (!byDay.has(chip.key)) {
-      byDay.set(chip.key, { chip, items: [] });
-      dateChips.push(chip);
-    }
-  }
-
-  const selectedKey = dateChips[0]?.key;
-  const selectedDay = selectedKey ? byDay.get(selectedKey) : null;
-  const dayItems = (selectedDay?.items || []).slice().sort((a, b) => (a.dt > b.dt ? 1 : -1));
-  const slotTimes = [...new Set([
-    ...dayItems.map((item) => (item.dt ? String(item.dt).slice(11, 16) : '')).filter(Boolean),
-    ...schedules.map((row) => row.time_hhmm || '').filter(Boolean),
-    '09:00', '11:30', '14:00', '16:00', '18:45',
-  ])].sort();
-
-  const timelineRows = slotTimes.map((time) => {
-    const found = dayItems.find((item) => String(item.dt || '').slice(11, 16) === time);
-    if (!found) {
-      return `
-        <div class="plan-timeline-row">
-          <div class="plan-timeline-time">${escapeHtml(time)}</div>
-          <button class="plan-empty-slot" data-action="openPlanEditor">＋ Schedule</button>
-        </div>
-      `;
-    }
-    const status = _timelineStatus(found);
-    const statusLabel = status === 'published' ? 'Published' : (status === 'draft' ? 'Draft' : 'Scheduled');
-    return `
-      <div class="plan-timeline-row">
-        <div class="plan-timeline-time">${escapeHtml(time)}</div>
-        <div class="plan-timeline-card plan-status-${status}" data-plan-id="${Number(found.id || 0)}">
-          <div class="plan-timeline-status">${statusLabel}</div>
-          <div class="plan-timeline-title">${escapeHtml(found.prompt || found.topic || 'Идея публикации')}</div>
-          <div class="plan-timeline-actions">
-            <button class="btn small ghost" data-action="openPlanEditor" data-action-arg="${found.id}">Edit</button>
-            <button class="btn small danger" data-action="deletePlanItem" data-action-arg="${found.id}">Delete</button>
-          </div>
-        </div>
-      </div>
-    `;
-  });
-
+  const upcoming = items.filter(x => !x.posted);
+  const done = items.filter(x => x.posted);
   return `
-    <div class="stack page-stack-tight plan-refresh-screen">
-      <div class="plan-refresh-head">
-        <div class="section-title plan-main-title">Plan</div>
-        <div class="plan-day-strip">
-          ${dateChips.map((chip, idx) => `
-            <button class="plan-day-pill ${idx === 0 ? 'active' : ''}">
-              <span>${chip.dayLabel}</span>
-              <strong>${chip.dayNum}</strong>
-            </button>
-          `).join('')}
+    <div class="stack page-stack-tight">
+      <div class="section-head plan-page-head">
+        <div>
+          <div class="section-title">Контент-план</div>
+          <div class="section-desc">Запас идей и тем, из которых бот готовит посты.</div>
+        </div>
+        <div class="item-actions plan-head-actions">
+          <button class="btn ghost" data-action="openPlanGenerator">Сгенерировать</button>
+          <button class="btn primary" data-action="openPlanEditor">Добавить</button>
         </div>
       </div>
-      <div class="plan-timeline">${timelineRows.join('')}</div>
-      <button class="plan-fab" data-action="openPlanEditor" aria-label="Add plan item">+</button>
+      ${upcoming.length
+        ? `<div class="list plan-list">${upcoming.map(planCard).join('')}</div>`
+        : `<div class="empty-state-card">
+             <div class="empty-state-icon">▣</div>
+             <div class="empty-state-title">План пустой</div>
+             <div class="empty-state-text">Без запаса тем автопилот остановится. Добавь 5–10 идей или сгенерируй план одной кнопкой.</div>
+             <button class="btn primary" data-action="openPlanGenerator">Сгенерировать план</button>
+           </div>`
+      }
+      ${done.length ? `
+        <div class="section-head section-head-tight"><div class="section-title mini-title">Уже опубликовано</div></div>
+        <div class="list plan-list plan-list-done">${done.map(planCard).join('')}</div>
+      ` : ''}
     </div>
   `;
 }
@@ -3030,36 +3045,6 @@ function openSettingsModal() {
     </div>
   `;
   modal('Настройки', body, `<button class="btn primary" data-action="saveSettings">Сохранить</button><button class="btn ghost" data-action="closeModal">Отмена</button>`);
-}
-
-
-async function toggleSettingField(key, enabled) {
-  try {
-    await api('/api/settings', {
-      method: 'PATCH',
-      body: JSON.stringify({ [key]: enabled ? '1' : '0' })
-    });
-    await refreshSections(['settings','core'], { silent: true });
-  } catch (e) {
-    toast(e.message || 'Не удалось обновить настройку');
-    await refreshSections(['settings'], { silent: true });
-    render();
-  }
-}
-
-function setStatsPeriod(period) {
-  if (!['7d', '30d', '90d'].includes(String(period))) return;
-  state.statsPeriod = period;
-  render();
-}
-
-async function openDisconnectActiveChannel() {
-  const active = activeChannel();
-  if (!active?.id) {
-    toast('Активный канал не выбран');
-    return;
-  }
-  await deleteChannel(active.id, active.title || 'канал');
 }
 
 function renderBody() {
@@ -5478,8 +5463,6 @@ window.undoEditorChange = undoEditorChange;
 window.redoEditorChange = redoEditorChange;
 window.welcomeSaveChannel = welcomeSaveChannel;
 window.welcomeGoToAddChannel = welcomeGoToAddChannel;
-window.setStatsPeriod = setStatsPeriod;
-window.openDisconnectActiveChannel = openDisconnectActiveChannel;
 
 
 
@@ -5543,3 +5526,4 @@ function fixPreviewMedia(){
 window.addEventListener("load", ()=>{
   fixPreviewMedia();
 });
+
