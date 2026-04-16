@@ -135,6 +135,25 @@ def clean_text(text: str) -> str:
     return text.strip()
 
 
+def _safe_json_list(raw: str | list[str] | tuple[str, ...] | None) -> list[str]:
+    """Best-effort parse for settings that may be JSON arrays or plain text."""
+    if raw is None:
+        return []
+    if isinstance(raw, (list, tuple)):
+        return [clean_text(x) for x in raw if clean_text(x)]
+    text = str(raw or "").strip()
+    if not text:
+        return []
+    if text.startswith("[") and text.endswith("]"):
+        try:
+            data = json.loads(text)
+            if isinstance(data, list):
+                return [clean_text(x) for x in data if clean_text(x)]
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pass
+    return [clean_text(x) for x in re.split(r"[,\n;]+", text) if clean_text(x)]
+
+
 def _looks_like_ai_error(text: str) -> bool:
     t = (text or "").strip()
     return (not t) or t.startswith(_ERROR_PREFIXES)
@@ -981,6 +1000,8 @@ async def _load_owner_strategy_settings(
     post_scenarios: str,
     channel_audience: str,
     content_constraints: str,
+    content_exclusions: str = "",
+    channel_formats: str = "",
 ) -> dict[str, Any]:
     """Load strategy settings for content generation.
 
@@ -994,7 +1015,8 @@ async def _load_owner_strategy_settings(
         "post_scenarios": post_scenarios,
         "channel_audience": channel_audience,
         "content_constraints": content_constraints,
-        "content_exclusions": "",
+        "content_exclusions": content_exclusions,
+        "channel_formats": channel_formats,
     }
     if not owner_id:
         return settings
@@ -1014,6 +1036,7 @@ async def _load_owner_strategy_settings(
             "channel_mode": "channel_mode",
             "channel_frequency": "channel_frequency",
             "channel_formats": "channel_formats",
+            "onboarding_completed": "onboarding_completed",
             "news_enabled": "news_enabled",
             "news_sources": "news_sources",
             "author_role_type": "author_role_type",
@@ -1628,6 +1651,18 @@ def _quality_issues(channel_topic: str, requested: str, normalized: dict[str, st
             issues.append(f"дешёвая или слишком обещающая формулировка: {phrase}")
     if family in {"massage", "cars"} and any(x in text for x in ["реабилитация", "пациенты", "диагноз", "лечение"]):
         issues.append("неуместный медицинский или слишком формальный тон для сервисной ниши")
+    generic_slop = [
+        "эта тема важна для всех",
+        "каждый должен это знать",
+        "универсальный совет",
+        "подходит абсолютно всем",
+        "решение на все случаи жизни",
+        "всем нужно срочно",
+    ]
+    if any(p in text for p in generic_slop):
+        issues.append("универсальная/безадресная подача вместо текста под аудиторию канала")
+    if _DISMISSIVE_RE.search(" ".join([title, body, cta])):
+        issues.append("репутационно опасная пренебрежительная формулировка")
     if family == "gaming" and any(x in text for x in ["покупка нового пк", "автомобил", "машина"]):
         issues.append("текст ушёл в соседнюю тему вместо исходного игрового запроса")
     roots = [_title_root(x) for x in (recent_posts or [])[:8] if _title_root(x)]
@@ -2082,6 +2117,20 @@ def assess_text_quality(
     if not title or len(title.strip()) < 5:
         pub_score -= 3
         reasons.append("publish_ready: нет заголовка")
+    generic_universal_markers = [
+        "для всех ниш",
+        "для любого бизнеса",
+        "подходит абсолютно всем",
+        "универсальный пост",
+        "для всех и каждого",
+    ]
+    generic_hits = sum(1 for m in generic_universal_markers if m in lower_text)
+    if generic_hits:
+        pub_score -= min(4, generic_hits * 2)
+        reasons.append("publish_ready: универсально-шаблонная подача без привязки к аудитории")
+    if _DISMISSIVE_RE.search(full_text):
+        pub_score = min(pub_score, 2)
+        reasons.append("publish_ready: репутационно токсичная/пренебрежительная формулировка")
     dims["publish_ready"] = max(0, pub_score)
 
     # --- 11. REQUEST_FIT: how well text matches the specific user request ---
@@ -2353,7 +2402,7 @@ def _family_style_instruction(family: str) -> str:
     ))
 
 
-def _build_generation_prompt(*, today: str, channel_topic: str, requested: str, bridge_instruction: str, strategy: dict[str, str], angle: dict[str, str], family: str, recent_posts: list[str], recent_plan: list[str], recent_topics: list[str] | None = None, extra_rules: str = "", channel_style: str = "", channel_audience: str = "", post_scenarios: str = "", content_constraints: str = "", content_exclusions: str = "", author_role_type: str = "", author_role_description: str = "", author_activities: str = "", author_forbidden_claims: str = "", strategy_mode: dict[str, str] | None = None, generation_mode: str = "manual") -> str:
+def _build_generation_prompt(*, today: str, channel_topic: str, requested: str, bridge_instruction: str, strategy: dict[str, str], angle: dict[str, str], family: str, recent_posts: list[str], recent_plan: list[str], recent_topics: list[str] | None = None, extra_rules: str = "", channel_style: str = "", channel_audience: str = "", post_scenarios: str = "", content_constraints: str = "", content_exclusions: str = "", channel_formats: str = "", onboarding_completed: str = "", author_role_type: str = "", author_role_description: str = "", author_activities: str = "", author_forbidden_claims: str = "", strategy_mode: dict[str, str] | None = None, generation_mode: str = "manual") -> str:
     history_block = recent_history_lines({"posts": recent_posts[:4], "plan": recent_plan[:4]}, limit=5)
     recent_openings = "\n".join("- " + re.split(r"[.!?\n]", x, maxsplit=1)[0][:90] for x in recent_posts[:4] if x) or "- пока нет данных"
     blocked_phrases = _recent_phrases(recent_posts)
@@ -2362,20 +2411,29 @@ def _build_generation_prompt(*, today: str, channel_topic: str, requested: str, 
     audience_line = channel_audience or strategy.get('audience') or 'не указана'
     style_line = channel_style or strategy.get('style_text') or strategy.get('style_preset') or 'не указан'
     scenarios_line = post_scenarios or strategy.get('post_scenarios') or 'не указаны'
+    rubrics_line = str(strategy.get('rubrics') or "").strip() or "не указаны"
     constraint_line = strategy.get('constraint_line') or 'без ограничений'
     if content_constraints and content_constraints.strip() not in ('[]', ''):
-        constraint_line = content_constraints.strip().strip('[]').replace('"', '').replace(',', ';')
+        _constraints_list = _safe_json_list(content_constraints)
+        constraint_line = "; ".join(_constraints_list[:8]) if _constraints_list else content_constraints.strip().strip('[]').replace('"', '').replace(',', ';')
+    _formats_list = _safe_json_list(channel_formats)
+    formats_line = ", ".join(_formats_list[:8]) if _formats_list else "не указаны"
+    onboarding_line = (
+        "onboarding завершен — профиль обязателен к исполнению"
+        if str(onboarding_completed or "").strip() == "1"
+        else "onboarding не завершён — строго используй всё, что уже задано в профиле"
+    )
     exclusions_block = ""
     if content_exclusions and content_exclusions.strip():
         exclusions_block = f"\nСТРОГО ЗАПРЕЩЕНО в этом посте (никогда не упоминать, не намекать, не касаться):\n{content_exclusions.strip()}\n"
 
-    # --- Topic priority: manual request wins over channel topic ---
+    # --- Topic priority: channel topic is mandatory anchor in all modes ---
     if generation_mode == "manual" and requested.lower() != channel_topic.lower():
         topic_priority_block = (
-            f"ПРИОРИТЕТ ТЕМЫ: Тема ЭТОГО поста — «{requested}». Тема канала «{channel_topic}» — "
-            f"только мягкий контекст для аудитории (до 15% текста). "
-            f"Если запрос отличается от темы канала — пиши СТРОГО про запрос. "
-            f"НЕ подменяй тему поста темой канала. НЕ склеивай несовместимые сущности."
+            f"ПРИОРИТЕТ ТЕМЫ КАНАЛА: базовая тема поста обязана оставаться в рамках «{channel_topic}». "
+            f"Запрос «{requested}» используй только как конкретный угол, боль, кейс или вопрос ВНУТРИ темы канала. "
+            f"Если запрос уводит в сторону от «{channel_topic}», верни фокус на тему канала и объясни через релевантный ракурс. "
+            "Запрещено публиковать текст, который можно переставить в другой тематический канал без изменений."
         )
     else:
         topic_priority_block = (
@@ -2511,10 +2569,14 @@ def _build_generation_prompt(*, today: str, channel_topic: str, requested: str, 
 {role_voice_reminder}
 
 Профиль канала — строго соблюдай:
+- Onboarding: {onboarding_line}
 - Для кого пишешь (аудитория): {audience_line}
 - Стиль и голос: {style_line}
+- Подниши / рубрики: {rubrics_line}
 - Сценарии и форматы постов: {scenarios_line}
+- Форматы контента канала: {formats_line}
 - Жёсткие ограничения канала: {constraint_line}
+- Прямые запреты: {content_exclusions.strip() or "явно не заданы, но репутационные риски исключить"}
 - Голос этой генерации: {_voice_variant()}
 {author_role_block}{role_block_enhanced}{strategy_mode_block}
 Угол именно этого поста:
@@ -2811,6 +2873,8 @@ async def generate_post_bundle(
     post_scenarios: str = "",
     channel_audience: str = "",
     content_constraints: str = "",
+    content_exclusions: str = "",
+    channel_formats: str = "",
     recent_posts: list[str] | None = None,
     recent_plan: list[str] | None = None,
     base_url: str | None = None,
@@ -2830,6 +2894,8 @@ async def generate_post_bundle(
         post_scenarios,
         channel_audience,
         content_constraints,
+        content_exclusions,
+        channel_formats,
     )
     strategy = build_generation_strategy(owner_settings)
     # Map generation_path to generation_mode for the new pipeline
@@ -2917,6 +2983,8 @@ async def generate_post_bundle(
             post_scenarios=str(owner_settings.get("post_scenarios") or ""),
             content_constraints=str(owner_settings.get("content_constraints") or ""),
             content_exclusions=str(owner_settings.get("content_exclusions") or ""),
+            channel_formats=str(owner_settings.get("channel_formats") or ""),
+            onboarding_completed=str(owner_settings.get("onboarding_completed") or ""),
             strategy_mode=_strategy_mode,
             generation_mode=generation_mode,
             **_author_role_kwargs(owner_settings),
@@ -2961,6 +3029,10 @@ async def generate_post_bundle(
             normalized["quality_score"] = str(q_score)
             normalized["quality_reasons"] = "; ".join(q_reasons) if q_reasons else ""
             normalized["quality_dims"] = "; ".join(f"{k}={v}" for k, v in q_dims.items()) if q_dims else ""
+            if q_dims.get("topic_fit", 10) <= 2 and channel_topic:
+                issues.append("текст вышел из темы канала")
+                candidates.append((normalized, issues, len(issues)))
+                continue
 
             if generation_path == "autopost":
                 if q_score < AUTOPOST_MIN_QUALITY_SCORE:
@@ -3263,6 +3335,8 @@ async def generate_post_text(
         post_scenarios=scenarios,
         channel_audience=audience,
         content_constraints=constraints,
+        content_exclusions=(ch_settings.get("content_exclusions") or ""),
+        channel_formats=(ch_settings.get("channel_formats") or ""),
         recent_posts=recent_posts or [],
         recent_plan=recent_plan or [],
         base_url=base_url,

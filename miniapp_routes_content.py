@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
+import json
 import logging
 import re
 import time
@@ -28,6 +29,24 @@ from topic_utils import detect_topic_family, get_family_guardrails
 from runtime_trace import new_trace_id, trace_text_generation, debug_fields, is_debug_trace_enabled, TraceTimer
 
 router = APIRouter(tags=["content"])
+
+
+def _safe_json_list(raw: str | list[str] | tuple[str, ...] | None) -> list[str]:
+    if raw is None:
+        return []
+    if isinstance(raw, (list, tuple)):
+        return [clean_text(x) for x in raw if clean_text(x)]
+    text = str(raw or "").strip()
+    if not text:
+        return []
+    if text.startswith("[") and text.endswith("]"):
+        try:
+            data = json.loads(text)
+            if isinstance(data, list):
+                return [clean_text(x) for x in data if clean_text(x)]
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pass
+    return [clean_text(x) for x in re.split(r"[,\n;]+", text) if clean_text(x)]
 
 
 async def _active_channel_profile_id(owner_id: int) -> int | None:
@@ -306,6 +325,8 @@ async def ai_generate_text(
         post_scenarios=(ch_settings.get("post_scenarios") or ""),
         channel_audience=(ch_settings.get("channel_audience") or ""),
         content_constraints=(ch_settings.get("content_constraints") or ""),
+        content_exclusions=(ch_settings.get("content_exclusions") or ""),
+        channel_formats=(ch_settings.get("channel_formats") or ""),
         recent_posts=(history.get("recent_posts", []) + history.get("recent_drafts", []))[:10],
         recent_plan=history.get("recent_plan", [])[:10],
         base_url=config.openrouter_base_url,
@@ -375,6 +396,12 @@ async def ai_rewrite(
     }
     mode_instruction = mode_map.get(clean_text(data.mode) or 'improve', mode_map['improve'])
     style = (ch_settings.get("channel_style") or "").strip()
+    audience = (ch_settings.get("channel_audience") or "").strip()
+    scenarios = (ch_settings.get("post_scenarios") or "").strip()
+    constraints = "; ".join(_safe_json_list(ch_settings.get("content_constraints") or "")) or (ch_settings.get("content_constraints") or "").strip()
+    exclusions = (ch_settings.get("content_exclusions") or "").strip()
+    formats = ", ".join(_safe_json_list(ch_settings.get("channel_formats") or ""))
+    onboarding_done = str(ch_settings.get("onboarding_completed") or "").strip() == "1"
     family = detect_topic_family(topic) if topic else "generic"
     family_guardrails = get_family_guardrails(family) if family != "generic" else ""
     guardrails_line = f"\nПравила ниши: {family_guardrails}" if family_guardrails else ""
@@ -390,6 +417,12 @@ async def ai_rewrite(
 
 Тема канала: {topic or 'без общей темы'}
 Стиль канала: {style or 'живой, простой, уверенный'}{guardrails_line}
+Onboarding: {"завершён" if onboarding_done else "частичный"}.
+Целевая аудитория: {audience or 'не указана'}
+Подниши/сценарии: {scenarios or 'не указаны'}
+Форматы контента: {formats or 'не указаны'}
+Ограничения: {constraints or 'не указаны'}
+Запреты: {exclusions or 'не указаны'}
 
 Исходный текст:
 {base_text}
@@ -401,6 +434,8 @@ async def ai_rewrite(
 - Без markdown и служебных пояснений.
 - Без фраз вроде «в этой статье», «это не просто», «давайте разберёмся».
 - Без лишней философии, нужен обычный живой пост для Telegram.
+- Сохрани жёсткое соответствие теме канала и интересам аудитории. Никаких универсальных формулировок «для всех».
+- Не делай кликбейт, не используй токсичную, унизительную или манипулятивную подачу.
 - НЕ выдумывай @упоминания пользователей, названия каналов, ссылки, URL или источники. Если в исходном тексте нет ссылок и @упоминаний, не добавляй их.
 """.strip()
         }]
@@ -450,6 +485,10 @@ async def ai_assets(
         channel_style=style,
         content_rubrics=rubrics,
         post_scenarios=scenarios,
+        channel_audience=(ch_settings.get("channel_audience") or ""),
+        content_constraints=(ch_settings.get("content_constraints") or ""),
+        content_exclusions=(ch_settings.get("content_exclusions") or ""),
+        channel_formats=(ch_settings.get("channel_formats") or ""),
         recent_posts=(history.get("recent_posts", []) + history.get("recent_drafts", []))[:10],
         recent_plan=history.get("recent_plan", [])[:10],
         base_url=config.openrouter_base_url,

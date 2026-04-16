@@ -550,6 +550,8 @@ async def generate_post_payload(
         post_scenarios=(ch_settings.get("post_scenarios") or ""),
         channel_audience=(ch_settings.get("channel_audience") or ""),
         content_constraints=(ch_settings.get("content_constraints") or ""),
+        content_exclusions=(ch_settings.get("content_exclusions") or ""),
+        channel_formats=(ch_settings.get("channel_formats") or ""),
         recent_posts=recent_posts[:10],
         recent_plan=recent_plan[:10],
         base_url=getattr(config, "openrouter_base_url", None),
