@@ -3116,18 +3116,9 @@ async def generate_post_bundle(
                     len(_tv_result.fake_personal_claims),
                     len(_tv_result.source_drift_reasons),
                 )
-                # Attempt repair: strip detected fabricated claims from text
-                _combined_text = _strip_fabricated_claims(
-                    _combined_text, _tv_result
-                )
-                # Re-split into fields
-                _parts = _combined_text.split("\n", 2)
-                if len(_parts) >= 1:
-                    normalized["title"] = _parts[0].strip()
-                if len(_parts) >= 2:
-                    normalized["body"] = _parts[1].strip()
-                if len(_parts) >= 3:
-                    normalized["cta"] = _parts[2].strip()
+                issues.append("runtime text validation reject")
+                candidates.append((normalized, issues, len(issues)))
+                continue
             elif _tv_result.total_risk_score > 0:
                 logger.info(
                     "TEXT_FABRICATION_GATE_PASS risk=%d events=%s",
@@ -3263,14 +3254,7 @@ async def generate_post_bundle(
             "TEXT_FABRICATION_GATE_REJECT_BEST risk=%d events=%s",
             _best_tv.total_risk_score, _best_tv.log_events[:3],
         )
-        _best_combined = _strip_fabricated_claims(_best_combined, _best_tv)
-        _parts = _best_combined.split("\n", 2)
-        if len(_parts) >= 1:
-            best["title"] = _parts[0].strip()
-        if len(_parts) >= 2:
-            best["body"] = _parts[1].strip()
-        if len(_parts) >= 3:
-            best["cta"] = _parts[2].strip()
+        raise RuntimeError("Не удалось получить текст, прошедший runtime-валидацию качества")
 
     # Enforce single-message budget for autopost path
     if generation_path == "autopost":
