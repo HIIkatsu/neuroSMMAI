@@ -3864,6 +3864,84 @@ body.modal-open {
   border-color: rgba(0, 212, 170, 0.15);
 }
 
+.analytics-overlay-sheet {
+  gap: 14px;
+}
+
+.analytics-overlay-head {
+  align-items: center;
+}
+
+.analytics-overlay-title-wrap .section-title {
+  font-size: 44px;
+  line-height: 1;
+}
+
+.analytics-period-switch {
+  display: inline-flex;
+  gap: 6px;
+  padding: 4px;
+  border-radius: 999px;
+  border: 1px solid var(--glass-border);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.analytics-period-btn {
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  min-width: 52px;
+  padding: 8px 10px;
+  border-radius: 999px;
+  font-weight: 700;
+}
+
+.analytics-period-btn.active {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.analytics-overlay-chart-card {
+  border-color: rgba(144, 98, 255, 0.35);
+  background: radial-gradient(120% 100% at 100% 0%, rgba(130, 88, 255, 0.26) 0%, rgba(8, 12, 34, 0.92) 58%, rgba(6, 9, 28, 0.96) 100%);
+}
+
+.analytics-overlay-kpi-title {
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+}
+
+.analytics-overlay-kpi-value {
+  font-size: 44px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.analytics-overlay-kpi-grid .analytics-item {
+  min-height: 132px;
+  justify-content: space-between;
+}
+
+.analytics-overlay-kpi-grid .analytics-item-top b {
+  font-size: 48px;
+  line-height: 1;
+}
+
+.analytics-overlay-kpi-grid .analytics-item-top span {
+  color: #3ee88f;
+  font-weight: 700;
+}
+
+.analytics-overlay-insight {
+  border-color: rgba(144, 98, 255, 0.35);
+}
+
+.analytics-overlay-footnote {
+  text-align: center;
+  opacity: 0.85;
+}
+
 .analytics-modal-visual-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -4049,6 +4127,9 @@ body.modal-open {
 
   .analytics-grid { grid-template-columns: 1fr; }
   .analytics-modal-head { flex-direction: column; align-items: stretch; }
+  .analytics-overlay-title-wrap .section-title { font-size: 48px; }
+  .analytics-overlay-kpi-grid .analytics-item-top b { font-size: 28px; }
+  .analytics-overlay-kpi-value { font-size: 52px; }
 
   /* Analytics card mobile: prevent text/badge overlap */
   .analytics-head-inline {
