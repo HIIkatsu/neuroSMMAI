@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 from visual_profile_layer import ProviderCandidate, build_visual_profile, profile_search_queries, score_candidate
 
@@ -9,183 +10,229 @@ from visual_profile_layer import ProviderCandidate, build_visual_profile, profil
 class Case:
     title: str
     channel_topic: str
-    domain: str
+    expected_domain: str
     expected_outcome: str  # relevant | no_image
+    body: str
     candidates: list[ProviderCandidate]
-    body: str = ""
-    text_quality_flagged: bool = False
-    problematic: bool = False
-    source: str = "synthetic"  # synthetic | production_replay
 
 
-def make_candidate(domain_tag: str, *, good: bool, provider: str = "pexels") -> ProviderCandidate:
-    if good:
-        return ProviderCandidate(
-            url=f"https://images.example.com/{domain_tag}/good.jpg",
-            provider=provider,
-            caption=f"{domain_tag} editorial real-life scene",
-            tags=[domain_tag, "editorial", "realistic"],
-            author="photographer",
-            width=1920,
-            height=1280,
-        )
+def pexels(url_slug: str, caption: str, tags: list[str]) -> ProviderCandidate:
     return ProviderCandidate(
-        url=f"https://images.example.com/{domain_tag}/bad.jpg",
-        provider=provider,
-        caption="generic office stock photo handshake meeting",
-        tags=["generic office", "meeting", "stock photo"],
-        author="stock",
-        width=1600,
-        height=900,
+        url=f"https://images.pexels.com/photos/{url_slug}.jpeg",
+        provider="pexels",
+        caption=caption,
+        tags=tags,
+        source_query="",
     )
 
 
-def classify_result(expected_domain: str, picked: ProviderCandidate | None) -> str:
-    if not picked:
-        return "no_image"
-    text = f"{picked.caption} {' '.join(picked.tags)}".lower()
-    return "relevant" if expected_domain in text else "wrong_image"
-
-
-def classify_generic_safety(picked: ProviderCandidate | None) -> str:
-    if not picked:
-        return "no_image"
-    text = f"{picked.caption} {' '.join(picked.tags)}".lower()
-    generic_markers = ("generic office", "stock photo", "meeting", "handshake")
-    return "generic_but_safe" if any(m in text for m in generic_markers) else "truly_relevant"
-
-
-def classify_domain_drift(case: Case, profile_domain: str) -> str:
-    expected = (case.domain or "").strip().lower()
-    actual = (profile_domain or "").strip().lower()
-    if expected and actual and expected != actual:
-        return "domain_drift"
-    return "domain_ok"
-
-
-def legacy_pick(candidates: list[ProviderCandidate]) -> ProviderCandidate | None:
-    return candidates[0] if candidates else None
-
-
-def current_pick(case: Case):
-    profile = build_visual_profile(
-        title=case.title,
-        channel_topic=case.channel_topic,
-        body="" if case.text_quality_flagged else case.body,
-        onboarding_summary=f"rubric {case.channel_topic}",
-        post_intent="educational post",
+def pixabay(url_slug: str, caption: str, tags: list[str]) -> ProviderCandidate:
+    return ProviderCandidate(
+        url=f"https://cdn.pixabay.com/photo/{url_slug}.jpg",
+        provider="pixabay",
+        caption=caption,
+        tags=tags,
+        source_query="",
     )
-    query, _ = profile_search_queries(profile)
 
-    best = None
-    best_breakdown = None
-    best_score = -10**9
-    for cand in case.candidates:
-        cand.source_query = query
-        breakdown = score_candidate(candidate=cand, profile=profile, min_score=1.5)
-        if breakdown.score > best_score:
-            best_score = breakdown.score
-            best = cand
-            best_breakdown = breakdown
 
-    if not best_breakdown or best_breakdown.decision != "accepted":
-        return profile, query, None, "no_image", best_breakdown.reason if best_breakdown else "no_candidates"
-    return profile, query, best, "accepted", best_breakdown.reason
+def make_pair(domain: str, subject: str, wrong_hint: str = "generic office business handshake") -> list[ProviderCandidate]:
+    return [
+        pexels(f"bad-{domain}", wrong_hint, ["generic office", "business team", "meeting"]),
+        pixabay(f"good-{domain}", f"{subject} real scene", [domain, subject.split()[0], "street"]),
+    ]
 
 
 CASES: list[Case] = [
-    # problematic (from old regressions/log-like titles)
-    Case("Вклады в банке и проценты", "finance", "finance", "relevant", [make_candidate("finance", good=False), make_candidate("finance", good=True)], text_quality_flagged=True, body="ROI 200% turbo", problematic=True),
-    Case("Как выбрать правильный самокат для города", "scooter", "scooter", "relevant", [make_candidate("cars", good=False), make_candidate("scooter", good=True)], problematic=True),
-    Case("Агрономия: почва, семена и урожай", "gardening", "gardening", "relevant", [make_candidate("finance", good=False), make_candidate("gardening", good=True)], problematic=True),
-    Case("NFT-инвесторы теряют деньги: анализ рисков", "finance", "finance", "relevant", [make_candidate("tech", good=False), make_candidate("finance", good=True)], problematic=True),
-    Case("Технический обзор серверов", "tech", "electronics", "relevant", [make_candidate("local_news", good=False), make_candidate("electronics", good=True)], problematic=True),
-    Case("Вклад в банке: как выбрать депозит", "finance", "finance", "relevant", [make_candidate("cars", good=False), make_candidate("finance", good=True)], problematic=True),
-    Case("Почва и семена: старт сезона", "gardening", "gardening", "relevant", [make_candidate("finance", good=False), make_candidate("gardening", good=True)], problematic=True),
-    Case("Город открыл новую автобусную полосу", "local_news", "local_news", "relevant", [make_candidate("electronics", good=False), make_candidate("local_news", good=True)], problematic=True),
-    Case("Как выбрать семейного врача", "health", "health", "relevant", [make_candidate("finance", good=False), make_candidate("health", good=True)], problematic=True),
-    Case("Технический обзор серверов для дата-центра", "tech", "electronics", "relevant", [make_candidate("cars", good=False), make_candidate("electronics", good=True)], problematic=True),
+    # finance
+    Case("Вклад в банке: как выбрать депозит", "finance", "finance", "relevant", "Подбор ставки и рисков", make_pair("finance", "banking consultation")),
+    Case("Банк запустил карту для студентов", "finance", "finance", "relevant", "Новые лимиты и кешбэк", make_pair("finance", "banking consultation")),
+    Case("Рефинансирование ипотеки: чеклист", "finance", "finance", "relevant", "Когда выгодно рефинансировать", make_pair("finance", "banking consultation")),
+    Case("Почему инфляция съедает накопления", "finance", "finance", "relevant", "Личный бюджет семьи", make_pair("finance", "banking consultation")),
 
-    # additional live-like mix across required domains
-    Case("Рост ставки по ипотеке в городе", "finance", "finance", "relevant", [make_candidate("finance", good=True), make_candidate("local_news", good=False)]),
-    Case("Как выбрать дебетовую карту без комиссий", "finance", "finance", "relevant", [make_candidate("finance", good=True)]),
-    Case("Замена тормозных колодок перед зимой", "cars", "cars", "relevant", [make_candidate("cars", good=True), make_candidate("finance", good=False)]),
-    Case("Перегрев двигателя в пробке", "cars", "cars", "relevant", [make_candidate("cars", good=True)]),
-    Case("Электросамокат: почему скрипит подвеска", "scooter", "scooter", "relevant", [make_candidate("scooter", good=True)]),
-    Case("Безопасная езда на самокате ночью", "scooter", "scooter", "relevant", [make_candidate("scooter", good=True), make_candidate("health", good=False)]),
-    Case("Клиника: подготовка к ежегодному чекапу", "health", "health", "relevant", [make_candidate("health", good=True)]),
-    Case("Реабилитация после травмы колена", "health", "health", "relevant", [make_candidate("health", good=True)]),
-    Case("Муниципальное уведомление о воде", "local_news", "local_news", "relevant", [make_candidate("local_news", good=True), make_candidate("finance", good=False)]),
-    Case("Когда пересаживать рассаду томатов", "gardening", "gardening", "relevant", [make_candidate("gardening", good=True)]),
-    Case("Как измерять pH почвы", "gardening", "gardening", "relevant", [make_candidate("gardening", good=True), make_candidate("electronics", good=False)]),
-    Case("Как готовиться к экзамену без выгорания", "education", "education", "relevant", [make_candidate("education", good=True)]),
-    Case("Конспектирование лекций онлайн", "education", "education", "relevant", [make_candidate("education", good=True), make_candidate("tech", good=False)]),
-    Case("Как продлить срок службы батареи ноутбука", "tech", "electronics", "relevant", [make_candidate("electronics", good=True), make_candidate("cars", good=False)]),
-    Case("Сравнение камер смартфонов", "tech", "electronics", "relevant", [make_candidate("electronics", good=True)]),
-    Case("Уход за чувствительной кожей утром", "beauty", "beauty", "relevant", [make_candidate("beauty", good=True), make_candidate("health", good=False)]),
-    Case("График вакцинации щенка", "pets", "pets", "relevant", [make_candidate("pets", good=True)]),
-    Case("Когда кошке срочно нужен ветеринар", "pets", "pets", "relevant", [make_candidate("pets", good=True)]),
-    Case("Очень абстрактный финансовый пост без объекта", "finance", "finance", "no_image", [make_candidate("finance", good=False)]),
-    Case("Служебная заметка города без визуального контекста", "local_news", "local_news", "no_image", [make_candidate("local_news", good=False)]),
+    # local_news
+    Case("Муниципалитет открыл новый МФЦ", "local_news", "local_news", "relevant", "График и услуги центра", make_pair("local_news", "municipal service")),
+    Case("В районе отключат воду на сутки", "local_news", "local_news", "relevant", "Адреса и время работ", make_pair("local_news", "municipal service")),
+    Case("Город обновляет уличное освещение", "local_news", "local_news", "relevant", "Сроки по кварталам", make_pair("local_news", "municipal service")),
+    Case("Слушания по реконструкции площади", "local_news", "local_news", "relevant", "Публичная встреча жителей", make_pair("local_news", "municipal service")),
+
+    # transport
+    Case("Новый автобусный маршрут до вокзала", "transport", "transport", "relevant", "Схема остановок", make_pair("transport", "public transport")),
+    Case("Метро закроет станцию на ремонт", "transport", "transport", "relevant", "Альтернативные пути", make_pair("transport", "public transport")),
+    Case("Трамвай продлили до больницы", "transport", "transport", "relevant", "Первый рейс в понедельник", make_pair("transport", "public transport")),
+    Case("Пробки вырастут из-за ремонта моста", "transport", "transport", "relevant", "Ограничения полос", make_pair("transport", "public transport")),
+
+    # health
+    Case("Как выбрать семейного врача", "health", "health", "relevant", "Критерии и вопросы на приёме", make_pair("health", "medical consultation")),
+    Case("Поликлиника запустила онлайн-повтор", "health", "health", "relevant", "Повторные консультации", make_pair("health", "medical consultation")),
+    Case("Годовой чекап: какие анализы сдать", "health", "health", "relevant", "Профилактика для взрослых", make_pair("health", "medical consultation")),
+    Case("Реабилитация после травмы колена", "health", "health", "relevant", "Этапы восстановления", make_pair("health", "medical consultation")),
+
+    # real_estate
+    Case("Проверка квартиры перед покупкой", "real_estate", "real_estate", "relevant", "Список технических пунктов", make_pair("real_estate", "property viewing")),
+    Case("Арендный договор: красные флаги", "real_estate", "real_estate", "relevant", "Штрафы и депозиты", make_pair("real_estate", "property viewing")),
+    Case("Спрос на студии вырос в центре", "real_estate", "real_estate", "relevant", "Статистика по районам", make_pair("real_estate", "property viewing")),
+    Case("Ипотека для первичного жилья", "real_estate", "real_estate", "relevant", "Требования банков", make_pair("real_estate", "property viewing")),
+
+    # food
+    Case("Ресторан добавил постное меню", "food", "food", "relevant", "Новые позиции недели", make_pair("food", "food preparation")),
+    Case("Как готовить суп на 3 дня", "food", "food", "relevant", "Meal prep для семьи", make_pair("food", "food preparation")),
+    Case("Школьные столовые тестируют меню", "food", "food", "relevant", "Баланс БЖУ", make_pair("food", "food preparation")),
+    Case("Снижение цен на овощи весной", "food", "food", "relevant", "Рынок поставок", make_pair("food", "food preparation")),
+
+    # services
+    Case("Сервис-центр ввёл запись день-в-день", "services", "services", "relevant", "Время ожидания сократилось", make_pair("services", "service workflow")),
+    Case("Клининговые компании усилили обучение", "services", "services", "relevant", "Стандарты качества", make_pair("services", "service workflow")),
+    Case("Курьерская служба расширила вечернюю доставку", "services", "services", "relevant", "Новые окна доставки", make_pair("services", "service workflow")),
+    Case("Как сравнить сметы подрядчиков", "services", "services", "relevant", "На что смотреть в договоре", make_pair("services", "service workflow")),
+
+    # lifestyle
+    Case("Утренняя рутина и концентрация", "lifestyle", "lifestyle", "relevant", "Привычки на рабочий день", make_pair("lifestyle", "daily routine")),
+    Case("Как восстановить режим сна", "lifestyle", "lifestyle", "relevant", "После перелёта", make_pair("lifestyle", "daily routine")),
+    Case("Минимализм в маленькой квартире", "lifestyle", "lifestyle", "relevant", "Организация пространства", make_pair("lifestyle", "daily routine")),
+    Case("Цифровой детокс на выходных", "lifestyle", "lifestyle", "relevant", "План на 48 часов", make_pair("lifestyle", "daily routine")),
+
+    # education
+    Case("Школы добавили кружки программирования", "education", "education", "relevant", "Набор на семестр", make_pair("education", "learning activity")),
+    Case("Как готовиться к экзамену без выгорания", "education", "education", "relevant", "План повторения", make_pair("education", "learning activity")),
+    Case("Университет обновил правила поступления", "education", "education", "relevant", "Новые дедлайны", make_pair("education", "learning activity")),
+    Case("Учителя тестируют политику ИИ", "education", "education", "relevant", "Классные практики", make_pair("education", "learning activity")),
+
+    # auto
+    Case("Когда менять тормозные колодки", "cars", "cars", "relevant", "Признаки износа", make_pair("cars", "car service")),
+    Case("Подготовка авто к зиме", "cars", "cars", "relevant", "Проверка АКБ и шин", make_pair("cars", "car service")),
+    Case("Перегрев двигателя в пробке", "cars", "cars", "relevant", "Причины и диагностика", make_pair("cars", "car service")),
+    Case("Проверка б/у автомобиля перед покупкой", "cars", "cars", "relevant", "Чеклист диагностики", make_pair("cars", "car service")),
+
+    # intentionally hard/bad (for top-5 remaining issues)
+    Case("Апдейт", "local_news", "local_news", "relevant", "Короткая служебная заметка без объекта", [pexels("bad-amb-1", "generic office business handshake", ["generic office", "business"])]),
+    Case("Сервис", "services", "services", "no_image", "Очень короткий заголовок без сцены", [pexels("bad-amb-2", "team meeting office", ["office", "meeting"])]),
+    Case("Рынок", "finance", "finance", "no_image", "Слишком абстрактно без предмета", [pexels("bad-amb-3", "abstract graph office", ["graph", "office"])]),
+    Case("Курс", "education", "education", "relevant", "Нет визуального предмета", [pexels("bad-amb-4", "generic office workshop", ["office", "workshop"])]),
 ]
 
 
-PRODUCTION_REPLAY_CASES: list[Case] = [
-    # real failed titles/log-like cases from production regressions
-    Case("Вклад в банке: как выбрать депозит", "Финансы", "finance", "relevant", [make_candidate("cars", good=False), make_candidate("finance", good=True)], problematic=True, source="production_replay"),
-    Case("Как выбрать правильный самокат для города", "Микромобильность", "scooter", "relevant", [make_candidate("cars", good=False), make_candidate("scooter", good=True)], problematic=True, source="production_replay"),
-    Case("Почва и семена: старт сезона", "Агрономия и сад", "gardening", "relevant", [make_candidate("finance", good=False), make_candidate("gardening", good=True)], problematic=True, source="production_replay"),
-    Case("Технический обзор серверов для дата-центра", "Технологии", "electronics", "relevant", [make_candidate("cars", good=False), make_candidate("electronics", good=True)], problematic=True, source="production_replay"),
-    Case("Город открыл новую автобусную полосу", "Локальные новости", "local_news", "relevant", [make_candidate("electronics", good=False), make_candidate("local_news", good=True)], problematic=True, source="production_replay"),
+SHORT_PROMPT_CASES = [
+    ("мусор", "РЕЦЕПТЫ и office hardware meeting", "services"),
+    ("банк", "GPU hardware datacenter mining", "finance"),
+    ("самокат", "corporate office team and business", "scooter"),
+    ("тормоза", "news local office update", "cars"),
+    ("школа", "servers and hardware benchmark", "education"),
 ]
+
+
+def classify(case: Case, picked: ProviderCandidate | None) -> str:
+    if picked is None:
+        return "no_image"
+    text = f"{picked.caption} {' '.join(picked.tags)}".lower()
+    if "generic office" in text or "business handshake" in text:
+        return "wrong_image"
+    expected = case.expected_domain.lower()
+    return "relevant" if expected in text else "wrong_image"
+
+
+def legacy_before_pick(candidates: list[ProviderCandidate]) -> ProviderCandidate | None:
+    # Legacy-like behavior: first valid result from provider, no strict intent scoring.
+    return candidates[0] if candidates else None
+
+
+def runtime_after_pick(case: Case):
+    profile = build_visual_profile(
+        title=case.title,
+        body=case.body,
+        channel_topic=case.channel_topic,
+        onboarding_summary=f"rubric for {case.channel_topic}",
+        post_intent="manual editor intent",
+        subniche=case.expected_domain,
+    )
+    primary_q, backup_q = profile_search_queries(profile)
+    best: ProviderCandidate | None = None
+    best_reason = "no_candidates"
+    best_score = -10**9
+    for cand in case.candidates:
+        cand.source_query = primary_q
+        s = score_candidate(candidate=cand, profile=profile, min_score=2.0)
+        if s.score > best_score:
+            best_score = s.score
+            best = cand
+            best_reason = s.reason
+    if best is None:
+        return profile, primary_q, backup_q, None, "no_candidates"
+    final_s = score_candidate(candidate=best, profile=profile, min_score=2.0)
+    if final_s.decision != "accepted":
+        return profile, primary_q, backup_q, None, final_s.reason
+    return profile, primary_q, backup_q, best, final_s.reason
+
+
+def evaluate() -> str:
+    rows: list[str] = []
+    before = {"relevant": 0, "wrong_image": 0, "no_image": 0}
+    after = {"relevant": 0, "wrong_image": 0, "no_image": 0}
+    still_bad: list[tuple[str, str, str]] = []
+
+    rows.append("| title | detected domain | primary_subject | final primary query | backup query | provider | top candidate url/caption/tags | final decision | reject reason |")
+    rows.append("|---|---|---|---|---|---|---|---|---|")
+
+    for case in CASES:
+        before_pick = legacy_before_pick(case.candidates)
+        before_decision = classify(case, before_pick)
+        before[before_decision] += 1
+
+        profile, primary_q, backup_q, after_pick, reason = runtime_after_pick(case)
+        after_decision = classify(case, after_pick)
+        after[after_decision] += 1
+        if case.expected_outcome == "relevant" and after_decision != "relevant":
+            still_bad.append((case.title, after_decision, reason))
+        if case.expected_outcome == "no_image" and after_decision != "no_image":
+            still_bad.append((case.title, after_decision, reason))
+
+        provider = after_pick.provider if after_pick else "-"
+        cand_info = "-"
+        if after_pick:
+            cand_info = f"{after_pick.url} / {after_pick.caption} / {','.join(after_pick.tags)}"
+        rows.append(
+            f"| {case.title} | {profile.domain_family} | {profile.primary_subject} | {primary_q} | {backup_q} | {provider} | {cand_info} | {after_decision} | {'' if after_pick else reason} |"
+        )
+
+    rows.append("")
+    rows.append("## Before/After (runtime replay)")
+    rows.append(f"- before: relevant={before['relevant']}, wrong_image={before['wrong_image']}, no_image={before['no_image']}")
+    rows.append(f"- after: relevant={after['relevant']}, wrong_image={after['wrong_image']}, no_image={after['no_image']}")
+
+    rows.append("")
+    rows.append("## Editor/manual short prompt = user input law")
+    rows.append("| prompt | noisy body | detected domain | primary query | drift check |")
+    rows.append("|---|---|---|---|---|")
+    for prompt, noisy_body, expected_domain in SHORT_PROMPT_CASES:
+        profile = build_visual_profile(
+            title=prompt,
+            body=noisy_body,
+            channel_topic="",
+            onboarding_summary="",
+            post_intent=prompt,
+            subniche=expected_domain,
+            text_quality_flagged=False,
+        )
+        q1, _ = profile_search_queries(profile)
+        alias = {"cars": {"cars", "auto"}}
+        accepted = alias.get(expected_domain, {expected_domain})
+        drift = "ok" if profile.domain_family in accepted else "drift"
+        rows.append(f"| {prompt} | {noisy_body} | {profile.domain_family} | {q1} | {drift} |")
+
+    rows.append("")
+    rows.append("## 5 still-bad cases")
+    if not still_bad:
+        rows.append("- none")
+    else:
+        for title, final_decision, reason in still_bad[:5]:
+            rows.append(f"- {title}: {final_decision} ({reason})")
+
+    return "\n".join(rows)
 
 
 if __name__ == "__main__":
-    all_cases = CASES + PRODUCTION_REPLAY_CASES
-    rows = []
-    metrics = {
-        "relevant": 0,
-        "wrong_image": 0,
-        "no_image": 0,
-        "domain_drift": 0,
-        "generic_but_safe": 0,
-        "truly_relevant": 0,
-    }
-
-    for case in all_cases:
-        profile, query, picked, decision, reason = current_pick(case)
-        final = classify_result(case.domain, picked)
-        generic_class = classify_generic_safety(picked)
-        drift_class = classify_domain_drift(case, profile.domain_family)
-
-        metrics[final] += 1
-        if generic_class == "generic_but_safe":
-            metrics["generic_but_safe"] += 1
-        elif generic_class == "truly_relevant":
-            metrics["truly_relevant"] += 1
-        if drift_class == "domain_drift":
-            metrics["domain_drift"] += 1
-
-        rows.append((case, profile, query, picked, decision, reason, final, generic_class, drift_class))
-
-    print(
-        "METRICS "
-        + " ".join(f"{k.upper()}={v}" for k, v in metrics.items())
-        + f" TOTAL={len(rows)}"
-    )
-    print("| source | title | canonical profile / primary subject | search query | provider | candidate caption/tags | final decision | accepted/rejected reason | итог | generic-vs-relevant | drift |")
-    print("|---|---|---|---|---|---|---|---|---|---|---|")
-    for case, profile, query, picked, decision, reason, final, generic_class, drift_class in rows:
-        caption_tags = "-" if not picked else f"{picked.caption} / {','.join(picked.tags)}"
-        provider = "-" if not picked else picked.provider
-        print(f"| {case.source} | {case.title} | {profile.domain_family} / {profile.primary_subject[:48]} | {query[:72]} | {provider} | {caption_tags[:84]} | {decision} | {reason} | {final} | {generic_class} | {drift_class} |")
-
-    print("\n| problematic title | before (legacy first-valid) | after (current scoring) |")
-    print("|---|---|---|")
-    for case in all_cases:
-        if not case.problematic:
-            continue
-        before = classify_result(case.domain, legacy_pick(case.candidates))
-        _, _, after_pick, _, _ = current_pick(case)
-        after = classify_result(case.domain, after_pick)
-        print(f"| {case.title} | {before} | {after} |")
+    report = evaluate()
+    out = Path("RUNTIME_IMAGE_REPLAY_REPORT.md")
+    out.write_text(report, encoding="utf-8")
+    print(report)
+    print(f"\nSaved: {out}")

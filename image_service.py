@@ -381,8 +381,10 @@ async def _try_fallback(
         body="" if text_quality_flagged else body,
         channel_topic=channel_topic,
         onboarding_summary=onboarding_summary,
-        post_intent=resolved_intent,
+        post_intent=(normalized_visual_prompt or resolved_intent),
         content_constraints=content_constraints,
+        subniche=canonical_family,
+        text_quality_flagged=text_quality_flagged,
     )
     primary_query, backup_query = profile_search_queries(profile)
     used_body = bool(body and not text_quality_flagged)
