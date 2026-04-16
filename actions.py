@@ -610,6 +610,22 @@ async def generate_post_payload(
                         owner_id=owner_id,
                         mode=generation_path,
                         used_refs=used_refs,
+                        content_mode=str(bundle.get("content_mode") or ""),
+                        channel_style=str(ch_settings.get("channel_style") or ""),
+                        channel_audience=str(ch_settings.get("channel_audience") or ""),
+                        channel_subniche=str(ch_settings.get("content_rubrics") or ""),
+                        onboarding_summary="; ".join(
+                            x for x in [
+                                str(ch_settings.get("author_role_type") or "").strip(),
+                                str(ch_settings.get("author_role_description") or "").strip(),
+                                str(ch_settings.get("author_activities") or "").strip(),
+                            ] if x
+                        ),
+                        content_constraints=str(ch_settings.get("content_constraints") or ""),
+                        content_exclusions=str(ch_settings.get("content_exclusions") or ""),
+                        visual_style=str(ch_settings.get("channel_formats") or ""),
+                        forbidden_visuals=str(ch_settings.get("author_forbidden_claims") or ""),
+                        post_intent=visual_brief or post_intent,
                     ),
                     timeout=45.0,
                 )

@@ -18,7 +18,12 @@ from dataclasses import dataclass
 
 from image_prompts import build_generation_prompt, build_fallback_search_query
 from image_generation import generate_image
-from image_validation import validate_image_bytes, validate_image_url, validate_media_ref
+from image_validation import (
+    validate_image_bytes,
+    validate_image_url,
+    validate_media_ref,
+    validate_image_candidate,
+)
 from image_storage import save_generated_image
 from image_history import get_image_history
 from image_fallback import search_stock_photo
@@ -61,6 +66,15 @@ async def get_image(
     mode: str = MODE_EDITOR,
     used_refs: set[str] | None = None,
     content_mode: str = "",
+    channel_style: str = "",
+    channel_audience: str = "",
+    channel_subniche: str = "",
+    onboarding_summary: str = "",
+    content_constraints: str = "",
+    content_exclusions: str = "",
+    visual_style: str = "",
+    forbidden_visuals: str = "",
+    post_intent: str = "",
 ) -> ImageResult:
     """Generate or find an image for a post.
 
@@ -83,6 +97,7 @@ async def get_image(
     Returns:
         ImageResult with media_ref, source, and metadata
     """
+    normalized_mode = _normalize_mode(mode)
     history = get_image_history()
 
     # 1. Build prompt
@@ -92,31 +107,71 @@ async def get_image(
         channel_topic=channel_topic,
         llm_image_prompt=llm_image_prompt,
         content_mode=content_mode,
+        channel_style=channel_style,
+        channel_audience=channel_audience,
+        channel_subniche=channel_subniche,
+        onboarding_summary=onboarding_summary,
+        content_constraints=content_constraints,
+        content_exclusions=content_exclusions,
+        visual_style=visual_style,
+        forbidden_visuals=forbidden_visuals,
+        post_intent=post_intent,
     )
     prompt = prompt_data["prompt"]
     family = prompt_data["family"]
+    effective_mode = prompt_data["content_mode"]
 
     logger.info(
         "IMAGE_SERVICE_START mode=%s owner_id=%s family=%s title=%r",
-        mode, owner_id, family, (title or "")[:60],
+        normalized_mode, owner_id, family, (title or "")[:60],
     )
+
+    prompt_ok, prompt_reason = validate_image_candidate(
+        prompt=prompt,
+        title=title,
+        body=body,
+        channel_topic=channel_topic,
+        content_mode=effective_mode,
+    )
+    if not prompt_ok:
+        logger.warning("IMAGE_SERVICE_PROMPT_REJECT reason=%s title=%r", prompt_reason, (title or "")[:60])
+        prompt_data = build_generation_prompt(
+            title=title,
+            body=body,
+            channel_topic=channel_topic,
+            content_mode=content_mode,
+            channel_style=channel_style,
+            channel_audience=channel_audience,
+            channel_subniche=channel_subniche,
+            onboarding_summary=onboarding_summary,
+            content_constraints=content_constraints,
+            content_exclusions=content_exclusions,
+            visual_style=visual_style,
+            forbidden_visuals=forbidden_visuals,
+            post_intent=post_intent,
+        )
+        prompt = prompt_data["prompt"]
 
     # 2. Check prompt dedup
     if history.is_duplicate_prompt(prompt):
         logger.info("IMAGE_SERVICE_PROMPT_DEDUP prompt_sig=duplicate, proceeding with generation anyway")
         # We still generate — dedup is advisory for prompts, not blocking
 
-    # 3. Try AI generation (primary path)
-    generated_ref = await _try_generation(
-        prompt=prompt,
-        negative_prompt=prompt_data["negative_prompt"],
-        api_key=api_key,
-        model=model,
-        base_url=base_url,
-        owner_id=owner_id,
-        history=history,
-        used_refs=used_refs,
-    )
+    generated_ref = ""
+    if history.is_duplicate_visual_pattern(prompt):
+        logger.info("IMAGE_SERVICE_PATTERN_DEDUP owner_id=%s", owner_id)
+    else:
+        # 3. Try AI generation (primary path)
+        generated_ref = await _try_generation(
+            prompt=prompt,
+            negative_prompt=prompt_data["negative_prompt"],
+            api_key=api_key,
+            model=model,
+            base_url=base_url,
+            owner_id=owner_id,
+            history=history,
+            used_refs=used_refs,
+        )
 
     if generated_ref:
         logger.info(
@@ -140,6 +195,7 @@ async def get_image(
         channel_topic=channel_topic,
         history=history,
         used_refs=used_refs,
+        content_mode=effective_mode,
     )
 
     if fallback_ref:
@@ -160,7 +216,7 @@ async def get_image(
     # 5. Complete failure
     logger.warning(
         "IMAGE_SERVICE_NO_IMAGE owner_id=%s family=%s mode=%s",
-        owner_id, family, mode,
+        owner_id, family, normalized_mode,
     )
     return ImageResult(
         source="none",
@@ -283,6 +339,7 @@ async def _try_fallback(
     channel_topic: str,
     history,
     used_refs: set[str] | None,
+    content_mode: str = "",
 ) -> str:
     """Attempt stock photo fallback. Returns image URL or empty string."""
     query = build_fallback_search_query(
@@ -319,12 +376,30 @@ async def _try_fallback(
     # Check dedup
     if history.is_duplicate_ref(url):
         logger.info("IMAGE_FALLBACK_DEDUP_HIT url=%r", url[:60])
-        # Still return — better than nothing
-        return url
+        return ""
 
     # Check against used_refs
     if used_refs and url in used_refs:
         logger.info("IMAGE_FALLBACK_ALREADY_USED url=%r", url[:60])
-        # Still return — better than nothing for fallback
+        return ""
+
+    candidate_ok, candidate_reason = validate_image_candidate(
+        prompt=query,
+        title=title,
+        body=body,
+        channel_topic=channel_topic,
+        content_mode=content_mode,
+        media_ref=url,
+    )
+    if not candidate_ok:
+        logger.warning("IMAGE_FALLBACK_REJECT reason=%s url=%r", candidate_reason, url[:80])
+        return ""
 
     return url
+
+
+def _normalize_mode(mode: str) -> str:
+    m = (mode or "").strip().lower()
+    if m in {MODE_AUTOPOST, "news", "auto"}:
+        return MODE_AUTOPOST
+    return MODE_EDITOR

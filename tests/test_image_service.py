@@ -109,6 +109,23 @@ class TestImagePrompts(unittest.TestCase):
                 f"Title {title!r} should detect {expected_family}, got {result['family']}",
             )
 
+    def test_build_includes_onboarding_context(self):
+        from image_prompts import build_generation_prompt
+        result = build_generation_prompt(
+            title="Как выбрать зимние шины",
+            body="Практический список критериев выбора.",
+            channel_topic="Автомобили",
+            channel_style="экспертно и без хайпа",
+            channel_audience="владельцы семейных автомобилей",
+            channel_subniche="обслуживание авто",
+            onboarding_summary="автомеханик 10 лет опыта",
+            post_intent="practical checklist",
+        )
+        prompt_lower = result["prompt"].lower()
+        self.assertIn("audience context", prompt_lower)
+        self.assertIn("subniche focus", prompt_lower)
+        self.assertIn("onboarding profile", prompt_lower)
+
 
 # ---------------------------------------------------------------------------
 # 3. Image validation
@@ -351,6 +368,60 @@ class TestImageServiceFlow(unittest.TestCase):
             )
         # Should fall through to fallback
         self.assertIn(result.source, ("fallback", "none"))
+
+    def test_get_image_rejects_reputationally_risky_fallback(self):
+        from image_service import get_image
+
+        with patch("image_service.generate_image", new_callable=AsyncMock) as mock_gen, \
+             patch("image_service.search_stock_photo", new_callable=AsyncMock) as mock_search:
+            mock_gen.return_value = None
+            mock_search.return_value = "https://example.com/cringe_meme_funny.jpg"
+            result = asyncio.run(
+                get_image(
+                    title="Технический обзор серверов",
+                    body="Разбираем инфраструктуру дата-центра.",
+                    channel_topic="B2B инфраструктура",
+                    api_key="test-key",
+                )
+            )
+        self.assertEqual(result.source, "none")
+
+
+class TestImageCandidateValidation(unittest.TestCase):
+    def test_candidate_family_mismatch_rejected(self):
+        from image_validation import validate_image_candidate
+        ok, reason = validate_image_candidate(
+            prompt="Professional photo of gourmet pasta dish in kitchen",
+            title="Как выбрать тормозные колодки",
+            body="Практический гайд для водителей.",
+            channel_topic="Автомобили",
+        )
+        self.assertFalse(ok)
+        self.assertTrue(
+            "family_mismatch" in reason or "prompt_not_relevant" in reason,
+            reason,
+        )
+
+    def test_candidate_reputation_risk_rejected(self):
+        from image_validation import validate_image_candidate
+        ok, reason = validate_image_candidate(
+            prompt="Professional documentary scene",
+            title="Новости городской инфраструктуры",
+            channel_topic="городские новости",
+            media_ref="https://cdn.example.com/nsfw-scene.jpg",
+        )
+        self.assertFalse(ok)
+        self.assertIn("reputational_risk_ref", reason)
+
+
+class TestImageHistoryPatternDedup(unittest.TestCase):
+    def test_visual_pattern_dedup(self):
+        from image_history import ImageHistory
+        h = ImageHistory(maxlen=10, ttl=3600)
+        prompt = "Professional editorial photo of a mechanic working on a car engine in service garage"
+        self.assertFalse(h.is_duplicate_visual_pattern(prompt))
+        h.record(prompt=prompt)
+        self.assertTrue(h.is_duplicate_visual_pattern(prompt))
 
 
 # ---------------------------------------------------------------------------

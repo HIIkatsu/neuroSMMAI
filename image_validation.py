@@ -16,6 +16,9 @@ import os
 import re
 from pathlib import Path
 
+from topic_utils import detect_topic_family
+from content_modes import check_image_prompt_relevance, MODE_GENERIC
+
 logger = logging.getLogger(__name__)
 
 # Minimum valid image size in bytes (reject tiny placeholders/errors)
@@ -30,6 +33,51 @@ _GIF_MAGIC = b"GIF8"
 
 # Bad URL patterns (avatars, icons, placeholders)
 _BAD_URL_PARTS = ("avatar", "icon", "logo", "sprite", "thumb", "placeholder", "1x1", "blank")
+_REPUTATIONAL_RISK_TERMS = (
+    "meme", "prank", "clickbait", "nsfw", "gore", "fetish", "fake",
+    "conspiracy", "political rally", "hate", "violence", "weapon closeup",
+    "absurd", "clown", "cringe",
+)
+
+
+def validate_image_candidate(
+    *,
+    prompt: str,
+    title: str = "",
+    body: str = "",
+    channel_topic: str = "",
+    content_mode: str = MODE_GENERIC,
+    media_ref: str = "",
+) -> tuple[bool, str]:
+    """Validate semantic and reputational quality of an image candidate."""
+    p = (prompt or "").strip().lower()
+    if len(p) < 24:
+        return False, "prompt_too_short"
+
+    for bad in _REPUTATIONAL_RISK_TERMS:
+        if bad in p:
+            return False, f"reputational_risk_prompt_{bad.replace(' ', '_')}"
+
+    if media_ref:
+        ref_lower = media_ref.lower()
+        for bad in _REPUTATIONAL_RISK_TERMS:
+            if bad.replace(" ", "") in ref_lower or bad.replace(" ", "_") in ref_lower:
+                return False, f"reputational_risk_ref_{bad.replace(' ', '_')}"
+
+    is_relevant, reason = check_image_prompt_relevance(
+        title=title,
+        image_prompt=prompt,
+        content_mode=content_mode,
+    )
+    if not is_relevant:
+        return False, f"prompt_not_relevant_{reason}"
+
+    post_family = detect_topic_family(" ".join(filter(None, [title, body, channel_topic])))
+    prompt_family = detect_topic_family(prompt)
+    if post_family != "generic" and prompt_family not in (post_family, "generic"):
+        return False, f"family_mismatch_post_{post_family}_prompt_{prompt_family}"
+
+    return True, "ok"
 
 
 def validate_image_bytes(data: bytes | None) -> tuple[bool, str]:
