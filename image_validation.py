@@ -57,6 +57,7 @@ def validate_image_candidate(
     allow_family_mismatch_penalty: bool = False,
     enforce_min_prompt_len: bool = True,
     ignore_body_for_family_context: bool = False,
+    canonical_family: str = "",
 ) -> tuple[bool, str]:
     """Validate semantic and reputational quality of an image candidate."""
     p = (prompt or "").strip().lower()
@@ -81,7 +82,9 @@ def validate_image_candidate(
     if not is_relevant:
         return False, f"prompt_not_relevant_{reason}"
 
-    post_family = detect_topic_family(family_context_hint) if family_context_hint else "generic"
+    post_family = (canonical_family or "").strip().lower() or (
+        detect_topic_family(family_context_hint) if family_context_hint else "generic"
+    )
     if post_family == "generic":
         family_parts = [title, channel_topic]
         if not ignore_body_for_family_context:
