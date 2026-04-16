@@ -12,6 +12,7 @@ import re
 from dataclasses import dataclass
 
 from topic_utils import detect_topic_family
+from visual_profile_layer import build_visual_profile, profile_search_queries
 from content_modes import (
     detect_content_mode,
     get_mode_image_rules,
@@ -369,35 +370,28 @@ def build_subject_rerank_profile(
     text_quality_flagged: bool = False,
 ) -> dict[str, object]:
     """Build canonical subject tokens for stock candidate reranking."""
-    primary_anchor = " ".join(
-        x.strip()
-        for x in [title, channel_topic, onboarding_summary, post_intent]
-        if (x or "").strip()
+    profile = build_visual_profile(
+        title=title,
+        channel_topic=channel_topic,
+        onboarding_summary=onboarding_summary,
+        post_intent=post_intent,
+        body="" if text_quality_flagged else body,
     )
-    weak_anchor = (body or "")[:220] if (body and not text_quality_flagged) else ""
-    nouns, negatives, subject_key = _detect_subject_bundle(primary_anchor)
-    if not nouns and weak_anchor:
-        nouns, negatives, subject_key = _detect_subject_bundle(weak_anchor)
-
-    primary_tokens = _extract_visual_keywords(primary_anchor, limit=8)
-    weak_tokens = _extract_visual_keywords(weak_anchor, limit=3) if weak_anchor else []
     positive = []
-    for token in nouns + primary_tokens + weak_tokens:
-        t = token.strip().lower()
-        if not t or t in positive:
-            continue
-        positive.append(t)
+    for token in [profile.primary_subject, *profile.secondary_subjects, *profile.visual_must_have]:
+        for part in _extract_visual_keywords(str(token), limit=4):
+            if part not in positive:
+                positive.append(part)
     negative = []
-    for token in negatives:
-        t = token.strip().lower()
-        if not t or t in negative:
-            continue
-        negative.append(t)
+    for token in profile.visual_must_not_have:
+        for part in _extract_visual_keywords(str(token), limit=3):
+            if part not in negative:
+                negative.append(part)
     return {
-        "subject": subject_key or "generic",
+        "subject": profile.domain_family,
         "positive_tokens": positive[:14],
         "negative_tokens": negative[:10],
-        "used_body_for_search": bool(weak_anchor),
+        "used_body_for_search": bool(body and not text_quality_flagged),
     }
 
 
@@ -413,52 +407,23 @@ def build_fallback_search_query(
     llm_image_prompt: str = "",
     query_family: str = "primary",
 ) -> str:
-    """Build a simple English search query for stock photo fallback.
-
-    Returns a clean Latin-only query string suitable for Pexels/Pixabay APIs.
-    """
-    primary_anchor = " ".join(
-        x.strip()
-        for x in [title, channel_topic, onboarding_summary, content_constraints, post_intent]
-        if (x or "").strip()
+    """Build search-first query from canonical visual profile."""
+    profile = build_visual_profile(
+        title=title,
+        channel_topic=channel_topic,
+        onboarding_summary=onboarding_summary,
+        post_intent=post_intent,
+        body="" if text_quality_flagged else body,
+        content_constraints=content_constraints,
     )
-    weak_anchor = ""
-    if body and not text_quality_flagged:
-        weak_anchor = (body or "")[:240]
-
-    nouns, negatives, subject_key = _detect_subject_bundle(primary_anchor)
-    if not nouns and weak_anchor:
-        nouns, negatives, subject_key = _detect_subject_bundle(weak_anchor)
-
-    primary_tokens = _extract_visual_keywords(primary_anchor, limit=7)
-    weak_tokens = _extract_visual_keywords(weak_anchor, limit=3) if weak_anchor else []
-    fallback_tokens = _extract_visual_keywords(f"{title} {channel_topic}", limit=6)
-
-    ordered_tokens: list[str] = []
-    for token in nouns + primary_tokens + (weak_tokens if query_family == "primary" else []) + fallback_tokens:
-        t = token.strip()
-        if not t:
-            continue
-        if t in ordered_tokens:
-            continue
-        ordered_tokens.append(t)
-
-    if query_family == "fallback":
-        ordered_tokens = (nouns + fallback_tokens + primary_tokens[:3])[:9]
-
-    if not ordered_tokens:
-        ordered_tokens = ["editorial", "photo", "realistic", "scene"]
-
-    base_query = " ".join(ordered_tokens[:12])
-    # Strip non-Latin characters for stock photo API compatibility
-    clean = re.sub(r"[^a-zA-Z0-9\s-]", " ", base_query)
-    clean = re.sub(r"\s+", " ", clean).strip()
-    if not clean:
-        clean = "editorial photo realistic scene"
-
+    primary_q, backup_q = profile_search_queries(profile)
+    query = primary_q if query_family == "primary" else backup_q
     logger.debug(
-        "IMAGE_FALLBACK_QUERY subject=%s query_family=%s used_body=%s used_llm_prompt=%s negatives=%s query=%r",
-        subject_key or "generic", query_family, bool(weak_anchor), bool(llm_image_prompt and llm_image_prompt.strip()), ",".join(negatives[:4]), clean[:90],
+        "IMAGE_FALLBACK_QUERY domain=%s query_family=%s used_body=%s used_llm_prompt=%s query=%r",
+        profile.domain_family,
+        query_family,
+        bool(body and not text_quality_flagged),
+        bool(llm_image_prompt and llm_image_prompt.strip()),
+        query[:90],
     )
-
-    return clean[:180]
+    return query
