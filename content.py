@@ -2355,7 +2355,7 @@ def _family_style_instruction(family: str) -> str:
 
 def _build_generation_prompt(*, today: str, channel_topic: str, requested: str, bridge_instruction: str, strategy: dict[str, str], angle: dict[str, str], family: str, recent_posts: list[str], recent_plan: list[str], recent_topics: list[str] | None = None, extra_rules: str = "", channel_style: str = "", channel_audience: str = "", post_scenarios: str = "", content_constraints: str = "", content_exclusions: str = "", author_role_type: str = "", author_role_description: str = "", author_activities: str = "", author_forbidden_claims: str = "", strategy_mode: dict[str, str] | None = None, generation_mode: str = "manual") -> str:
     history_block = recent_history_lines({"posts": recent_posts[:4], "plan": recent_plan[:4]}, limit=5)
-    recent_openings = "\n".join(f"- {re.split(r'[.!?\n]', x, maxsplit=1)[0][:90]}" for x in recent_posts[:4] if x) or "- пока нет данных"
+    recent_openings = "\n".join("- " + re.split(r"[.!?\n]", x, maxsplit=1)[0][:90] for x in recent_posts[:4] if x) or "- пока нет данных"
     blocked_phrases = _recent_phrases(recent_posts)
     blocked_block = "\n".join(f"- {x}" for x in blocked_phrases) or "- пока нет данных"
     plan_topics = "\n".join(f"- {x[:100]}" for x in recent_plan[:6] if x) or "- пока нет данных"
