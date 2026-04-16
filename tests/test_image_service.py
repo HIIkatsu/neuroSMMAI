@@ -18,7 +18,9 @@ import os
 import sys
 import tempfile
 import unittest
+import httpx
 from unittest.mock import AsyncMock, MagicMock, patch
+from openai import NotFoundError
 
 # Ensure repo root is on the path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -391,12 +393,14 @@ class TestImageServiceFlow(unittest.TestCase):
 
     def test_get_image_allows_family_mismatch_penalty_when_text_flagged(self):
         from image_service import get_image
+        from image_history import ImageHistory
 
-        with patch("image_service.generate_image", new_callable=AsyncMock) as mock_gen, \
+        with patch("image_service.get_image_history", return_value=ImageHistory(maxlen=10, ttl=3600)), \
+             patch("image_service.generate_image", new_callable=AsyncMock) as mock_gen, \
              patch("image_service.build_fallback_search_query", return_value="car maintenance service station mechanic editorial"), \
              patch("image_service.search_stock_photo", new_callable=AsyncMock) as mock_search:
             mock_gen.return_value = None
-            mock_search.return_value = "https://images.pexels.com/photos/12345/editorial-photo.jpeg"
+            mock_search.return_value = "https://images.pexels.com/photos/12345/editorial-photo.jpeg?case=text_flagged"
             result = asyncio.run(
                 get_image(
                     title="Как выбрать тормозные колодки для городской езды",
@@ -405,6 +409,26 @@ class TestImageServiceFlow(unittest.TestCase):
                     api_key="test-key",
                     model="gpt-image-1",
                     text_quality_flagged=True,
+                )
+            )
+        self.assertEqual(result.source, "fallback")
+
+    def test_fallback_not_rejected_only_for_short_query(self):
+        from image_service import get_image
+        from image_history import ImageHistory
+
+        with patch("image_service.get_image_history", return_value=ImageHistory(maxlen=10, ttl=3600)), \
+             patch("image_service.generate_image", new_callable=AsyncMock) as mock_gen, \
+             patch("image_service.build_fallback_search_query", return_value="car"), \
+             patch("image_service.search_stock_photo", new_callable=AsyncMock) as mock_search:
+            mock_gen.return_value = None
+            mock_search.return_value = "https://images.pexels.com/photos/12345/editorial-photo.jpeg?case=short_prompt"
+            result = asyncio.run(
+                get_image(
+                    title="Сервис и обслуживание авто",
+                    body="Практика по выбору СТО и инструментов",
+                    channel_topic="Автомобили",
+                    api_key="test-key",
                 )
             )
         self.assertEqual(result.source, "fallback")
@@ -470,6 +494,18 @@ class TestImageCandidateValidation(unittest.TestCase):
         )
         self.assertFalse(ok)
         self.assertTrue("family_mismatch" in reason or "prompt_not_relevant" in reason, reason)
+
+    def test_low_confidence_body_does_not_poison_family_context(self):
+        from image_validation import validate_image_candidate
+        ok, reason = validate_image_candidate(
+            prompt="Professional photo of a mechanic tools and service station interior",
+            title="Обслуживание автомобиля: чеклист на сезон",
+            body="Рецепт пасты с десертом и клубникой",
+            channel_topic="Автомобили",
+            family_context_hint="Автомобили обслуживание сервис",
+            ignore_body_for_family_context=True,
+        )
+        self.assertTrue(ok, reason)
 
 
 class TestImageHistoryPatternDedup(unittest.TestCase):
@@ -750,6 +786,50 @@ class TestAiImageGenerateContract(unittest.TestCase):
         import inspect
         source = inspect.getsource(ai_image_generate)
         self.assertIn("b64_json", source)
+
+    def test_404_html_error_is_logged_and_returns_none(self):
+        from ai_client import ai_image_generate
+
+        request = httpx.Request("POST", "https://openrouter.ai/api/v1/images/generations")
+        response = httpx.Response(status_code=404, request=request)
+        not_found = NotFoundError(
+            "404 page",
+            response=response,
+            body="<!DOCTYPE html><html><body>Not Found</body></html>",
+        )
+        fake_client = MagicMock()
+        fake_client.images.generate = AsyncMock(side_effect=not_found)
+
+        with patch("ai_client._get_shared_client", new_callable=AsyncMock) as mock_get_client:
+            mock_get_client.return_value = fake_client
+            with self.assertLogs("ai_client", level="WARNING") as log_ctx:
+                result = asyncio.run(
+                    ai_image_generate(
+                        "key",
+                        "openai/dall-e-3",
+                        "Car service editorial photo",
+                        base_url="https://openrouter.ai/api/v1",
+                    )
+                )
+        self.assertIsNone(result)
+        joined = "\n".join(log_ctx.output)
+        self.assertIn("API_ERROR", joined)
+        self.assertIn("response_prefix", joined)
+        self.assertIn("<!DOCTYPE html>", joined)
+
+    def test_known_openrouter_gpt_image_combo_fast_skips(self):
+        from ai_client import ai_image_generate
+        with patch("ai_client._get_shared_client", new_callable=AsyncMock) as mock_get_client:
+            result = asyncio.run(
+                ai_image_generate(
+                    "key",
+                    "openai/gpt-image-1",
+                    "studio portrait",
+                    base_url="https://openrouter.ai/api/v1",
+                )
+            )
+        self.assertIsNone(result)
+        mock_get_client.assert_not_called()
 
 
 class TestEndToEndGenerationSuccess(unittest.TestCase):
