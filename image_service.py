@@ -17,8 +17,7 @@ import os
 import re
 from dataclasses import dataclass
 
-from image_prompts import build_generation_prompt, build_fallback_search_query, build_subject_rerank_profile
-from visual_profile_layer import build_visual_profile, profile_search_queries, score_candidate, ProviderCandidate
+from image_prompts import build_generation_prompt
 from image_generation import generate_image
 from image_validation import (
     validate_image_bytes,
@@ -43,6 +42,18 @@ _LATIN_TOKEN_RE = re.compile(r"^[A-Za-z0-9][\w.+-]*$")
 _GENERATION_TIMEOUT = float(30.0)
 _FALLBACK_TIMEOUT = float(15.0)
 _IMAGE_SEARCH_ONLY = (os.getenv("IMAGE_SEARCH_ONLY", "").strip().lower() in {"1", "true", "yes", "on"})
+_SIMPLE_QUERY_STOPWORDS = {
+    "и", "в", "во", "на", "по", "для", "с", "со", "к", "о", "об", "про", "или",
+    "the", "a", "an", "and", "or", "for", "to", "of", "in", "on", "with", "about",
+}
+_TOPIC_NOISE_TOKENS = {
+    "город", "городе", "новый", "новые", "спрос", "рынок", "аналитики", "обсуждают",
+    "как", "почему", "советы", "гайд", "обзор", "новость", "новости",
+}
+_REJECT_TOKENS = (
+    "watermark", "logo", "vector", "illustration", "infographic", "poster",
+    "flyer", "banner", "text", "caption", "typography",
+)
 
 
 @dataclass
@@ -375,107 +386,118 @@ async def _try_fallback(
     content_constraints: str = "",
     llm_image_prompt: str = "",
 ) -> str:
-    """Search-first stock pipeline with canonical visual profile and universal scoring."""
-    profile = build_visual_profile(
+    """Search-first stock pipeline with simple explicit query/topic extraction."""
+    query = _build_simple_search_query(
+        mode=mode,
+        explicit_query=llm_image_prompt,
         title=title,
         body="" if text_quality_flagged else body,
-        channel_topic=channel_topic,
-        onboarding_summary=onboarding_summary,
-        post_intent=(normalized_visual_prompt or resolved_intent),
-        content_constraints=content_constraints,
-        subniche=canonical_family,
-        text_quality_flagged=text_quality_flagged,
     )
-    primary_query, backup_query = profile_search_queries(profile)
-    used_body = bool(body and not text_quality_flagged)
-    used_llm = bool(llm_image_prompt and llm_image_prompt.strip() and not text_quality_flagged and mode != MODE_EDITOR)
-
-    all_candidates: list[tuple[str, ProviderCandidate]] = []
-    for q, qf in ((primary_query, "primary"), (backup_query, "fallback")):
-        if not q:
-            continue
-        try:
-            candidates = await asyncio.wait_for(
-                search_stock_candidates(q, query_family=qf),
-                timeout=_FALLBACK_TIMEOUT,
-            )
-            all_candidates.extend([(q, c) for c in candidates])
-        except asyncio.TimeoutError:
-            logger.warning("IMAGE_FALLBACK_TIMEOUT query=%r query_family=%s", q[:40], qf)
-        except Exception as exc:
-            logger.error("IMAGE_FALLBACK_ERROR query=%r query_family=%s error=%s", q[:40], qf, exc)
-        if not any(existing.query_family == qf for _, existing in all_candidates):
-            try:
-                legacy_url = await asyncio.wait_for(search_stock_photo(q), timeout=_FALLBACK_TIMEOUT)
-                if legacy_url:
-                    all_candidates.append((q, ProviderCandidate(url=legacy_url, provider="unknown", source_query=q, query_family=qf)))
-            except Exception:
-                pass
-
-    if not all_candidates:
-        logger.info(
-            "IMAGE_PIPELINE_DECISION final_decision=no_image reject_reason=no_candidates anchor_family=%s fallback_query_family=%s used_body_for_search=%s used_llm_image_prompt_for_search=%s",
-            profile.domain_family, "fallback", used_body, used_llm,
-        )
+    if not query:
+        logger.info("IMAGE_PIPELINE_DECISION final_decision=no_image reject_reason=empty_query mode=%s", mode)
         return ""
 
-    best_url = ""
-    best_score = -9999.0
-    best_reason = "all_candidates_rejected"
+    try:
+        candidates = await asyncio.wait_for(
+            search_stock_candidates(query, query_family="primary"),
+            timeout=_FALLBACK_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("IMAGE_FALLBACK_TIMEOUT query=%r", query[:40])
+        return ""
+    except Exception as exc:
+        logger.error("IMAGE_FALLBACK_ERROR query=%r error=%s", query[:40], exc)
+        return ""
 
-    for candidate_query, candidate in all_candidates:
+    if not candidates:
+        logger.info("IMAGE_PIPELINE_DECISION final_decision=no_image reject_reason=no_candidates query=%r", query[:60])
+        return ""
+
+    for candidate in candidates:
         url = candidate.url
-        is_valid, reason = validate_image_url(url)
+        is_valid, _ = validate_image_url(url)
         if not is_valid:
             continue
         if history.is_duplicate_ref(url):
             continue
-
-        breakdown = score_candidate(
-            candidate=candidate,
-            profile=profile,
-            used_refs=used_refs,
-            history_duplicate=False,
-            min_score=1.5,
-        )
-        if breakdown.score > best_score:
-            best_score = breakdown.score
-            best_url = url
-            best_reason = breakdown.reason
-
-        if breakdown.decision == "accepted":
+        ok, reason = _is_simple_candidate_ok(candidate, query=query, used_refs=used_refs)
+        if ok:
             logger.info(
-                "IMAGE_PIPELINE_DECISION final_decision=accepted reject_reason= provider=%s anchor_family=%s fallback_query_family=%s used_body_for_search=%s used_llm_image_prompt_for_search=%s score=%.2f",
+                "IMAGE_PIPELINE_DECISION final_decision=accepted provider=%s query=%r",
                 candidate.provider,
-                profile.domain_family,
-                candidate.query_family,
-                used_body,
-                used_llm,
-                breakdown.score,
+                query[:60],
             )
             return url
-
         logger.info(
-            "IMAGE_PIPELINE_DECISION final_decision=rejected reject_reason=%s provider=%s anchor_family=%s fallback_query_family=%s used_body_for_search=%s used_llm_image_prompt_for_search=%s score=%.2f",
-            breakdown.reason,
+            "IMAGE_PIPELINE_DECISION final_decision=rejected reject_reason=%s provider=%s query=%r",
+            reason,
             candidate.provider,
-            profile.domain_family,
-            candidate.query_family,
-            used_body,
-            used_llm,
-            breakdown.score,
+            query[:60],
         )
 
-    logger.info(
-        "IMAGE_PIPELINE_DECISION final_decision=no_image reject_reason=%s provider=none anchor_family=%s fallback_query_family=%s used_body_for_search=%s used_llm_image_prompt_for_search=%s best_score=%.2f",
-        best_reason,
-        profile.domain_family,
-        "fallback",
-        used_body,
-        used_llm,
-        best_score,
-    )
+    logger.info("IMAGE_PIPELINE_DECISION final_decision=no_image reject_reason=all_candidates_rejected query=%r", query[:60])
     return ""
+
+
+def _build_simple_search_query(*, mode: str, explicit_query: str, title: str, body: str) -> str:
+    if mode == MODE_EDITOR and (explicit_query or "").strip():
+        return _normalize_query(explicit_query, max_terms=4)
+
+    return _extract_main_topic_query(title=title, body=body, max_terms=3)
+
+
+def _normalize_query(text: str, *, max_terms: int) -> str:
+    tokens = re.findall(r"[a-zA-Zа-яА-ЯёЁ0-9-]+", (text or "").lower().strip())
+    cleaned: list[str] = []
+    for token in tokens:
+        t = token.strip("-")
+        if len(t) < 2:
+            continue
+        if t in _SIMPLE_QUERY_STOPWORDS:
+            continue
+        if t not in cleaned:
+            cleaned.append(t)
+        if len(cleaned) >= max(1, int(max_terms)):
+            break
+    return " ".join(cleaned)
+
+
+def _extract_main_topic_query(*, title: str, body: str, max_terms: int) -> str:
+    title_tokens = _normalize_query(title, max_terms=12).split()
+    body_tokens = _normalize_query(body, max_terms=20).split()
+    if not title_tokens and not body_tokens:
+        return ""
+
+    scores: dict[str, float] = {}
+    for token in body_tokens:
+        scores[token] = scores.get(token, 0.0) + 1.0
+    for token in title_tokens:
+        scores[token] = scores.get(token, 0.0) + 2.0
+    for token in list(scores.keys()):
+        scores[token] += min(len(token) / 10.0, 1.2)
+        if token in _TOPIC_NOISE_TOKENS:
+            scores[token] -= 2.5
+
+    ranked = sorted(scores.items(), key=lambda it: (-it[1], it[0]))
+    chosen = [token for token, _ in ranked[:max(1, int(max_terms))]]
+    return " ".join(chosen)
+
+
+def _is_simple_candidate_ok(candidate, *, query: str, used_refs: set[str] | None) -> tuple[bool, str]:
+    url = (candidate.url or "").strip()
+    if used_refs and url in used_refs:
+        return False, "already_used_ref"
+    blob = " ".join([
+        url.lower(),
+        str(getattr(candidate, "caption", "") or "").lower(),
+        " ".join((getattr(candidate, "tags", None) or [])).lower(),
+    ])
+    if any(tok in blob for tok in _REJECT_TOKENS):
+        return False, "text_or_logo_heavy"
+    query_tokens = [t for t in query.split() if t]
+    if query_tokens and blob and not any(t in blob for t in query_tokens):
+        return False, "unrelated"
+    return True, "ok"
 
 
 def _rerank_candidate_by_subject(
