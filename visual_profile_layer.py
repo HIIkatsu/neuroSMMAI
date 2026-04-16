@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import re
+import logging
 from dataclasses import dataclass, field
+
+logger = logging.getLogger(__name__)
 
 QUERY_CLEAN_RE = re.compile(r"[^a-zA-Z0-9\s-]")
 TOKEN_RE = re.compile(r"[^a-zA-Zа-яА-Я0-9\s-]")
@@ -155,6 +158,13 @@ _SEMANTIC_STOPWORDS = {
     "как", "для", "или", "это", "этот", "этом", "чтобы", "что", "про", "без", "with", "from", "that", "this",
     "post", "news", "update", "guide", "tips", "совет", "новости", "обзор", "почему", "когда",
 }
+
+_QUERY_FILLER_WORDS = {
+    "media", "editorial", "photo", "realistic", "or",
+}
+
+_QUERY_MAX_TOKENS = 7
+_QUERY_MAX_CHARS = 90
 
 _SEMANTIC_SCENE_HINTS: dict[str, list[str]] = {
     "street scene": ["улиц", "город", "дорог", "road", "street", "urban", "traffic"],
@@ -321,13 +331,56 @@ def build_visual_profile(
 
 
 def profile_search_queries(profile: VisualProfile) -> tuple[str, str]:
-    def _build(terms: list[str]) -> str:
-        raw = " ".join(terms)
-        clean = QUERY_CLEAN_RE.sub(" ", raw)
-        clean = re.sub(r"\s+", " ", clean).strip().lower()
-        return clean[:180] if clean else "editorial photo"
+    def _tokens_from_terms(*terms: str) -> list[str]:
+        tokens: list[str] = []
+        for term in terms:
+            clean = QUERY_CLEAN_RE.sub(" ", term or "")
+            for token in re.sub(r"\s+", " ", clean).strip().lower().split(" "):
+                if len(token) < 3:
+                    continue
+                if token in _QUERY_FILLER_WORDS:
+                    continue
+                if token not in tokens:
+                    tokens.append(token)
+        return tokens
 
-    return _build(profile.search_terms_primary), _build(profile.search_terms_backup)
+    def _bounded_query(parts: list[str], *, family: str) -> str:
+        initial_tokens = _tokens_from_terms(*parts)
+        final_tokens = initial_tokens[:_QUERY_MAX_TOKENS]
+        query = " ".join(final_tokens)
+        if len(query) > _QUERY_MAX_CHARS:
+            trimmed: list[str] = []
+            for token in final_tokens:
+                candidate = (" ".join(trimmed + [token])).strip()
+                if len(candidate) > _QUERY_MAX_CHARS:
+                    break
+                trimmed.append(token)
+            final_tokens = trimmed
+            query = " ".join(final_tokens)
+        logger.info(
+            "IMAGE_STOCK_QUERY family=%s token_count=%d char_len=%d query=%r",
+            family,
+            len(final_tokens),
+            len(query),
+            query[:120],
+        )
+        return query or "stock image"
+
+    primary_parts = [
+        profile.primary_subject,
+        *profile.visual_must_have[:4],
+        *profile.secondary_subjects[:3],
+        profile.domain_family.replace("_", " "),
+        *profile.search_terms_primary[:2],
+    ]
+    backup_parts = [
+        profile.primary_subject,
+        *profile.secondary_subjects[:4],
+        profile.domain_family.replace("_", " "),
+        *profile.search_terms_backup[:2],
+    ]
+
+    return _bounded_query(primary_parts, family="primary"), _bounded_query(backup_parts, family="fallback")
 
 
 def score_candidate(
