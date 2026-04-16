@@ -11,7 +11,7 @@ import logging
 import re
 from dataclasses import dataclass
 
-from topic_utils import detect_topic_family, detect_subfamily
+from topic_utils import detect_topic_family
 from content_modes import (
     detect_content_mode,
     get_mode_image_rules,
@@ -21,6 +21,39 @@ from content_modes import (
 )
 
 logger = logging.getLogger(__name__)
+
+_VISUAL_SUBJECT_HINTS: dict[str, dict[str, tuple[str, ...] | tuple[str, ...]]] = {
+    "finance": {
+        "keywords": ("finance", "инвест", "investment", "банк", "bank", "deposit", "депозит", "card", "карта", "cash", "налич", "receipt", "чек", "atm", "банкомат", "crypto", "nft"),
+        "nouns": ("bank", "deposit", "investment", "risk", "card", "cash", "receipt", "atm", "documents"),
+        "negative": ("hardware", "laptop", "motherboard", "server", "server-room", "meeting", "conference", "office-team"),
+    },
+    "scooter": {
+        "keywords": ("scooter", "самокат", "micromobility", "микромобиль", "wheel", "колес", "handlebar", "руль"),
+        "nouns": ("electric scooter", "wheel", "handlebar", "urban street", "micromobility"),
+        "negative": ("car", "automotive", "sedan", "meeting", "office"),
+    },
+    "agronomy": {
+        "keywords": ("agronomy", "агроном", "garden", "сад", "soil", "почв", "seeds", "семена", "seedlings", "рассад", "harvest", "урож"),
+        "nouns": ("soil", "seeds", "seedlings", "garden bed", "harvest", "hands planting"),
+        "negative": ("office", "meeting", "hardware", "corporate"),
+    },
+    "health": {
+        "keywords": ("health", "clinic", "клиник", "doctor", "врач", "hospital", "больниц", "waiting room", "пациент"),
+        "nouns": ("doctor", "clinic", "hospital room", "patient", "waiting room", "medical consultation"),
+        "negative": ("hardware", "server", "meeting room", "meeting-room", "boardroom"),
+    },
+    "local_news": {
+        "keywords": ("local business", "локальн", "news", "новост", "service update", "community"),
+        "nouns": ("local business", "storefront", "local service", "street", "team photo", "news update"),
+        "negative": ("meeting room", "meeting-room", "conference", "hardware", "generic office people", "generic-office-people"),
+    },
+}
+
+_GENERIC_VISUAL_STOPWORDS = {
+    "как", "для", "про", "это", "или", "что", "with", "from", "about", "your", "наш", "ваш", "news", "post",
+    "guide", "tips", "советы", "обзор", "почему", "when", "where", "что", "как", "без", "после",
+}
 
 
 @dataclass
@@ -221,6 +254,12 @@ def _infer_subject_hint(*, primary: str, secondary: str, family: str) -> str:
         return "finance investment analysis documents calculator"
     if family == "cars" and ("самокат" in source or "scooter" in source):
         return "electric scooter urban repair suspension wheel closeup"
+    if family == "health":
+        return "clinic doctor patient consultation healthcare office"
+    if family == "local_business":
+        if any(x in source for x in ("news", "новост", "update", "обновлен")):
+            return "local business storefront team service neighborhood update"
+        return "local business service storefront owner customer interaction"
     if family == "lifestyle" and any(x in source for x in ("сад", "почв", "soil", "seed", "harvest", "agron")):
         return "soil seedlings seeds harvest garden agronomy"
     return ""
@@ -294,6 +333,74 @@ def _extract_visual_essence(title: str, body_lead: str, family: str, content_mod
     return f"A professional photograph depicting: {combined}"
 
 
+def _extract_visual_keywords(text: str, *, limit: int = 8) -> list[str]:
+    clean = re.sub(r"[^a-zA-Zа-яА-Я0-9\s-]", " ", text or "")
+    tokens = [t.strip("-").lower() for t in clean.split() if len(t.strip("-")) >= 4]
+    result: list[str] = []
+    for token in tokens:
+        if token in _GENERIC_VISUAL_STOPWORDS:
+            continue
+        if token.isdigit():
+            continue
+        result.append(token)
+        if len(result) >= limit:
+            break
+    return result
+
+
+def _detect_subject_bundle(text: str) -> tuple[list[str], list[str], str]:
+    s = (text or "").lower()
+    for key, spec in _VISUAL_SUBJECT_HINTS.items():
+        keywords = spec.get("keywords") or ()
+        if any(k in s for k in keywords):
+            nouns = [str(x) for x in (spec.get("nouns") or ())]
+            negatives = [str(x) for x in (spec.get("negative") or ())]
+            return nouns, negatives, key
+    return [], [], ""
+
+
+def build_subject_rerank_profile(
+    *,
+    title: str = "",
+    body: str = "",
+    channel_topic: str = "",
+    onboarding_summary: str = "",
+    post_intent: str = "",
+    text_quality_flagged: bool = False,
+) -> dict[str, object]:
+    """Build canonical subject tokens for stock candidate reranking."""
+    primary_anchor = " ".join(
+        x.strip()
+        for x in [title, channel_topic, onboarding_summary, post_intent]
+        if (x or "").strip()
+    )
+    weak_anchor = (body or "")[:220] if (body and not text_quality_flagged) else ""
+    nouns, negatives, subject_key = _detect_subject_bundle(primary_anchor)
+    if not nouns and weak_anchor:
+        nouns, negatives, subject_key = _detect_subject_bundle(weak_anchor)
+
+    primary_tokens = _extract_visual_keywords(primary_anchor, limit=8)
+    weak_tokens = _extract_visual_keywords(weak_anchor, limit=3) if weak_anchor else []
+    positive = []
+    for token in nouns + primary_tokens + weak_tokens:
+        t = token.strip().lower()
+        if not t or t in positive:
+            continue
+        positive.append(t)
+    negative = []
+    for token in negatives:
+        t = token.strip().lower()
+        if not t or t in negative:
+            continue
+        negative.append(t)
+    return {
+        "subject": subject_key or "generic",
+        "positive_tokens": positive[:14],
+        "negative_tokens": negative[:10],
+        "used_body_for_search": bool(weak_anchor),
+    }
+
+
 def build_fallback_search_query(
     *,
     title: str = "",
@@ -303,58 +410,55 @@ def build_fallback_search_query(
     content_constraints: str = "",
     post_intent: str = "",
     text_quality_flagged: bool = False,
+    llm_image_prompt: str = "",
+    query_family: str = "primary",
 ) -> str:
     """Build a simple English search query for stock photo fallback.
 
     Returns a clean Latin-only query string suitable for Pexels/Pixabay APIs.
     """
-    anchor = _build_visual_topic_anchor(
-        title=title,
-        body=body,
-        channel_topic=channel_topic,
-        onboarding_summary=onboarding_summary,
-        content_constraints=content_constraints,
-        post_intent=post_intent,
-        text_quality_flagged=text_quality_flagged,
+    primary_anchor = " ".join(
+        x.strip()
+        for x in [title, channel_topic, onboarding_summary, content_constraints, post_intent]
+        if (x or "").strip()
     )
-    family = anchor.family
-    combined = " ".join(filter(None, [anchor.primary_text, anchor.secondary_text]))
+    weak_anchor = ""
+    if body and not text_quality_flagged:
+        weak_anchor = (body or "")[:240]
 
-    # Use subfamily if available
-    subfamily = detect_subfamily(family, combined)
+    nouns, negatives, subject_key = _detect_subject_bundle(primary_anchor)
+    if not nouns and weak_anchor:
+        nouns, negatives, subject_key = _detect_subject_bundle(weak_anchor)
 
-    # Map to English search terms
-    _FAMILY_SEARCH: dict[str, str] = {
-        "massage": "massage therapy spa wellness",
-        "food": "food cooking dish meal",
-        "health": "health wellness medical",
-        "beauty": "beauty skincare cosmetics",
-        "cars": "car automotive vehicle",
-        "tech": "technology software digital",
-        "business": "business office professional",
-        "finance": "finance investment money",
-        "education": "education learning study",
-        "marketing": "marketing branding strategy",
-        "lifestyle": "lifestyle modern daily",
-        "gaming": "gaming esports controller",
-        "hardware": "computer hardware technology",
-        "expert_blog": "expert professional workspace",
-        "local_business": "small business workshop craft",
-    }
+    primary_tokens = _extract_visual_keywords(primary_anchor, limit=7)
+    weak_tokens = _extract_visual_keywords(weak_anchor, limit=3) if weak_anchor else []
+    fallback_tokens = _extract_visual_keywords(f"{title} {channel_topic}", limit=6)
 
-    base_query = anchor.subject_hint or _FAMILY_SEARCH.get(family, "professional editorial photo")
+    ordered_tokens: list[str] = []
+    for token in nouns + primary_tokens + (weak_tokens if query_family == "primary" else []) + fallback_tokens:
+        t = token.strip()
+        if not t:
+            continue
+        if t in ordered_tokens:
+            continue
+        ordered_tokens.append(t)
 
-    # Add subfamily specifics if available
-    if subfamily:
-        base_query = f"{subfamily} {base_query}"
+    if query_family == "fallback":
+        ordered_tokens = (nouns + fallback_tokens + primary_tokens[:3])[:9]
 
+    if not ordered_tokens:
+        ordered_tokens = ["editorial", "photo", "realistic", "scene"]
+
+    base_query = " ".join(ordered_tokens[:12])
     # Strip non-Latin characters for stock photo API compatibility
-    clean = re.sub(r"[^a-zA-Z0-9\s]", " ", base_query)
+    clean = re.sub(r"[^a-zA-Z0-9\s-]", " ", base_query)
     clean = re.sub(r"\s+", " ", clean).strip()
+    if not clean:
+        clean = "editorial photo realistic scene"
 
     logger.debug(
-        "IMAGE_FALLBACK_QUERY family=%s subfamily=%s query=%r",
-        family, subfamily, clean[:80],
+        "IMAGE_FALLBACK_QUERY subject=%s query_family=%s used_body=%s used_llm_prompt=%s negatives=%s query=%r",
+        subject_key or "generic", query_family, bool(weak_anchor), bool(llm_image_prompt and llm_image_prompt.strip()), ",".join(negatives[:4]), clean[:90],
     )
 
     return clean[:180]
