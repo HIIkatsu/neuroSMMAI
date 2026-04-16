@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import re
+from dataclasses import dataclass
 
 from topic_utils import detect_topic_family, detect_subfamily
 from content_modes import (
@@ -20,6 +21,16 @@ from content_modes import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class VisualTopicAnchor:
+    """Stable semantic anchor for image generation/search."""
+
+    family: str = "generic"
+    primary_text: str = ""
+    secondary_text: str = ""
+    subject_hint: str = ""
 
 # Style guidance per topic family — maps family to photographic style hints
 _FAMILY_STYLE: dict[str, str] = {
@@ -64,6 +75,7 @@ def build_generation_prompt(
     visual_style: str = "",
     forbidden_visuals: str = "",
     post_intent: str = "",
+    text_quality_flagged: bool = False,
 ) -> dict[str, str]:
     """Build a structured prompt for image generation.
 
@@ -74,9 +86,16 @@ def build_generation_prompt(
         family: str — detected topic family
         content_mode: str — detected or provided content mode
     """
-    # Detect family from all available text
-    combined_text = " ".join(filter(None, [title, body, channel_topic]))
-    family = detect_topic_family(combined_text) if combined_text.strip() else "generic"
+    anchor = _build_visual_topic_anchor(
+        title=title,
+        body=body,
+        channel_topic=channel_topic,
+        onboarding_summary=onboarding_summary,
+        content_constraints=content_constraints,
+        post_intent=post_intent,
+        text_quality_flagged=text_quality_flagged,
+    )
+    family = anchor.family
     style_hint = _FAMILY_STYLE.get(family, "professional editorial photography, natural lighting")
 
     # Detect content mode if not provided
@@ -99,7 +118,9 @@ def build_generation_prompt(
         core = fix_image_prompt_for_mode(core, title, content_mode)
     elif title:
         # Extract visual essence from title + first part of body
-        body_lead = (body or "").split("\n", 1)[0].strip()[:200] if body else ""
+        body_lead = ""
+        if body and not text_quality_flagged:
+            body_lead = (body or "").split("\n", 1)[0].strip()[:200]
         core = _extract_visual_essence(title, body_lead, family, content_mode)
     elif channel_topic:
         core = f"Professional photo related to: {channel_topic}"
@@ -147,6 +168,62 @@ def build_generation_prompt(
         "family": family,
         "content_mode": content_mode,
     }
+
+
+def _build_visual_topic_anchor(
+    *,
+    title: str = "",
+    body: str = "",
+    channel_topic: str = "",
+    onboarding_summary: str = "",
+    content_constraints: str = "",
+    post_intent: str = "",
+    text_quality_flagged: bool = False,
+) -> VisualTopicAnchor:
+    primary_parts = [channel_topic, title, onboarding_summary, content_constraints, post_intent]
+    primary = " ".join(x.strip() for x in primary_parts if (x or "").strip())
+
+    secondary = ""
+    if body and not text_quality_flagged:
+        secondary = body[:220]
+
+    pinned = _detect_pinned_family(primary)
+    if not pinned and secondary:
+        pinned = _detect_pinned_family(secondary)
+
+    family_source = primary if primary.strip() else secondary
+    family = pinned or (detect_topic_family(family_source) if family_source.strip() else "generic")
+
+    subject_hint = _infer_subject_hint(primary=primary, secondary=secondary, family=family)
+    return VisualTopicAnchor(family=family, primary_text=primary, secondary_text=secondary, subject_hint=subject_hint)
+
+
+def _detect_pinned_family(text: str) -> str:
+    s = (text or "").lower()
+    pins: list[tuple[str, tuple[str, ...]]] = [
+        ("finance", ("вклад", "депозит", "банк", "bond", "облигац", "комисси", "invest", "инвест", "crypto risk", "nft")),
+        ("cars", ("самокат", "scooter", "micromobility", "микромобил", "suspension", "подвеск", "колес", "repair")),
+        ("lifestyle", ("сад", "огород", "почв", "семен", "урож", "agron", "soil", "seed", "harvest", "gardening")),
+    ]
+    for family, terms in pins:
+        if any(t in s for t in terms):
+            return family
+    return ""
+
+
+def _infer_subject_hint(*, primary: str, secondary: str, family: str) -> str:
+    source = (primary or secondary or "").lower()
+    if family == "finance":
+        if "nft" in source or "crypto" in source:
+            return "crypto investment risk market loss chart"
+        if "вклад" in source or "депозит" in source or "deposit" in source:
+            return "bank deposit savings documents calculator desk"
+        return "finance investment analysis documents calculator"
+    if family == "cars" and ("самокат" in source or "scooter" in source):
+        return "electric scooter urban repair suspension wheel closeup"
+    if family == "lifestyle" and any(x in source for x in ("сад", "почв", "soil", "seed", "harvest", "agron")):
+        return "soil seedlings seeds harvest garden agronomy"
+    return ""
 
 
 def _compose_onboarding_context(
@@ -222,13 +299,26 @@ def build_fallback_search_query(
     title: str = "",
     body: str = "",
     channel_topic: str = "",
+    onboarding_summary: str = "",
+    content_constraints: str = "",
+    post_intent: str = "",
+    text_quality_flagged: bool = False,
 ) -> str:
     """Build a simple English search query for stock photo fallback.
 
     Returns a clean Latin-only query string suitable for Pexels/Pixabay APIs.
     """
-    combined = " ".join(filter(None, [title, body[:100] if body else "", channel_topic]))
-    family = detect_topic_family(combined) if combined.strip() else "generic"
+    anchor = _build_visual_topic_anchor(
+        title=title,
+        body=body,
+        channel_topic=channel_topic,
+        onboarding_summary=onboarding_summary,
+        content_constraints=content_constraints,
+        post_intent=post_intent,
+        text_quality_flagged=text_quality_flagged,
+    )
+    family = anchor.family
+    combined = " ".join(filter(None, [anchor.primary_text, anchor.secondary_text]))
 
     # Use subfamily if available
     subfamily = detect_subfamily(family, combined)
@@ -252,7 +342,7 @@ def build_fallback_search_query(
         "local_business": "small business workshop craft",
     }
 
-    base_query = _FAMILY_SEARCH.get(family, "professional editorial photo")
+    base_query = anchor.subject_hint or _FAMILY_SEARCH.get(family, "professional editorial photo")
 
     # Add subfamily specifics if available
     if subfamily:

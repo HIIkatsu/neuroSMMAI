@@ -111,6 +111,59 @@ class TestImagePrompts(unittest.TestCase):
                 f"Title {title!r} should detect {expected_family}, got {result['family']}",
             )
 
+    def test_finance_anchor_not_local_business(self):
+        from image_prompts import build_generation_prompt
+        result = build_generation_prompt(
+            title="Вклады в банке: как выбрать депозит",
+            body="Наш local service помогает клиентам выбрать лучшее предложение.",
+            channel_topic="Личные финансы и инвестиции",
+        )
+        self.assertEqual(result["family"], "finance")
+
+    def test_scooter_fallback_query_not_car_generic(self):
+        from image_prompts import build_fallback_search_query
+        q = build_fallback_search_query(
+            title="Как выбрать правильный самокат для города",
+            body="Советы по подвеске и ремонту.",
+            channel_topic="Микромобильность",
+        )
+        ql = q.lower()
+        self.assertIn("scooter", ql)
+        self.assertNotIn("car automotive vehicle", ql)
+
+    def test_gardening_query_not_finance_drift(self):
+        from image_prompts import build_fallback_search_query
+        q = build_fallback_search_query(
+            title="Агрономия: почва, семена и урожай",
+            body="Практика для огорода и рассады.",
+            channel_topic="Сад и огород",
+        )
+        ql = q.lower()
+        self.assertIn("soil", ql)
+        self.assertNotIn("finance", ql)
+
+    def test_nft_investor_query_not_gamepad_only(self):
+        from image_prompts import build_fallback_search_query
+        q = build_fallback_search_query(
+            title="NFT-инвесторы теряют деньги: анализ рисков",
+            body="Почему игровые токены не гарантируют доход.",
+            channel_topic="Инвестиции и crypto-risk",
+        )
+        ql = q.lower()
+        self.assertIn("risk", ql)
+        self.assertIn("investment", ql)
+        self.assertNotIn("controller", ql)
+
+    def test_low_confidence_body_does_not_override_anchor(self):
+        from image_prompts import build_fallback_search_query
+        q = build_fallback_search_query(
+            title="Вклады в банке и проценты",
+            body="СРОЧНО! Клиент сказал 200% ROI и супер акция сервиса.",
+            channel_topic="Финансы",
+            text_quality_flagged=True,
+        )
+        self.assertIn("bank deposit", q.lower())
+
     def test_build_includes_onboarding_context(self):
         from image_prompts import build_generation_prompt
         result = build_generation_prompt(

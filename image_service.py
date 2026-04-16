@@ -117,6 +117,7 @@ async def get_image(
         visual_style=visual_style,
         forbidden_visuals=forbidden_visuals,
         post_intent=post_intent,
+        text_quality_flagged=text_quality_flagged,
     )
     prompt = prompt_data["prompt"]
     family = prompt_data["family"]
@@ -133,6 +134,7 @@ async def get_image(
         body=body,
         channel_topic=channel_topic,
         content_mode=effective_mode,
+        canonical_family=family,
     )
     if not prompt_ok:
         logger.warning("IMAGE_SERVICE_PROMPT_REJECT reason=%s title=%r", prompt_reason, (title or "")[:60])
@@ -150,6 +152,7 @@ async def get_image(
             visual_style=visual_style,
             forbidden_visuals=forbidden_visuals,
             post_intent=post_intent,
+            text_quality_flagged=text_quality_flagged,
         )
         prompt = prompt_data["prompt"]
 
@@ -209,6 +212,9 @@ async def get_image(
         content_mode=effective_mode,
         normalized_visual_prompt="" if text_quality_flagged else prompt,
         resolved_intent=post_intent,
+        canonical_family=family,
+        onboarding_summary=onboarding_summary,
+        content_constraints=content_constraints,
     )
 
     if fallback_ref:
@@ -364,12 +370,19 @@ async def _try_fallback(
     content_mode: str = "",
     normalized_visual_prompt: str = "",
     resolved_intent: str = "",
+    canonical_family: str = "",
+    onboarding_summary: str = "",
+    content_constraints: str = "",
 ) -> str:
     """Attempt stock photo fallback. Returns image URL or empty string."""
     query = build_fallback_search_query(
         title=title,
         body=body,
         channel_topic=channel_topic,
+        onboarding_summary=onboarding_summary,
+        content_constraints=content_constraints,
+        post_intent=resolved_intent,
+        text_quality_flagged=text_quality_flagged,
     )
 
     if not query:
@@ -423,6 +436,7 @@ async def _try_fallback(
         allow_family_mismatch_penalty=(text_quality_flagged or mode == MODE_EDITOR),
         enforce_min_prompt_len=False,
         ignore_body_for_family_context=text_quality_flagged,
+        canonical_family=canonical_family,
     )
     if not candidate_ok:
         logger.warning("IMAGE_FALLBACK_REJECT reason=%s url=%r", candidate_reason, url[:80])

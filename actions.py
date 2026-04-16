@@ -587,6 +587,13 @@ async def generate_post_payload(
                 token in _quality_reasons
                 for token in ("off_topic", "off-topic", "out_of_topic", "irrelevant", "topic_mismatch")
             )
+            text_quality_flagged = text_quality_flagged or any(
+                token in _quality_reasons
+                for token in (
+                    "low_confidence", "low-confidence",
+                    "fabricated", "fake_numeric", "fake_authority",
+                )
+            )
             used_refs = {current_media_ref} if str(current_media_ref or "").strip() else set()
             # Wider dedup window for autopost to prevent repetitive images
             dedup_limit = 100 if generation_path == "autopost" else 50
