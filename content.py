@@ -1786,6 +1786,18 @@ def assess_text_quality(
     dims: dict[str, int] = {}
     reasons: list[str] = []
 
+    def _extract_anchor_terms(text: str, *, min_len: int = 5) -> list[str]:
+        stop = {
+            "когда", "почему", "чтобы", "который", "которая", "которые", "после",
+            "перед", "через", "между", "будет", "будут", "можно", "нужно", "просто",
+            "очень", "также", "этого", "этой", "этот", "если", "только", "вашей",
+            "ваших", "вашего", "вашему", "вашем", "ваша", "ваше", "ваши",
+            "about", "their", "there", "where", "which", "while", "using", "those",
+            "these", "should", "could", "would", "after", "before", "without", "with",
+        }
+        terms = [w for w in re.findall(r"[а-яёa-z]{3,}", (text or "").lower()) if len(w) >= min_len and w not in stop]
+        return list(dict.fromkeys(terms))
+
     # --- 1. HOOK: strength of the opening ---
     hook_score = 10
     first_line = body.split("\n", 1)[0].strip() if body else ""
@@ -2170,9 +2182,46 @@ def assess_text_quality(
                     if ch_ratio > req_ratio + 0.3:
                         request_fit_score = min(request_fit_score, 3)
                         reasons.append("request_fit: тема канала доминирует над запросом пользователя")
+
+            req_terms = _extract_anchor_terms(req_lower)
+            if req_terms:
+                title_hits = sum(1 for term in req_terms if _stem_match(term, clean_text(title).lower()))
+                cta_hits = sum(1 for term in req_terms if _stem_match(term, clean_text(cta).lower()))
+                if title_hits == 0:
+                    request_fit_score = min(request_fit_score, 6)
+                    reasons.append("request_fit: заголовок не отражает явный запрос пользователя")
+                if cta_hits == 0:
+                    request_fit_score = min(request_fit_score, 7)
+                    reasons.append("request_fit: CTA не привязан к запросу пользователя")
     else:
         request_fit_score = 7  # No explicit request — can't evaluate
     dims["request_fit"] = max(0, request_fit_score)
+
+    # --- Cross-field alignment (title/body/cta) + generic editorial advice drift ---
+    alignment_terms = _extract_anchor_terms(f"{requested} {title}")[:8]
+    body_text = clean_text(body).lower()
+    cta_text = clean_text(cta).lower()
+    if alignment_terms:
+        body_hits = sum(1 for term in alignment_terms if _stem_match(term, body_text))
+        cta_hits = sum(1 for term in alignment_terms if _stem_match(term, cta_text))
+        if body_hits == 0:
+            dims["request_fit"] = min(dims.get("request_fit", 10), 4)
+            dims["publish_ready"] = max(0, dims.get("publish_ready", 10) - 2)
+            reasons.append("alignment: заголовок/запрос и body расходятся по теме")
+        elif cta_hits == 0:
+            dims["publish_ready"] = max(0, dims.get("publish_ready", 10) - 2)
+            reasons.append("alignment: CTA не продолжает тему заголовка и body")
+
+    generic_editorial_phrases = [
+        "важно понимать", "стоит задуматься", "всем полезно", "каждому стоит",
+        "это важно для всех", "подумайте об этом", "сделайте выводы",
+        "делайте правильный выбор", "в современном мире это особенно важно",
+    ]
+    generic_hits = sum(1 for phrase in generic_editorial_phrases if phrase in lower_text)
+    if generic_hits >= 2 and dims.get("request_fit", 10) <= 6:
+        dims["request_fit"] = max(0, dims.get("request_fit", 10) - 2)
+        dims["publish_ready"] = max(0, dims.get("publish_ready", 10) - 2)
+        reasons.append("request_fit: обобщённая редакционная подача без явной связи с запросом")
 
     # --- 12. CLAIM_RISK: absence of overconfident unsupported assertions ---
     claim_risk_total, claim_risk_reasons = compute_claim_risk(body or "")
