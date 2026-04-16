@@ -140,6 +140,9 @@ class Config:
     llm_api_key: str
     llm_base_url: str
     llm_model: str
+    llm_image_api_key: str = ""
+    llm_image_base_url: str = ""
+    llm_image_model: str = ""
     llm_provider: str = "openrouter"
     llm_fallback_models: list[str] = field(default_factory=list)
     llm_request_cooldown_seconds: float = 1.0
@@ -201,9 +204,15 @@ class Config:
             "openrouter_api_key": self.llm_api_key,
             "openrouter_base_url": self.llm_base_url,
             "openrouter_model": self.llm_model,
+            "openrouter_image_api_key": self.llm_image_api_key or self.llm_api_key,
+            "openrouter_image_base_url": self.llm_image_base_url or self.llm_base_url,
+            "openrouter_image_model": self.llm_image_model,
             "openai_api_key": self.llm_api_key,
             "openai_base_url": self.llm_base_url,
             "openai_model": self.llm_model,
+            "openai_image_api_key": self.llm_image_api_key or self.llm_api_key,
+            "openai_image_base_url": self.llm_image_base_url or self.llm_base_url,
+            "openai_image_model": self.llm_image_model,
             "bot_tz": self.tz,
             "bot_proxy_url": self.telegram_proxy_url,
             "proxy_url": self.telegram_proxy_url,
@@ -234,6 +243,27 @@ def load_config() -> Config:
         "OPENROUTER_MODEL",
         "OPENAI_MODEL",
         default="openai/gpt-4o-mini",
+    )
+    llm_image_api_key = _env_str(
+        "LLM_IMAGE_API_KEY",
+        "IMAGE_GENERATION_API_KEY",
+        "OPENROUTER_IMAGE_API_KEY",
+        "OPENAI_IMAGE_API_KEY",
+        default=llm_api_key,
+    )
+    llm_image_base_url = _env_str(
+        "LLM_IMAGE_BASE_URL",
+        "IMAGE_GENERATION_BASE_URL",
+        "OPENROUTER_IMAGE_BASE_URL",
+        "OPENAI_IMAGE_BASE_URL",
+        default=llm_base_url,
+    )
+    llm_image_model = _env_str(
+        "LLM_IMAGE_MODEL",
+        "IMAGE_GENERATION_MODEL",
+        "OPENROUTER_IMAGE_MODEL",
+        "OPENAI_IMAGE_MODEL",
+        default="",
     )
     llm_provider = _env_str("LLM_PROVIDER", default="openrouter").lower()
     llm_fallback_models = _parse_csv("LLM_FALLBACK_MODELS")
@@ -313,6 +343,9 @@ def load_config() -> Config:
         llm_api_key=llm_api_key,
         llm_base_url=llm_base_url,
         llm_model=llm_model,
+        llm_image_api_key=llm_image_api_key,
+        llm_image_base_url=llm_image_base_url,
+        llm_image_model=llm_image_model,
         llm_provider=llm_provider,
         llm_fallback_models=llm_fallback_models,
         llm_request_cooldown_seconds=llm_request_cooldown_seconds,

@@ -424,9 +424,9 @@ async def resolve_post_image(
         (topic or "")[:60], effective_mode, _tid,
     )
 
-    api_key = getattr(config, "openrouter_api_key", "") if config else ""
-    model = getattr(config, "openrouter_model", "") if config else ""
-    base_url = getattr(config, "openrouter_base_url", None) if config else None
+    api_key = (getattr(config, "llm_image_api_key", "") or getattr(config, "openrouter_image_api_key", "") or getattr(config, "openrouter_api_key", "")) if config else ""
+    model = (getattr(config, "llm_image_model", "") or getattr(config, "openrouter_image_model", "") or "") if config else ""
+    base_url = (getattr(config, "llm_image_base_url", "") or getattr(config, "openrouter_image_base_url", "") or getattr(config, "openrouter_base_url", None)) if config else None
 
     try:
         result: ImageResult = await get_image(
@@ -582,6 +582,11 @@ async def generate_post_payload(
     logger.debug("GENERATE_POST_PAYLOAD force_image=%s owner_id=%s prompt=%r topic=%r", force_image, owner_id, (prompt or "")[:200], (channel_topic or "")[:200])
     if force_image:
         try:
+            _quality_reasons = str(bundle.get("quality_reasons") or "").lower()
+            text_quality_flagged = any(
+                token in _quality_reasons
+                for token in ("off_topic", "off-topic", "out_of_topic", "irrelevant", "topic_mismatch")
+            )
             used_refs = {current_media_ref} if str(current_media_ref or "").strip() else set()
             # Wider dedup window for autopost to prevent repetitive images
             dedup_limit = 100 if generation_path == "autopost" else 50
@@ -604,12 +609,13 @@ async def generate_post_payload(
                         body=body,
                         channel_topic=channel_topic,
                         llm_image_prompt=llm_image_prompt,
-                        api_key=getattr(config, "openrouter_api_key", ""),
-                        model=getattr(config, "openrouter_model", ""),
-                        base_url=getattr(config, "openrouter_base_url", None),
+                        api_key=(getattr(config, "llm_image_api_key", "") or getattr(config, "openrouter_image_api_key", "") or getattr(config, "openrouter_api_key", "")),
+                        model=(getattr(config, "llm_image_model", "") or getattr(config, "openrouter_image_model", "") or ""),
+                        base_url=(getattr(config, "llm_image_base_url", "") or getattr(config, "openrouter_image_base_url", "") or getattr(config, "openrouter_base_url", None)),
                         owner_id=owner_id,
                         mode=generation_path,
                         used_refs=used_refs,
+                        text_quality_flagged=text_quality_flagged,
                         content_mode=str(bundle.get("content_mode") or ""),
                         channel_style=str(ch_settings.get("channel_style") or ""),
                         channel_audience=str(ch_settings.get("channel_audience") or ""),

@@ -325,6 +325,7 @@ class TestImageServiceFlow(unittest.TestCase):
         from image_service import get_image
 
         with patch("image_service.generate_image", new_callable=AsyncMock) as mock_gen, \
+             patch("image_service.build_fallback_search_query", return_value="car service workshop mechanic tools editorial"), \
              patch("image_service.search_stock_photo", new_callable=AsyncMock) as mock_search:
             mock_gen.return_value = None
             mock_search.return_value = "https://images.pexels.com/photos/123/pexels-photo-123.jpeg"
@@ -344,6 +345,7 @@ class TestImageServiceFlow(unittest.TestCase):
         from image_service import get_image
 
         with patch("image_service.generate_image", new_callable=AsyncMock) as mock_gen, \
+             patch("image_service.build_fallback_search_query", return_value="car maintenance service station mechanic editorial"), \
              patch("image_service.search_stock_photo", new_callable=AsyncMock) as mock_search:
             mock_gen.return_value = None
             mock_search.return_value = ""
@@ -373,6 +375,7 @@ class TestImageServiceFlow(unittest.TestCase):
         from image_service import get_image
 
         with patch("image_service.generate_image", new_callable=AsyncMock) as mock_gen, \
+             patch("image_service.build_fallback_search_query", return_value="car service workshop mechanic tools editorial"), \
              patch("image_service.search_stock_photo", new_callable=AsyncMock) as mock_search:
             mock_gen.return_value = None
             mock_search.return_value = "https://example.com/cringe_meme_funny.jpg"
@@ -385,6 +388,26 @@ class TestImageServiceFlow(unittest.TestCase):
                 )
             )
         self.assertEqual(result.source, "none")
+
+    def test_get_image_allows_family_mismatch_penalty_when_text_flagged(self):
+        from image_service import get_image
+
+        with patch("image_service.generate_image", new_callable=AsyncMock) as mock_gen, \
+             patch("image_service.build_fallback_search_query", return_value="car maintenance service station mechanic editorial"), \
+             patch("image_service.search_stock_photo", new_callable=AsyncMock) as mock_search:
+            mock_gen.return_value = None
+            mock_search.return_value = "https://images.pexels.com/photos/12345/editorial-photo.jpeg"
+            result = asyncio.run(
+                get_image(
+                    title="Как выбрать тормозные колодки для городской езды",
+                    body="Тема ушла в еду и десерты, но канал про обслуживание автомобиля.",
+                    channel_topic="Автомобили",
+                    api_key="test-key",
+                    model="gpt-image-1",
+                    text_quality_flagged=True,
+                )
+            )
+        self.assertEqual(result.source, "fallback")
 
 
 class TestImageCandidateValidation(unittest.TestCase):
@@ -412,6 +435,41 @@ class TestImageCandidateValidation(unittest.TestCase):
         )
         self.assertFalse(ok)
         self.assertIn("reputational_risk_ref", reason)
+
+    def test_candidate_family_mismatch_penalty_when_allowed(self):
+        from image_validation import validate_image_candidate
+        ok, reason = validate_image_candidate(
+            prompt="Professional photo of a car service workshop, mechanic tools and repair station interior",
+            title="Как выбрать тормозные колодки для автомобиля",
+            body="Практический гайд для водителей.",
+            channel_topic="Автомобили и обслуживание",
+            allow_family_mismatch_penalty=True,
+        )
+        self.assertTrue(ok, reason)
+        self.assertIn("family_mismatch_penalty", reason)
+
+    def test_family_context_hint_overrides_offtopic_body(self):
+        from image_validation import validate_image_candidate
+        ok, reason = validate_image_candidate(
+            prompt="Professional photo of car maintenance in local workshop",
+            title="Советы по автосервису",
+            body="Лучший десерт с клубникой и кремом.",
+            channel_topic="Автомобили",
+            family_context_hint="Автомобили локальный автосервис",
+        )
+        self.assertTrue(ok, reason)
+
+    def test_gross_family_mismatch_still_rejected_even_with_penalty_flag(self):
+        from image_validation import validate_image_candidate
+        ok, reason = validate_image_candidate(
+            prompt="Professional macro photo of gourmet pasta and dessert plate",
+            title="Как заменить тормозную жидкость в автомобиле",
+            body="Пошаговый сервисный чеклист.",
+            channel_topic="Автомобили",
+            allow_family_mismatch_penalty=True,
+        )
+        self.assertFalse(ok)
+        self.assertTrue("family_mismatch" in reason or "prompt_not_relevant" in reason, reason)
 
 
 class TestImageHistoryPatternDedup(unittest.TestCase):
@@ -491,6 +549,7 @@ class TestGenerationValidationRejection(unittest.TestCase):
         non_image_bytes = b"NOT_AN_IMAGE_JUST_TEXT" * 200  # >1KB but not image
 
         with patch("image_service.generate_image", new_callable=AsyncMock) as mock_gen, \
+             patch("image_service.build_fallback_search_query", return_value="car maintenance service station mechanic editorial"), \
              patch("image_service.search_stock_photo", new_callable=AsyncMock) as mock_search:
             mock_gen.return_value = non_image_bytes
             mock_search.return_value = ""
@@ -508,6 +567,7 @@ class TestGenerationValidationRejection(unittest.TestCase):
         tiny_png = b"\x89PNG" + b"\x00" * 10  # Valid magic but too small
 
         with patch("image_service.generate_image", new_callable=AsyncMock) as mock_gen, \
+             patch("image_service.build_fallback_search_query", return_value="car maintenance service station mechanic editorial"), \
              patch("image_service.search_stock_photo", new_callable=AsyncMock) as mock_search:
             mock_gen.return_value = tiny_png
             mock_search.return_value = ""
@@ -529,6 +589,28 @@ class TestGenerationValidationRejection(unittest.TestCase):
             )
         self.assertEqual(result.source, "fallback")
         self.assertTrue(result.media_ref)
+
+    def test_invalid_image_model_skips_generation_and_uses_fallback(self):
+        """Text-only model must skip AI generation and proceed to fallback."""
+        from image_service import get_image
+        from image_history import ImageHistory
+
+        with patch("image_service.get_image_history", return_value=ImageHistory(maxlen=10, ttl=3600)), \
+             patch("image_service.generate_image", new_callable=AsyncMock) as mock_gen, \
+             patch("image_service.build_fallback_search_query", return_value="car maintenance service station mechanic editorial"), \
+             patch("image_service.search_stock_photo", new_callable=AsyncMock) as mock_search:
+            mock_search.return_value = "https://images.pexels.com/photos/999/fallback.jpeg"
+            result = asyncio.run(
+                get_image(
+                    title="Как подготовить автомобиль к сезону и сервису",
+                    body="Подбор полезных проверок и ухода за машиной.",
+                    channel_topic="Автомобили",
+                    api_key="test-key",
+                    model="mistral-small-2603",
+                )
+            )
+        mock_gen.assert_not_called()
+        self.assertEqual(result.source, "fallback")
 
 
 class TestStorageResultPath(unittest.TestCase):
