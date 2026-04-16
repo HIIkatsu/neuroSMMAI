@@ -1580,8 +1580,9 @@ async def get_post_stats(owner_id: int | None = 0) -> dict:
         )
         plan_total, plan_posted, plan_pending = await cur.fetchone()
 
+        drafts_where = "WHERE owner_id=? AND status='draft'" if owner_id is not None else "WHERE status='draft'"
         cur = await db.execute(
-            f"SELECT COUNT(*) FROM draft_posts {'WHERE owner_id=? AND status=\'draft\'' if owner_id is not None else 'WHERE status=\'draft\''}",
+            f"SELECT COUNT(*) FROM draft_posts {drafts_where}",
             params,
         )
         drafts_total = (await cur.fetchone())[0]
