@@ -207,6 +207,8 @@ async def get_image(
             ] if (x or "").strip()
         ),
         content_mode=effective_mode,
+        normalized_visual_prompt="" if text_quality_flagged else prompt,
+        resolved_intent=post_intent,
     )
 
     if fallback_ref:
@@ -360,6 +362,8 @@ async def _try_fallback(
     mode: str = MODE_EDITOR,
     family_context_hint: str = "",
     content_mode: str = "",
+    normalized_visual_prompt: str = "",
+    resolved_intent: str = "",
 ) -> str:
     """Attempt stock photo fallback. Returns image URL or empty string."""
     query = build_fallback_search_query(
@@ -403,8 +407,13 @@ async def _try_fallback(
         logger.info("IMAGE_FALLBACK_ALREADY_USED url=%r", url[:60])
         return ""
 
+    stable_visual_context = " ".join(
+        x.strip()
+        for x in [normalized_visual_prompt, title, channel_topic, resolved_intent, query]
+        if (x or "").strip()
+    )
     candidate_ok, candidate_reason = validate_image_candidate(
-        prompt=query,
+        prompt=stable_visual_context or query,
         title=title,
         body=body,
         channel_topic=channel_topic,
@@ -412,6 +421,8 @@ async def _try_fallback(
         content_mode=content_mode,
         media_ref=url,
         allow_family_mismatch_penalty=(text_quality_flagged or mode == MODE_EDITOR),
+        enforce_min_prompt_len=False,
+        ignore_body_for_family_context=text_quality_flagged,
     )
     if not candidate_ok:
         logger.warning("IMAGE_FALLBACK_REJECT reason=%s url=%r", candidate_reason, url[:80])

@@ -27,6 +27,35 @@ def _resolve_base_url(base_url: Optional[str] = None) -> str:
     return (base_url or os.getenv("OPENAI_BASE_URL") or DEFAULT_BASE_URL).strip()
 
 
+def _endpoint_kind_for_image(model: str, resolved_base_url: str) -> str:
+    base = (resolved_base_url or "").lower()
+    m = (model or "").strip().lower()
+    if "openrouter.ai" in base:
+        return "openrouter.images.generate"
+    if "api.openai.com" in base:
+        return "openai.images.generate"
+    if m.startswith("openai/"):
+        return "openai-compatible.images.generate"
+    return "unknown.images.generate"
+
+
+def _should_fast_skip_image_call(model: str, resolved_base_url: str) -> tuple[bool, str]:
+    """Return (skip, reason) for provider/model combos that are known bad at runtime."""
+    base = (resolved_base_url or "").lower()
+    m = (model or "").strip().lower()
+    if "openrouter.ai" in base and (m == "gpt-image-1" or m.startswith("openai/gpt-image-1")):
+        return True, "provider_endpoint_mismatch_openrouter_gpt_image_1"
+    return False, ""
+
+
+def _error_prefix(value: object, limit: int = 160) -> str:
+    try:
+        txt = str(value or "").strip().replace("\n", " ")
+    except Exception:
+        txt = ""
+    return txt[:limit]
+
+
 def _resolve_proxy() -> str | None:
     for key in (
         "OPENROUTER_PROXY_URL",
@@ -229,10 +258,27 @@ async def ai_image_generate(
         )
         return None
 
-    client = await _get_shared_client(api_key, base_url)
+    resolved_base_url = _resolve_base_url(base_url)
+    normalized_model = (model or "").strip()
+    if "api.openai.com" in resolved_base_url.lower() and normalized_model.lower().startswith("openai/"):
+        normalized_model = normalized_model.split("/", 1)[1]
+
+    endpoint_kind = _endpoint_kind_for_image(normalized_model, resolved_base_url)
+    should_skip, skip_reason = _should_fast_skip_image_call(normalized_model, resolved_base_url)
+    if should_skip:
+        logger.warning(
+            "ai_image_generate SKIP reason=%s base_url=%s model=%s endpoint_kind=%s",
+            skip_reason,
+            resolved_base_url,
+            normalized_model,
+            endpoint_kind,
+        )
+        return None
+
+    client = await _get_shared_client(api_key, resolved_base_url)
     try:
         kwargs: dict = {
-            "model": model,
+            "model": normalized_model,
             "prompt": prompt,
             "size": size,
             "response_format": "b64_json",  # Prefer inline to avoid URL fetch
@@ -245,14 +291,14 @@ async def ai_image_generate(
             kwargs["extra_body"] = extra_body
 
         logger.info(
-            "ai_image_generate START model=%s size=%s prompt_len=%d",
-            model, size, len(prompt),
+            "ai_image_generate START base_url=%s model=%s endpoint_kind=%s size=%s prompt_len=%d",
+            resolved_base_url, normalized_model, endpoint_kind, size, len(prompt),
         )
 
         result = await client.images.generate(**kwargs)
         data = getattr(result, "data", None) or []
         if not data:
-            logger.warning("ai_image_generate EMPTY_RESPONSE model=%s", model)
+            logger.warning("ai_image_generate EMPTY_RESPONSE model=%s", normalized_model)
             return None
 
         item = data[0]
@@ -263,17 +309,17 @@ async def ai_image_generate(
             image_bytes = base64.b64decode(b64)
             logger.info(
                 "ai_image_generate SUCCESS model=%s delivery=b64_json bytes=%d",
-                model, len(image_bytes),
+                normalized_model, len(image_bytes),
             )
             return image_bytes
 
         # Fallback: download from URL
         url = getattr(item, "url", None)
         if not url:
-            logger.warning("ai_image_generate NO_B64_NO_URL model=%s", model)
+            logger.warning("ai_image_generate NO_B64_NO_URL model=%s", normalized_model)
             return None
 
-        logger.info("ai_image_generate FETCHING_URL model=%s url=%r", model, url[:120])
+        logger.info("ai_image_generate FETCHING_URL model=%s url=%r", normalized_model, url[:120])
         proxy = _resolve_proxy()
         fetch_timeout = httpx.Timeout(connect=20.0, read=120.0, write=60.0, pool=60.0)
         transport = httpx.AsyncHTTPTransport(retries=1)
@@ -291,22 +337,28 @@ async def ai_image_generate(
             image_bytes = resp.content
             logger.info(
                 "ai_image_generate SUCCESS model=%s delivery=url bytes=%d",
-                model, len(image_bytes),
+                normalized_model, len(image_bytes),
             )
             return image_bytes
 
     except (APITimeoutError, RateLimitError, APIConnectionError) as exc:
         logger.warning(
             "ai_image_generate TRANSIENT_ERROR model=%s error_type=%s error=%s",
-            model, type(exc).__name__, str(exc)[:200],
+            normalized_model, type(exc).__name__, str(exc)[:200],
         )
         return None
     except APIError as exc:
+        body_prefix = _error_prefix(getattr(exc, "body", None) or exc)
         logger.warning(
-            "ai_image_generate API_ERROR model=%s status=%s error=%s",
-            model, getattr(exc, "status_code", "?"), str(exc)[:200],
+            "ai_image_generate API_ERROR base_url=%s model=%s endpoint_kind=%s status=%s response_prefix=%r error=%s",
+            resolved_base_url,
+            normalized_model,
+            endpoint_kind,
+            getattr(exc, "status_code", "?"),
+            body_prefix,
+            str(exc)[:200],
         )
         return None
     except Exception:
-        logger.exception("ai_image_generate UNEXPECTED_ERROR model=%s", model)
+        logger.exception("ai_image_generate UNEXPECTED_ERROR model=%s", normalized_model)
         return None

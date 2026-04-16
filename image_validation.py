@@ -55,10 +55,12 @@ def validate_image_candidate(
     content_mode: str = MODE_GENERIC,
     media_ref: str = "",
     allow_family_mismatch_penalty: bool = False,
+    enforce_min_prompt_len: bool = True,
+    ignore_body_for_family_context: bool = False,
 ) -> tuple[bool, str]:
     """Validate semantic and reputational quality of an image candidate."""
     p = (prompt or "").strip().lower()
-    if len(p) < 24:
+    if enforce_min_prompt_len and len(p) < 24:
         return False, "prompt_too_short"
 
     for bad in _REPUTATIONAL_RISK_TERMS:
@@ -81,7 +83,10 @@ def validate_image_candidate(
 
     post_family = detect_topic_family(family_context_hint) if family_context_hint else "generic"
     if post_family == "generic":
-        post_family = detect_topic_family(" ".join(filter(None, [title, body, channel_topic])))
+        family_parts = [title, channel_topic]
+        if not ignore_body_for_family_context:
+            family_parts.insert(1, body)
+        post_family = detect_topic_family(" ".join(filter(None, family_parts)))
     prompt_family = detect_topic_family(prompt)
     if post_family != "generic" and prompt_family not in (post_family, "generic"):
         if allow_family_mismatch_penalty and _is_close_family(post_family, prompt_family):
