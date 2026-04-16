@@ -18,6 +18,7 @@ import re
 from dataclasses import dataclass
 
 from image_prompts import build_generation_prompt, build_fallback_search_query, build_subject_rerank_profile
+from visual_profile_layer import build_visual_profile, profile_search_queries, score_candidate, ProviderCandidate
 from image_generation import generate_image
 from image_validation import (
     validate_image_bytes,
@@ -27,7 +28,7 @@ from image_validation import (
 )
 from image_storage import save_generated_image
 from image_history import get_image_history
-from image_fallback import StockCandidate, search_stock_photo, search_stock_candidates
+from image_fallback import search_stock_photo, search_stock_candidates
 
 logger = logging.getLogger(__name__)
 
@@ -163,41 +164,9 @@ async def get_image(
         logger.info("IMAGE_SERVICE_PROMPT_DEDUP prompt_sig=duplicate, proceeding with generation anyway")
         # We still generate — dedup is advisory for prompts, not blocking
 
-    generated_ref = ""
-    search_only_mode = _IMAGE_SEARCH_ONLY or normalized_mode == MODE_EDITOR
-    if search_only_mode:
-        logger.info("IMAGE_SERVICE_SEARCH_FIRST mode=%s image_search_only=%s", normalized_mode, _IMAGE_SEARCH_ONLY)
-    elif history.is_duplicate_visual_pattern(prompt):
-        logger.info("IMAGE_SERVICE_PATTERN_DEDUP owner_id=%s", owner_id)
-    else:
-        # 3. Try AI generation (primary path)
-        generated_ref = await _try_generation(
-            prompt=prompt,
-            negative_prompt=prompt_data["negative_prompt"],
-            api_key=api_key,
-            model=model,
-            base_url=base_url,
-            owner_id=owner_id,
-            history=history,
-            used_refs=used_refs,
-        )
+    logger.info("IMAGE_SERVICE_SEARCH_FIRST mode=%s image_search_only=%s", normalized_mode, _IMAGE_SEARCH_ONLY)
 
-    if generated_ref:
-        logger.info(
-            "IMAGE_SERVICE_SUCCESS source=generation ref=%r family=%s owner_id=%s",
-            generated_ref[:80], family, owner_id,
-        )
-        return ImageResult(
-            media_ref=generated_ref,
-            source="generation",
-            prompt_used=prompt[:200],
-            family=family,
-            is_generated=True,
-        )
-
-    # 4. Fallback to stock photo search
-    logger.info("IMAGE_SERVICE_GENERATION_FAILED, trying fallback owner_id=%s", owner_id)
-
+    # 3. Search-first stock photo path (editor/manual/autopost unified)
     fallback_ref = await _try_fallback(
         title=title,
         body=body,
@@ -228,7 +197,6 @@ async def get_image(
             "IMAGE_SERVICE_SUCCESS source=fallback ref=%r family=%s owner_id=%s",
             fallback_ref[:80], family, owner_id,
         )
-        # Record fallback result in history
         history.record(media_ref=fallback_ref)
         return ImageResult(
             media_ref=fallback_ref,
@@ -236,6 +204,32 @@ async def get_image(
             prompt_used=prompt[:200],
             family=family,
             is_generated=False,
+        )
+
+    generated_ref = ""
+    allow_generation_secondary = os.getenv("IMAGE_ALLOW_GENERATION_SECONDARY", "true").strip().lower() in {"1", "true", "yes", "on"}
+    if allow_generation_secondary and normalized_mode != MODE_EDITOR and not history.is_duplicate_visual_pattern(prompt):
+        generated_ref = await _try_generation(
+            prompt=prompt,
+            negative_prompt=prompt_data["negative_prompt"],
+            api_key=api_key,
+            model=model,
+            base_url=base_url,
+            owner_id=owner_id,
+            history=history,
+            used_refs=used_refs,
+        )
+    if generated_ref:
+        logger.info(
+            "IMAGE_SERVICE_SUCCESS source=generation_secondary ref=%r family=%s owner_id=%s",
+            generated_ref[:80], family, owner_id,
+        )
+        return ImageResult(
+            media_ref=generated_ref,
+            source="generation",
+            prompt_used=prompt[:200],
+            family=family,
+            is_generated=True,
         )
 
     # 5. Complete failure
@@ -381,49 +375,21 @@ async def _try_fallback(
     content_constraints: str = "",
     llm_image_prompt: str = "",
 ) -> str:
-    """Attempt stock photo fallback. Returns image URL or empty string."""
-    rerank_profile = build_subject_rerank_profile(
+    """Search-first stock pipeline with canonical visual profile and universal scoring."""
+    profile = build_visual_profile(
         title=title,
-        body=body,
+        body="" if text_quality_flagged else body,
         channel_topic=channel_topic,
         onboarding_summary=onboarding_summary,
         post_intent=resolved_intent,
-        text_quality_flagged=text_quality_flagged,
+        content_constraints=content_constraints,
     )
-    positive_tokens = [str(x) for x in (rerank_profile.get("positive_tokens") or [])]
-    negative_tokens = [str(x) for x in (rerank_profile.get("negative_tokens") or [])]
-    subject_key = str(rerank_profile.get("subject") or "generic")
-    used_body = bool(rerank_profile.get("used_body_for_search"))
+    primary_query, backup_query = profile_search_queries(profile)
+    used_body = bool(body and not text_quality_flagged)
     used_llm = bool(llm_image_prompt and llm_image_prompt.strip() and not text_quality_flagged and mode != MODE_EDITOR)
-    query = build_fallback_search_query(
-        title=title,
-        body=body,
-        channel_topic=channel_topic,
-        onboarding_summary=onboarding_summary,
-        content_constraints=content_constraints,
-        post_intent=resolved_intent,
-        text_quality_flagged=text_quality_flagged,
-        llm_image_prompt=(llm_image_prompt if used_llm else ""),
-        query_family="primary",
-    )
-    fallback_query = build_fallback_search_query(
-        title=title,
-        body=body,
-        channel_topic=channel_topic,
-        onboarding_summary=onboarding_summary,
-        content_constraints=content_constraints,
-        post_intent=resolved_intent,
-        text_quality_flagged=text_quality_flagged,
-        llm_image_prompt="",
-        query_family="fallback",
-    )
 
-    if not query:
-        logger.warning("IMAGE_FALLBACK_NO_QUERY")
-        return ""
-
-    all_candidates = []
-    for q, qf in ((query, "primary"), (fallback_query, "fallback")):
+    all_candidates: list[tuple[str, ProviderCandidate]] = []
+    for q, qf in ((primary_query, "primary"), (backup_query, "fallback")):
         if not q:
             continue
         try:
@@ -440,88 +406,72 @@ async def _try_fallback(
             try:
                 legacy_url = await asyncio.wait_for(search_stock_photo(q), timeout=_FALLBACK_TIMEOUT)
                 if legacy_url:
-                    all_candidates.append((q, StockCandidate(url=legacy_url, provider="unknown", query_family=qf)))
+                    all_candidates.append((q, ProviderCandidate(url=legacy_url, provider="unknown", source_query=q, query_family=qf)))
             except Exception:
                 pass
 
     if not all_candidates:
         logger.info(
             "IMAGE_PIPELINE_DECISION final_decision=no_image reject_reason=no_candidates anchor_family=%s fallback_query_family=%s used_body_for_search=%s used_llm_image_prompt_for_search=%s",
-            subject_key, "fallback", used_body, used_llm,
+            profile.domain_family, "fallback", used_body, used_llm,
         )
         return ""
 
+    best_url = ""
+    best_score = -9999.0
+    best_reason = "all_candidates_rejected"
+
     for candidate_query, candidate in all_candidates:
         url = candidate.url
-        # Validate URL
         is_valid, reason = validate_image_url(url)
         if not is_valid:
-            logger.warning("IMAGE_FALLBACK_INVALID_URL provider=%s url=%r reason=%s", candidate.provider, url[:60], reason)
             continue
-
-        # Check dedup
         if history.is_duplicate_ref(url):
-            logger.info("IMAGE_FALLBACK_DEDUP_HIT provider=%s url=%r", candidate.provider, url[:60])
             continue
 
-        # Check against used_refs
-        if used_refs and url in used_refs:
-            logger.info("IMAGE_FALLBACK_ALREADY_USED provider=%s url=%r", candidate.provider, url[:60])
-            continue
+        breakdown = score_candidate(
+            candidate=candidate,
+            profile=profile,
+            used_refs=used_refs,
+            history_duplicate=False,
+            min_score=1.5,
+        )
+        if breakdown.score > best_score:
+            best_score = breakdown.score
+            best_url = url
+            best_reason = breakdown.reason
 
-        stable_visual_context = " ".join(
-            x.strip()
-            for x in [normalized_visual_prompt, title, channel_topic, resolved_intent, candidate_query]
-            if (x or "").strip()
-        )
-        candidate_ok, candidate_reason = validate_image_candidate(
-            prompt=stable_visual_context or candidate_query,
-            title=title,
-            body=body,
-            channel_topic=channel_topic,
-            family_context_hint=family_context_hint,
-            content_mode=content_mode,
-            media_ref=url,
-            allow_family_mismatch_penalty=False,
-            enforce_min_prompt_len=False,
-            ignore_body_for_family_context=text_quality_flagged,
-            canonical_family="",
-        )
-        rerank_ok, rerank_reason = _rerank_candidate_by_subject(
-            media_ref=url,
-            candidate_query=candidate_query,
-            positive_tokens=positive_tokens,
-            negative_tokens=negative_tokens,
-        )
-        if not rerank_ok:
-            logger.warning(
-                "IMAGE_PIPELINE_DECISION final_decision=rejected reject_reason=%s provider=%s anchor_family=%s fallback_query_family=%s used_body_for_search=%s used_llm_image_prompt_for_search=%s",
-                rerank_reason, candidate.provider, subject_key, candidate.query_family, used_body, used_llm,
+        if breakdown.decision == "accepted":
+            logger.info(
+                "IMAGE_PIPELINE_DECISION final_decision=accepted reject_reason= provider=%s anchor_family=%s fallback_query_family=%s used_body_for_search=%s used_llm_image_prompt_for_search=%s score=%.2f",
+                candidate.provider,
+                profile.domain_family,
+                candidate.query_family,
+                used_body,
+                used_llm,
+                breakdown.score,
             )
-            continue
-        if not candidate_ok:
-            if rerank_ok and candidate_reason.startswith("family_mismatch_post_"):
-                logger.info(
-                    "IMAGE_PIPELINE_DECISION final_decision=accepted reject_reason=family_mismatch_overridden_by_subject_rerank provider=%s anchor_family=%s fallback_query_family=%s used_body_for_search=%s used_llm_image_prompt_for_search=%s",
-                    candidate.provider, subject_key, candidate.query_family, used_body, used_llm,
-                )
-                return url
-            logger.warning(
-                "IMAGE_PIPELINE_DECISION final_decision=rejected reject_reason=%s provider=%s anchor_family=%s fallback_query_family=%s used_body_for_search=%s used_llm_image_prompt_for_search=%s",
-                candidate_reason, candidate.provider, subject_key, candidate.query_family, used_body, used_llm,
-            )
-            continue
-        if "family_mismatch_penalty_" in candidate_reason:
-            logger.info("IMAGE_FALLBACK_PENALTY reason=%s url=%r", candidate_reason, url[:80])
+            return url
+
         logger.info(
-            "IMAGE_PIPELINE_DECISION final_decision=accepted reject_reason= provider=%s anchor_family=%s fallback_query_family=%s used_body_for_search=%s used_llm_image_prompt_for_search=%s",
-            candidate.provider, subject_key, candidate.query_family, used_body, used_llm,
+            "IMAGE_PIPELINE_DECISION final_decision=rejected reject_reason=%s provider=%s anchor_family=%s fallback_query_family=%s used_body_for_search=%s used_llm_image_prompt_for_search=%s score=%.2f",
+            breakdown.reason,
+            candidate.provider,
+            profile.domain_family,
+            candidate.query_family,
+            used_body,
+            used_llm,
+            breakdown.score,
         )
-        return url
 
     logger.info(
-        "IMAGE_PIPELINE_DECISION final_decision=no_image reject_reason=all_candidates_rejected provider=none anchor_family=%s fallback_query_family=%s used_body_for_search=%s used_llm_image_prompt_for_search=%s",
-        subject_key, "fallback", used_body, used_llm,
+        "IMAGE_PIPELINE_DECISION final_decision=no_image reject_reason=%s provider=none anchor_family=%s fallback_query_family=%s used_body_for_search=%s used_llm_image_prompt_for_search=%s best_score=%.2f",
+        best_reason,
+        profile.domain_family,
+        "fallback",
+        used_body,
+        used_llm,
+        best_score,
     )
     return ""
 
