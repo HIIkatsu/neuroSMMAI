@@ -38,6 +38,11 @@ _REPUTATIONAL_RISK_TERMS = (
     "conspiracy", "political rally", "hate", "violence", "weapon closeup",
     "absurd", "clown", "cringe",
 )
+_CLOSE_FAMILY_GROUPS = (
+    frozenset({"cars", "local_business", "city_transport"}),
+    frozenset({"marketing", "tech", "finance", "business"}),
+    frozenset({"food", "lifestyle", "health"}),
+)
 
 
 def validate_image_candidate(
@@ -46,8 +51,10 @@ def validate_image_candidate(
     title: str = "",
     body: str = "",
     channel_topic: str = "",
+    family_context_hint: str = "",
     content_mode: str = MODE_GENERIC,
     media_ref: str = "",
+    allow_family_mismatch_penalty: bool = False,
 ) -> tuple[bool, str]:
     """Validate semantic and reputational quality of an image candidate."""
     p = (prompt or "").strip().lower()
@@ -72,12 +79,27 @@ def validate_image_candidate(
     if not is_relevant:
         return False, f"prompt_not_relevant_{reason}"
 
-    post_family = detect_topic_family(" ".join(filter(None, [title, body, channel_topic])))
+    post_family = detect_topic_family(family_context_hint) if family_context_hint else "generic"
+    if post_family == "generic":
+        post_family = detect_topic_family(" ".join(filter(None, [title, body, channel_topic])))
     prompt_family = detect_topic_family(prompt)
     if post_family != "generic" and prompt_family not in (post_family, "generic"):
+        if allow_family_mismatch_penalty and _is_close_family(post_family, prompt_family):
+            return True, f"family_mismatch_penalty_post_{post_family}_prompt_{prompt_family}"
         return False, f"family_mismatch_post_{post_family}_prompt_{prompt_family}"
 
     return True, "ok"
+
+
+def _is_close_family(post_family: str, prompt_family: str) -> bool:
+    if post_family == prompt_family:
+        return True
+    if "generic" in {post_family, prompt_family}:
+        return True
+    for group in _CLOSE_FAMILY_GROUPS:
+        if post_family in group and prompt_family in group:
+            return True
+    return False
 
 
 def validate_image_bytes(data: bytes | None) -> tuple[bool, str]:

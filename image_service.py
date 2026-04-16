@@ -65,6 +65,7 @@ async def get_image(
     owner_id: int | None = None,
     mode: str = MODE_EDITOR,
     used_refs: set[str] | None = None,
+    text_quality_flagged: bool = False,
     content_mode: str = "",
     channel_style: str = "",
     channel_audience: str = "",
@@ -195,6 +196,16 @@ async def get_image(
         channel_topic=channel_topic,
         history=history,
         used_refs=used_refs,
+        text_quality_flagged=text_quality_flagged,
+        mode=normalized_mode,
+        family_context_hint=" ".join(
+            x for x in [
+                channel_topic,
+                onboarding_summary,
+                post_intent,
+                title,
+            ] if (x or "").strip()
+        ),
         content_mode=effective_mode,
     )
 
@@ -281,6 +292,12 @@ async def _try_generation(
     used_refs: set[str] | None,
 ) -> str:
     """Attempt AI image generation. Returns media ref or empty string."""
+    if not _is_valid_image_model(model):
+        logger.warning(
+            "IMAGE_GENERATION_SKIPPED_INVALID_MODEL model=%r owner_id=%s",
+            (model or "")[:120], owner_id,
+        )
+        return ""
     try:
         image_bytes = await asyncio.wait_for(
             generate_image(
@@ -339,6 +356,9 @@ async def _try_fallback(
     channel_topic: str,
     history,
     used_refs: set[str] | None,
+    text_quality_flagged: bool = False,
+    mode: str = MODE_EDITOR,
+    family_context_hint: str = "",
     content_mode: str = "",
 ) -> str:
     """Attempt stock photo fallback. Returns image URL or empty string."""
@@ -388,12 +408,16 @@ async def _try_fallback(
         title=title,
         body=body,
         channel_topic=channel_topic,
+        family_context_hint=family_context_hint,
         content_mode=content_mode,
         media_ref=url,
+        allow_family_mismatch_penalty=(text_quality_flagged or mode == MODE_EDITOR),
     )
     if not candidate_ok:
         logger.warning("IMAGE_FALLBACK_REJECT reason=%s url=%r", candidate_reason, url[:80])
         return ""
+    if "family_mismatch_penalty_" in candidate_reason:
+        logger.info("IMAGE_FALLBACK_PENALTY reason=%s url=%r", candidate_reason, url[:80])
 
     return url
 
@@ -403,3 +427,22 @@ def _normalize_mode(mode: str) -> str:
     if m in {MODE_AUTOPOST, "news", "auto"}:
         return MODE_AUTOPOST
     return MODE_EDITOR
+
+
+def _is_valid_image_model(model: str) -> bool:
+    m = (model or "").strip().lower()
+    if not m:
+        # Empty model is allowed — generate_image() will use IMAGE_GENERATION_MODEL/default.
+        return True
+    # Conservative allow-list: common image generation families/providers.
+    image_tokens = (
+        "image", "flux", "recraft", "dall", "sd", "stable-diffusion", "midjourney", "imagen",
+    )
+    text_only_tokens = (
+        "mistral", "claude", "llama", "deepseek", "qwen", "gemini", "gpt-4", "gpt-3", "command-r",
+    )
+    if any(tok in m for tok in image_tokens):
+        return True
+    if any(tok in m for tok in text_only_tokens):
+        return False
+    return False
