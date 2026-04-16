@@ -34,6 +34,8 @@ class TextValidationResult:
     fake_personal_claims: list[str] = field(default_factory=list)
     source_drift_reasons: list[str] = field(default_factory=list)
     template_repeat_hits: list[str] = field(default_factory=list)
+    text_quality_hits: list[str] = field(default_factory=list)
+    clickbait_hits: list[str] = field(default_factory=list)
     total_risk_score: int = 0
     # Structured log fields
     log_events: list[str] = field(default_factory=list)
@@ -50,6 +52,8 @@ class TextValidationResult:
             "fake_personal": len(self.fake_personal_claims),
             "source_drift": len(self.source_drift_reasons),
             "template_repeat": len(self.template_repeat_hits),
+            "text_quality": len(self.text_quality_hits),
+            "clickbait": len(self.clickbait_hits),
         }
 
 
@@ -135,6 +139,14 @@ _OVERUSED_CTA_PATTERNS: list[tuple[str, str]] = [
     ("что думаете?", "cta_what_think"),
     ("а как у вас?", "cta_how_about_you"),
     ("делитесь в комментариях", "cta_share_comments"),
+]
+
+_CHEAP_CLICKBAIT_PATTERNS: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"\bшок\b", re.I), "cheap_shock"),
+    (re.compile(r"\bсрочно\b", re.I), "cheap_urgent"),
+    (re.compile(r"\bскрыва(?:ют|ли|ет)\b", re.I), "cheap_they_hide"),
+    (re.compile(r"\bне\s+говор(?:ят|или|ит)\b", re.I), "cheap_not_telling"),
+    (re.compile(r"\bвсе\s+молчат\b", re.I), "cheap_everyone_silent"),
 ]
 
 
@@ -279,6 +291,65 @@ def validate_template_repetition(
     return hits
 
 
+def _normalize_text_fragment(text: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^\wа-яёa-z0-9 ]+", " ", text.lower())).strip()
+
+
+def validate_text_quality_repetition(text: str) -> list[str]:
+    """Detect low-quality repetition patterns inside a single generated text."""
+    if not text:
+        return []
+
+    hits: list[str] = []
+    paragraphs = [_normalize_text_fragment(p) for p in re.split(r"\n\s*\n+", text) if p.strip()]
+    if len(paragraphs) >= 2:
+        seen: set[str] = set()
+        for p in paragraphs:
+            if len(p) < 20:
+                continue
+            if p in seen:
+                hits.append("duplicate_paragraph")
+                break
+            seen.add(p)
+
+    questions = re.findall(r"(?:^|[.!?\n]\s*)([^?.!\n][^?\n]{2,}\?)", text)
+    normalized_questions = [_normalize_text_fragment(q) for q in questions if q.strip()]
+    if len(normalized_questions) >= 2 and normalized_questions[-1] == normalized_questions[-2]:
+        hits.append("duplicate_final_question")
+
+    # Adjacent near-duplicate sentence detection ("same thought in two neighboring lines")
+    sentences = [_normalize_text_fragment(s) for s in re.split(r"[.!?]\s+", text) if s.strip()]
+    for i in range(len(sentences) - 1):
+        left_words = set(sentences[i].split())
+        right_words = set(sentences[i + 1].split())
+        if len(left_words) < 5 or len(right_words) < 5:
+            continue
+        overlap = len(left_words & right_words) / max(len(left_words | right_words), 1)
+        if overlap >= 0.82:
+            hits.append("adjacent_rephrased_repeat")
+            break
+
+    return hits
+
+
+def validate_cheap_clickbait(text: str, *, source_text: str = "", input_text: str = "") -> list[str]:
+    """Detect cheap clickbait hooks that are not grounded in provided context."""
+    if not text:
+        return []
+
+    hits: list[str] = []
+    context = f"{source_text} {input_text}".lower()
+    for pattern, reason in _CHEAP_CLICKBAIT_PATTERNS:
+        match = pattern.search(text)
+        if not match:
+            continue
+        token = match.group(0).lower()
+        if context and token in context:
+            continue
+        hits.append(reason)
+    return hits
+
+
 # ---------------------------------------------------------------------------
 # Full text validation (orchestrator)
 # ---------------------------------------------------------------------------
@@ -345,7 +416,10 @@ def validate_generated_text(
     if numeric_violations:
         result.fake_numeric_claims = numeric_violations
         # In strict factual modes, authority violations get higher penalty
-        base_penalty = 4 if _strict_mode else 3
+        if generation_mode in ("manual", "autopost"):
+            base_penalty = 5
+        else:
+            base_penalty = 4 if _strict_mode else 3
         risk += len(numeric_violations) * base_penalty
         # Categorize: authority-like reasons vs pure numeric reasons
         _authority_reasons = {
@@ -422,6 +496,23 @@ def validate_generated_text(
         risk += len(template_hits)
         for hit in template_hits:
             result.log_events.append(f"TEXT_TEMPLATE_REPEAT_PENALTY={hit}")
+
+    # 5. Text quality repetition (duplicate paragraphs/final question/rephrased repeats)
+    quality_hits = validate_text_quality_repetition(text)
+    if quality_hits:
+        result.text_quality_hits = quality_hits
+        # Duplicate paragraphs/final question are strong reject-level issues
+        for hit in quality_hits:
+            risk += 6 if hit in {"duplicate_paragraph", "duplicate_final_question"} else 3
+            result.log_events.append(f"TEXT_QUALITY_REPEAT_REJECT reason={hit}")
+
+    # 6. Cheap clickbait hooks
+    clickbait_hits = validate_cheap_clickbait(text, source_text=source_text, input_text=input_text)
+    if clickbait_hits:
+        result.clickbait_hits = clickbait_hits
+        risk += len(clickbait_hits) * 2
+        for hit in clickbait_hits:
+            result.log_events.append(f"TEXT_CHEAP_CLICKBAIT_PENALTY reason={hit}")
 
     result.total_risk_score = risk
     result.is_valid = risk < reject_threshold
