@@ -3921,12 +3921,16 @@ body.modal-open {
 
 .analytics-period-btn.active {
   color: var(--text);
-  background: rgba(255, 255, 255, 0.14);
+  background: rgba(77, 124, 255, 0.2);
+  box-shadow: inset 0 0 0 1px rgba(77, 124, 255, 0.25);
 }
 
 .analytics-overlay-chart-card {
-  border-color: rgba(144, 98, 255, 0.35);
-  background: radial-gradient(120% 100% at 100% 0%, rgba(130, 88, 255, 0.26) 0%, rgba(8, 12, 34, 0.92) 58%, rgba(6, 9, 28, 0.96) 100%);
+  border-color: rgba(77, 124, 255, 0.24);
+  background:
+    radial-gradient(120% 100% at 100% 0%, rgba(52, 168, 255, 0.18) 0%, rgba(8, 12, 34, 0.88) 58%, rgba(6, 9, 28, 0.95) 100%),
+    linear-gradient(180deg, rgba(0, 212, 170, 0.04) 0%, rgba(77, 124, 255, 0.06) 100%);
+  box-shadow: 0 12px 28px rgba(6, 12, 34, 0.28);
 }
 
 .analytics-overlay-kpi-title {
@@ -3957,7 +3961,9 @@ body.modal-open {
 }
 
 .analytics-overlay-insight {
-  border-color: rgba(144, 98, 255, 0.35);
+  border-color: rgba(77, 124, 255, 0.24);
+  background: linear-gradient(160deg, rgba(0, 212, 170, 0.05), rgba(77, 124, 255, 0.08));
+  box-shadow: 0 8px 24px rgba(6, 12, 34, 0.24);
 }
 
 .analytics-overlay-footnote {
@@ -3980,6 +3986,10 @@ body.modal-open {
 
 .analytics-clean-modal .modal-body-stack.analytics-clean-body {
   padding-top: 16px;
+}
+
+.analytics-advice-cta {
+  width: 100%;
 }
 
 .analytics-modal-visual-grid {
@@ -4132,6 +4142,10 @@ body.modal-open {
   padding: 4px 0;
 }
 
+.analytics-inline-link-btn {
+  width: 100%;
+}
+
 /* Small title */
 .small-title {
   font-size: 14px;
@@ -4181,6 +4195,10 @@ body.modal-open {
   }
   .analytics-badge-inline {
     align-self: flex-start;
+  }
+
+  .analytics-overlay-sheet-clean {
+    padding-bottom: calc(12px + var(--safe-bottom));
   }
 
   /* Quick actions: adaptive 2-column on small screens */

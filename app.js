@@ -88,7 +88,7 @@ document.addEventListener('click', function(e) {
 const _ACTION_ALLOWLIST = Object.freeze(new Set([
   'closeModal', 'switchTab', 'showTariffsModal', 'buyTariff',
   'openDraftEditor', 'openChannelProfile', 'openSettingsModal',
-  'openAnalyticsDetails', 'openPlanGenerator', 'openChatPicker',
+  'openAnalyticsDetails', 'openPlanGenerator', 'openChatPicker', 'openAdviceTarget',
   'setAnalyticsPeriod',
   'generateDraft', 'generatePlan', 'createPlanItem', 'savePlanItem',
   'createSchedule', 'saveChannel', 'createDraft', 'saveDraft',
@@ -1283,19 +1283,75 @@ function buildScoreFactorRows(factors = []) {
 
 function buildAdviceCard(analytics = null) {
   const a = analytics || {};
-  const recommendations = Array.isArray(a.recommendations) ? a.recommendations.filter(Boolean) : [];
   const summary = a.summary || {};
-  let text = recommendations[0] || a.next_step || '';
-  if (!text) {
-    text = Number(summary.active_channel || 0) === 0
-      ? 'Подключи канал, и мы дадим персональные рекомендации по росту.'
-      : 'Данных пока мало — опубликуй 2–3 поста, добавь план и вернись за персональным советом.';
+  const stats = state.data?.stats || {};
+  const factors = Array.isArray(a.score_factors) ? a.score_factors : [];
+  const availableFactors = factors.filter(x => x?.available !== false);
+  const weakestAvailable = availableFactors.slice().sort((x, y) => Number(x?.value || 0) - Number(y?.value || 0))[0] || null;
+  const normalizeKey = (value) => String(value || '').trim().toLowerCase();
+  const pickFactor = (keys = []) => factors.find(item => keys.includes(normalizeKey(item?.key)));
+  const isLow = (factor, threshold = 60) => factor && factor.available !== false && Number(factor.value || 0) < threshold;
+
+  const topicFactor = pickFactor(['topic_diversity', 'topics']);
+  const contentPlanFactor = pickFactor(['content_plan', 'plan']);
+  const draftFactor = pickFactor(['draft_buffer', 'drafts', 'volume', 'content_reserve']);
+  const activityFactor = pickFactor(['activity', 'regularity']);
+
+  let text = '';
+  let cta = '';
+  let target = 'analytics';
+
+  if (Number(summary.active_channel || 0) === 0) {
+    text = 'Сначала подключи активный канал — только так мы сможем давать персональные рекомендации.';
+    cta = 'Открыть каналы';
+    target = 'channels';
+  } else if (topicFactor && topicFactor.available === false) {
+    text = 'Недостаточно данных по разнообразию тем: нужно больше опубликованных постов или черновиков.';
+    cta = 'Открыть аналитику';
+    target = 'analytics';
+  } else if (isLow(contentPlanFactor, 65) || Number(summary.plan_count || 0) < 4) {
+    text = 'Контент-план просел: добавь идеи на ближайшие дни, чтобы автопилот не останавливался.';
+    cta = 'Открыть план';
+    target = 'plan';
+  } else if (isLow(draftFactor, 60) || Number(summary.drafts_count || 0) < 2) {
+    text = 'Мало черновиков в буфере: собери хотя бы 2–4 заготовки, чтобы держать стабильный выпуск.';
+    cta = 'Открыть посты';
+    target = 'posts';
+  } else if (isLow(activityFactor, 60) || Number(stats.posted_last_7d || 0) < 1) {
+    text = 'Ритм публикаций слабый: добавь расписание автопоста или зафиксируй частоту в плане.';
+    cta = 'Открыть автопост';
+    target = 'autopost';
+  } else if (weakestAvailable) {
+    text = weakestAvailable.action
+      ? String(weakestAvailable.action)
+      : `Сфокусируйся на факторе «${weakestAvailable.label || 'аналитика'}» — он сейчас самый слабый.`;
+    cta = 'Открыть аналитику';
+    target = 'analytics';
+  } else {
+    text = 'Данных пока мало — опубликуй 2–3 поста, добавь план и вернись за персональным советом.';
+    cta = 'Открыть аналитику';
+    target = 'analytics';
   }
+
   return `
     <div class="card analytics-overlay-insight"><div class="card-inner stack compact-section-card">
       <div class="section-title small-title">Совет</div>
       <div class="section-desc">${escapeHtml(text)}</div>
+      ${cta
+        ? `<button class="btn secondary analytics-advice-cta" data-action="openAdviceTarget" data-action-arg="${escapeHtml(target)}">${escapeHtml(cta)}</button>`
+        : ''
+      }
     </div></div>`;
+}
+
+function openAdviceTarget(target = 'analytics') {
+  const key = String(target || 'analytics').trim();
+  if (key === 'analytics') {
+    openAnalyticsDetails();
+    return;
+  }
+  closeModal();
+  switchTab(key);
 }
 
 
@@ -2375,7 +2431,7 @@ function analyticsBlock() {
   ];
   const sparkline = buildRhythmSparkline(activityItems);
   return `
-    <div class="card analytics-card analytics-card-clickable analytics-card-charted" data-action="openAnalyticsDetails"><div class="card-inner stack compact-dashboard-card">
+    <div class="card analytics-card analytics-card-charted"><div class="card-inner stack compact-dashboard-card">
       <div class="section-head-inline analytics-head-inline">
         <div>
           <div class="section-title small-title">Умная аналитика</div>
@@ -2391,7 +2447,7 @@ function analyticsBlock() {
         </div>
       </div>
       ${buildAdviceCard(a)}
-      <div class="analytics-inline-link">Открыть детали</div>
+      <button class="btn ghost analytics-inline-link-btn" data-action="openAnalyticsDetails">Открыть детали</button>
     </div></div>
   `;
 }
@@ -2440,7 +2496,6 @@ function dashboardView() {
         </div>
         <button class="dashboard-score-panel" data-action="openAnalyticsDetails" title="Открыть аналитику">
           ${renderScoreRing(readinessScore, 'score-ring-lg', scoreMeta.label)}
-          <div class="dashboard-score-label">${escapeHtml(scoreMeta.label)}</div>
         </button>
       </div></div>
 
