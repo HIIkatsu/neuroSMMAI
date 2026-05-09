@@ -184,7 +184,7 @@ def build_generation_prompt(
         prompt = f"{core}. {mode_scene_hint}. {effective_style}. {onboarding_context}. High quality, photorealistic, 4K."
 
     # Add forbidden scenes to negative prompt
-    negative = _NEGATIVE_PROMPT
+    negative = _NEGATIVE_PROMPT + (", people, humans, woman, man, face, girl, boy, body" if family in ("hardware", "tech", "cars") else "")
     if mode_forbidden:
         negative = f"{_NEGATIVE_PROMPT}, {mode_forbidden}"
     if hard_limits:
@@ -266,29 +266,8 @@ def _infer_subject_hint(*, primary: str, secondary: str, family: str) -> str:
     return ""
 
 
-def _compose_onboarding_context(
-    *,
-    channel_style: str = "",
-    channel_audience: str = "",
-    channel_subniche: str = "",
-    onboarding_summary: str = "",
-    visual_style: str = "",
-    post_intent: str = "",
-) -> str:
-    parts: list[str] = []
-    if channel_subniche:
-        parts.append(f"Subniche focus: {channel_subniche[:120]}")
-    if channel_audience:
-        parts.append(f"Audience context: {channel_audience[:140]}")
-    if channel_style:
-        parts.append(f"Channel tone: {channel_style[:140]}")
-    if visual_style:
-        parts.append(f"Visual style preference: {visual_style[:120]}")
-    if onboarding_summary:
-        parts.append(f"Onboarding profile: {onboarding_summary[:180]}")
-    if post_intent:
-        parts.append(f"Post intent: {post_intent[:100]}")
-    return " ".join(parts) if parts else "Brand-safe author-reputation friendly editorial scene"
+def _compose_onboarding_context(*args, **kwargs) -> str:
+    return ""
 
 
 def _compose_hard_limits(

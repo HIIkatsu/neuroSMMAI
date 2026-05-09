@@ -332,7 +332,7 @@ TOPIC_FAMILY_TERMS: dict[str, dict] = {
         ),
     },
     "hardware": {
-        "ru": ["компьют", "ноут", "ноутбук", "пк", "процессор", "видеокарт", "ssd", "памят", "желез"],
+        "ru": ["телевизор", "тв", "монитор", "экран", "смартфон", "техника", "компьют", "ноут", "ноутбук", "пк", "процессор", "видеокарт", "ssd", "памят", "желез"],
         "en": ["computer", "laptop", "hardware", "pc", "workstation", "desk"],
         "image_queries": [
             "computer hardware pc setup workstation technology desk",

@@ -177,49 +177,12 @@ async def get_image(
 
     logger.info("IMAGE_SERVICE_SEARCH_FIRST mode=%s image_search_only=%s", normalized_mode, _IMAGE_SEARCH_ONLY)
 
-    # 3. Search-first stock photo path (editor/manual/autopost unified)
-    fallback_ref = await _try_fallback(
-        title=title,
-        body=body,
-        channel_topic=channel_topic,
-        history=history,
-        used_refs=used_refs,
-        text_quality_flagged=text_quality_flagged,
-        mode=normalized_mode,
-        family_context_hint=" ".join(
-            x for x in [
-                channel_topic,
-                onboarding_summary,
-                post_intent,
-                title,
-            ] if (x or "").strip()
-        ),
-        content_mode=effective_mode,
-        normalized_visual_prompt="" if text_quality_flagged else prompt,
-        resolved_intent=post_intent,
-        canonical_family=family,
-        onboarding_summary=onboarding_summary,
-        content_constraints=content_constraints,
-        llm_image_prompt=llm_image_prompt,
-    )
-
-    if fallback_ref:
-        logger.info(
-            "IMAGE_SERVICE_SUCCESS source=fallback ref=%r family=%s owner_id=%s",
-            fallback_ref[:80], family, owner_id,
-        )
-        history.record(media_ref=fallback_ref)
-        return ImageResult(
-            media_ref=fallback_ref,
-            source="fallback",
-            prompt_used=prompt[:200],
-            family=family,
-            is_generated=False,
-        )
-
+    # 3. AI Generation First (Точная генерация картинок ИИ)
     generated_ref = ""
-    allow_generation_secondary = os.getenv("IMAGE_ALLOW_GENERATION_SECONDARY", "true").strip().lower() in {"1", "true", "yes", "on"}
-    if allow_generation_secondary and normalized_mode != MODE_EDITOR and not history.is_duplicate_visual_pattern(prompt):
+    # Включаем ИИ-генерацию изображений для всех режимов, включая редактор
+    allow_generation = os.getenv("IMAGE_ALLOW_GENERATION_SECONDARY", "true").strip().lower() in {"1", "true", "yes", "on"}
+    
+    if allow_generation:
         generated_ref = await _try_generation(
             prompt=prompt,
             negative_prompt=prompt_data["negative_prompt"],
@@ -230,17 +193,45 @@ async def get_image(
             history=history,
             used_refs=used_refs,
         )
+        
     if generated_ref:
-        logger.info(
-            "IMAGE_SERVICE_SUCCESS source=generation_secondary ref=%r family=%s owner_id=%s",
-            generated_ref[:80], family, owner_id,
-        )
+        logger.info("IMAGE_SERVICE_SUCCESS source=generation ref=%r", generated_ref[:80])
         return ImageResult(
             media_ref=generated_ref,
             source="generation",
             prompt_used=prompt[:200],
             family=family,
             is_generated=True,
+        )
+
+    # 4. Fallback: Stock Photos (Только если ИИ сломался)
+    logger.info("IMAGE_SERVICE_FALLBACK searching stock mode=%s", normalized_mode)
+    fallback_ref = await _try_fallback(
+        title=title,
+        body=body,
+        channel_topic=channel_topic,
+        history=history,
+        used_refs=used_refs,
+        text_quality_flagged=text_quality_flagged,
+        mode=normalized_mode,
+        family_context_hint=" ".join(x for x in [channel_topic, onboarding_summary, post_intent, title] if (x or "").strip()),
+        content_mode=effective_mode,
+        normalized_visual_prompt="" if text_quality_flagged else prompt,
+        resolved_intent=post_intent,
+        canonical_family=family,
+        onboarding_summary=onboarding_summary,
+        content_constraints=content_constraints,
+        llm_image_prompt=llm_image_prompt,
+    )
+
+    if fallback_ref:
+        history.record(media_ref=fallback_ref)
+        return ImageResult(
+            media_ref=fallback_ref,
+            source="fallback",
+            prompt_used=prompt[:200],
+            family=family,
+            is_generated=False,
         )
 
     # 5. Complete failure
@@ -440,10 +431,16 @@ async def _try_fallback(
 
 
 def _build_simple_search_query(*, mode: str, explicit_query: str, title: str, body: str) -> str:
-    if mode == MODE_EDITOR and (explicit_query or "").strip():
-        return _normalize_query(explicit_query, max_terms=4)
-
-    return _extract_main_topic_query(title=title, body=body, max_terms=3)
+    # ВСЕГДА используем точный английский запрос от LLM (и для редактора, и для автопоста)
+    if explicit_query and explicit_query.strip():
+        tokens = re.findall(r"[a-zA-Z]+", explicit_query.lower())
+        stopwords = {"a", "an", "the", "photo", "image", "picture", "of", "stock", "editorial", "photorealistic", "professional", "high"}
+        clean_tokens = [t for t in tokens if t not in stopwords]
+        if clean_tokens:
+            return " ".join(clean_tokens[:3])
+            
+    # Крайний запасной вариант (если LLM вдруг не сгенерировала image_prompt)
+    return _extract_main_topic_query(title=title, body=body, max_terms=2)
 
 
 def _normalize_query(text: str, *, max_terms: int) -> str:

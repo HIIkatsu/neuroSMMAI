@@ -409,7 +409,7 @@ async def ai_rewrite(
         api_key=config.openrouter_api_key,
         model=config.openrouter_model,
         base_url=config.openrouter_base_url,
-        temperature=0.72,
+        temperature=0.25,
         messages=[{
             "role": "user",
             "content": f"""
@@ -532,7 +532,7 @@ async def ai_generate_post(
         should_force_image = bool(data.force_image and (bool(prompt) or not existing_media_ref))
 
         # --- Manual generation with 1 automatic retry on quality failure ---
-        _MANUAL_MAX_ATTEMPTS = 2
+        _MANUAL_MAX_ATTEMPTS = 1
         payload = None
         last_error = None
         for attempt in range(1, _MANUAL_MAX_ATTEMPTS + 1):

@@ -48,6 +48,10 @@ async def search_stock_photo(query: str) -> str:
     if not query or not query.strip():
         logger.warning("IMAGE_FALLBACK_SKIP reason=empty_query")
         return ""
+        
+    # Очистка LLM-промпта для стоковых API (оставляем только суть)
+    query = re.sub(r"(?i)\b(a|the|an|photo|photorealistic|image|high quality|picture|illustration|4k|8k|style|of)\b", "", query)
+    query = " ".join([w for w in query.split() if len(w) > 2])[:40]
 
     # Try Pexels
     if PEXELS_API_KEY:

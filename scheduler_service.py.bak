@@ -417,9 +417,8 @@ class SchedulerService:
             # FIX: не используем хардкоженный fallback — если топика нет, пост не генерируем
             topic = (ch_settings.get("topic") or "").strip()
             if not topic:
-                fallback_topic = (ch_settings.get("topic_raw") or ch_settings.get("title") or "Обзор актуальных событий и полезные советы").strip()
-                topic = f"Свободная тема в рамках: {fallback_topic}"
-                logger.info("Topic is empty, improvising based on channel profile: %s", topic)
+                logger.warning("_job_post_regular skipped owner_id=%s: topic not configured", owner_id)
+                return
             if not api_key:
                 logger.warning("_job_post_regular skipped owner_id=%s: api_key not configured", owner_id)
                 return
@@ -722,9 +721,8 @@ class SchedulerService:
                     for ch_profile in channels:
                         try:
                             ch_settings = await db.get_channel_settings(owner_id, channel_profile_id=int(ch_profile.get("id", 0)))
-                            news_enabled = (ch_settings.get("news_enabled") or "0").strip() not in ("0", "false", "False")
-                            posts_enabled = (ch_settings.get("posts_enabled") or "0").strip() not in ("0", "false", "no")
-                            if not news_enabled or not posts_enabled:
+                            enabled = (ch_settings.get("news_enabled") or "0").strip() not in ("0", "false", "False")
+                            if not enabled:
                                 continue
                             channel = (ch_settings.get("channel_target") or "").strip()
                             if not channel:
@@ -851,9 +849,8 @@ class SchedulerService:
                     for ch_profile in channels:
                         try:
                             ch_settings = await db.get_channel_settings(owner_id, channel_profile_id=int(ch_profile.get("id", 0)))
-                            news_enabled = (ch_settings.get("news_enabled") or "0").strip() not in ("0", "false", "False")
-                            posts_enabled = (ch_settings.get("posts_enabled") or "0").strip() not in ("0", "false", "no")
-                            if not news_enabled or not posts_enabled:
+                            enabled = (ch_settings.get("news_enabled") or "0").strip() not in ("0", "false", "False")
+                            if not enabled:
                                 continue
 
                             channel_target = (ch_settings.get("channel_target") or "").strip()

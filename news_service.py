@@ -110,7 +110,7 @@ except ModuleNotFoundError:
         return ""
 
 logger = logging.getLogger(__name__)
-NEWS_MAX_AGE_DAYS = 3  # Enforce strict recency; articles older than 3 days are stale for an active channel
+NEWS_MAX_AGE_DAYS = 1  # Enforce strict recency; articles older than 3 days are stale for an active channel
 MIN_NEWS_RELEVANCE = 18
 
 # Stage-1 (broad recall) uses a much lower threshold to avoid discarding
@@ -206,19 +206,19 @@ def _topic_query_variants(topic: str, settings: dict[str, str]) -> list[str]:
     trend_clause = "trending OR popular OR top OR viral OR тренд OR популярн OR топ"
     variants = []
     if topic:
-        variants.append(f'"{topic}" ({trend_clause}) when:7d')
+        variants.append(f'"{topic}" ({trend_clause}) when:2d')
     if joined:
-        variants.append(f'{joined} ({trend_clause}) when:7d')
-        variants.append(f'{joined} trend OR launch OR report OR announced when:7d')
+        variants.append(f'{joined} ({trend_clause}) when:2d')
+        variants.append(f'{joined} trend OR launch OR report OR announced when:2d')
     if family != "generic" and (family_en or family_ru):
         seed = " ".join(x for x in [family_ru, family_en] if x).strip()
-        variants.append(f'{seed} ({trend_clause}) OR market OR product OR research when:7d')
+        variants.append(f'{seed} ({trend_clause}) OR market OR product OR research when:2d')
     if topic and audience:
-        variants.append(f'{topic} {audience} when:7d')
+        variants.append(f'{topic} {audience} when:2d')
     # If strict mode is off, add broad trending queries to capture popular news beyond the specific topic
     if not strict_mode:
-        variants.append(f'trending OR viral OR popular news when:3d')
-        variants.append(f'top news today OR breaking when:2d')
+        variants.append(f'trending OR viral OR popular news when:24h')
+        variants.append(f'top news today OR breaking when:24h')
     seen = set()
     out = []
     for item in variants:
@@ -748,7 +748,7 @@ async def build_news_post(config, news_item: dict, owner_id: int = 0) -> str:
             "Пиши как редактор живого тематического канала, а не как новостной агрегатор. "
             "Используй только факты из статьи, без вымысла. Не пересказывай заголовок. "
             "Вытащи один конкретный смысл для подписчика: что изменилось, почему это важно и к чему это может привести. "
-            "Без воды, без канцелярита, без кликбейта. "
+            "Без воды, без канцелярита. ЗАПРЕЩЕНЫ клише: «В наше время», «Давайте разберёмся», «Ни для кого не секрет». Пиши сразу по делу, живым и хлестким языком. "
             "Целевой объём: 60-100 слов, максимум 2 абзаца. Убирай вводные и воду."
             f"{family_instruction}"
             f"\nЗаголовок новости: {title}\n"
