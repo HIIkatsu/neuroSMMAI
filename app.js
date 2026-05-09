@@ -5686,3 +5686,172 @@ function fixPreviewMedia(){
 window.addEventListener("load", ()=>{
   fixPreviewMedia();
 });
+
+/* ============================================================
+
+/* ============================================================
+
+/* ============================================================
+   NEUROSMM V4 - STAGE 2: BACKGROUND LOGIC (REVISION 3)
+   ============================================================ */
+(function() {
+    // 1. Создание DOM-элемента Toast
+    function ensureToastDOM() {
+        if (document.getElementById('gen-toast')) return;
+        const toast = document.createElement('div');
+        toast.id = 'gen-toast';
+        toast.innerHTML = `
+            <div id="gen-toast-header">
+                <div id="gen-toast-title">Генерация...</div>
+                <div id="gen-toast-percent">0%</div>
+            </div>
+            <div id="gen-toast-bar-bg">
+                <div id="gen-toast-bar-fill" style="width: 0%;"></div>
+            </div>
+        `;
+        document.body.appendChild(toast);
+    }
+
+    let progressInterval = null;
+    let isToastActive = false;
+
+    window.showGenToast = function(title = 'Генерация...') {
+        ensureToastDOM();
+        const toastEl = document.getElementById('gen-toast');
+        const titleEl = document.getElementById('gen-toast-title');
+        const percentEl = document.getElementById('gen-toast-percent');
+        const fillEl = document.getElementById('gen-toast-bar-fill');
+        
+        if (titleEl) titleEl.textContent = title;
+        if (toastEl) toastEl.classList.add('show');
+        isToastActive = true;
+        
+        let percent = 0;
+        if (fillEl) fillEl.style.width = '0%';
+        if (percentEl) percentEl.textContent = '0%';
+        
+        clearInterval(progressInterval);
+        progressInterval = setInterval(() => {
+            if (percent < 90) percent += Math.floor(Math.random() * 5) + 1;
+            else if (percent < 98) percent += 1;
+            if (percent > 98) percent = 98;
+            
+            if (fillEl) fillEl.style.width = percent + '%';
+            if (percentEl) percentEl.textContent = percent + '%';
+        }, 600);
+    };
+
+    window.hideGenToast = function() {
+        clearInterval(progressInterval);
+        const toastEl = document.getElementById('gen-toast');
+        if (toastEl) toastEl.classList.remove('show');
+        isToastActive = false;
+    };
+
+    window.completeGenToast = async function() {
+        clearInterval(progressInterval);
+        const fillEl = document.getElementById('gen-toast-bar-fill');
+        const percentEl = document.getElementById('gen-toast-percent');
+        
+        if (fillEl) fillEl.style.width = '100%';
+        if (percentEl) percentEl.textContent = '100%';
+        
+        return new Promise(resolve => setTimeout(() => {
+            window.hideGenToast();
+            resolve();
+        }, 800));
+    };
+
+    // 2. Перехват блокировки
+    if (window.showBusy) {
+        const originalShowBusy = window.showBusy;
+        window.showBusy = function(message) {
+            const msg = message || 'Загрузка…';
+            if (/генер|пишет|созда|собираю/i.test(msg)) {
+                window.showGenToast(msg);
+                return; 
+            }
+            originalShowBusy.apply(this, arguments);
+        };
+    }
+
+    // 3. Перехват API
+    if (window.api) {
+        const originalApi = window.api;
+        window.api = async function(path, options = {}) {
+            const isGenPost = path.includes('/api/ai/generate-post');
+            const isGenDraft = path.includes('/drafts/generate');
+            const isGenPlan = path.includes('/plan/generate');
+            const isGenRequest = isGenPost || isGenDraft || isGenPlan;
+            
+            if (isGenRequest) {
+                options.timeoutMs = 600000;
+                if (!isToastActive) window.showGenToast('Генерация...');
+                
+                // Сохраняем все введенные данные перед закрытием окна
+                if (window.getCurrentEditorSnapshot) {
+                    window.__failedGenSnapshot = window.getCurrentEditorSnapshot();
+                }
+                // Закрываем окно, чтобы не мешало
+                if (window.closeModal) window.closeModal();
+            }
+
+            try {
+                const response = await originalApi.call(this, path, options);
+                
+                if (isGenRequest) {
+                    await window.completeGenToast();
+                    
+                    // ДОЖИДАЕМСЯ обновления данных с сервера
+                    if (window.refreshSections) {
+                        await window.refreshSections(['core', 'drafts', 'plan', 'media_inbox'], { silent: true });
+                    }
+
+                    if (isGenPlan && window.switchTab) {
+                        window.switchTab('plan');
+                    } else if (isGenDraft && window.switchTab) {
+                        window.switchTab('posts');
+                    } else if (isGenPost && window.openDraftEditor && window.switchTab) {
+                        window.switchTab('posts');
+                        // Берем ID нового черновика или старый ID
+                        let draftId = response?.draft?.id || response?.draft_id || response?.id || window.__failedGenSnapshot?.draftId;
+                        
+                        // ВАЖНО: Сразу открываем редактор ДО возврата ответа, 
+                        // чтобы оригинальная функция смогла вставить сгенерированный текст в DOM
+                        window.openDraftEditor(draftId || null);
+                        
+                        // Возвращаем промпт и старые настройки
+                        if (window.applyEditorSnapshot && window.__failedGenSnapshot) {
+                            window.applyEditorSnapshot(window.__failedGenSnapshot);
+                        }
+                    }
+                }
+                return response;
+            } catch (error) {
+                if (isGenRequest) window.hideGenToast();
+                throw error;
+            }
+        };
+    }
+
+    // 4. Патч окна ошибки: кнопка "Retry" открывает редактор с сохраненным промптом
+    if (window._showGenerationFailedModal) {
+        const origFailModal = window._showGenerationFailedModal;
+        window._showGenerationFailedModal = function(reason) {
+            origFailModal.call(this, reason);
+            setTimeout(() => {
+                const retryBtn = document.getElementById('gen-retry-btn');
+                if (retryBtn) {
+                    retryBtn.onclick = () => {
+                        if (window.closeModal) window.closeModal();
+                        if (window.__failedGenSnapshot && window.openDraftEditor) {
+                            window.openDraftEditor(window.__failedGenSnapshot.draftId || null);
+                            if (window.applyEditorSnapshot) window.applyEditorSnapshot(window.__failedGenSnapshot);
+                        }
+                        if (window.generatePostInEditor) window.generatePostInEditor();
+                    };
+                }
+            }, 50);
+        };
+    }
+})();
