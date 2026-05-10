@@ -2379,31 +2379,47 @@ function openAnalyticsDetails() {
       ? `<div class="section-desc empty-hint">Данные частично доступны: ${availableFactors.length} из ${Math.max(1, factors.length)} факторов.</div>`
       : '');
   const body = `
-    <div class="stack analytics-overlay-sheet analytics-overlay-sheet-clean">
-      <div class="analytics-period-row">
-        <div class="analytics-period-switch" role="tablist" aria-label="Период аналитики">
-          <button class="analytics-period-btn ${period === '7d' ? 'active' : ''}" data-action="setAnalyticsPeriod" data-action-arg="7d">7d</button>
-          <button class="analytics-period-btn ${period === '30d' ? 'active' : ''}" data-action="setAnalyticsPeriod" data-action-arg="30d">30d</button>
-          <button class="analytics-period-btn ${period === '90d' ? 'active' : ''}" data-action="setAnalyticsPeriod" data-action-arg="90d">90d</button>
+    <div class="stack analytics-overlay-sheet analytics-overlay-sheet-clean analytics-modal-redesign">
+      <div class="analytics-redesign-head">
+        <div>
+          <div class="analytics-overlay-kpi-title">Расширенная аналитика</div>
+          <div class="analytics-redesign-title">Готовность канала</div>
+          <div class="section-desc">${escapeHtml(scoreMeta.hint)}</div>
+        </div>
+        <div class="analytics-period-row">
+          <div class="analytics-period-switch" role="tablist" aria-label="Период аналитики">
+            <button class="analytics-period-btn ${period === '7d' ? 'active' : ''}" data-action="setAnalyticsPeriod" data-action-arg="7d">7d</button>
+            <button class="analytics-period-btn ${period === '30d' ? 'active' : ''}" data-action="setAnalyticsPeriod" data-action-arg="30d">30d</button>
+            <button class="analytics-period-btn ${period === '90d' ? 'active' : ''}" data-action="setAnalyticsPeriod" data-action-arg="90d">90d</button>
+          </div>
         </div>
       </div>
-      <div class="card analytics-modal-chart-card analytics-overlay-chart-card analytics-hero-card"><div class="card-inner stack compact-dashboard-card">
-        <div class="analytics-overlay-kpi-title">ОЦЕНКА ГОТОВНОСТИ</div>
-        <div class="analytics-overlay-kpi-value">${Number.isFinite(Number(scoreDisplay)) ? `${Math.round(Number(scoreDisplay))}%` : '—'}</div>
-        <div class="section-desc">${escapeHtml(scoreMeta.label)} · ${escapeHtml(scoreMeta.hint)}</div>
+
+      <div class="card analytics-overlay-chart-card analytics-redesign-hero"><div class="card-inner stack compact-dashboard-card">
+        <div class="analytics-redesign-score-row">
+          <div>
+            <div class="analytics-redesign-kpi-caption">Индекс стабильности</div>
+            <div class="analytics-overlay-kpi-value">${Number.isFinite(Number(scoreDisplay)) ? `${Math.round(Number(scoreDisplay))}%` : '—'}</div>
+            <div class="analytics-redesign-kpi-meta">${escapeHtml(scoreMeta.label)} · ${escapeHtml(periodLabel)}</div>
+          </div>
+          ${renderScoreRing(scoreDisplay, 'score-ring-lg', '')}
+        </div>
       </div></div>
-      <div class="card analytics-overlay-chart-card"><div class="card-inner stack compact-dashboard-card">
-        <div class="section-title mini-title">Разбивка оценки</div>
+
+      <div class="card analytics-overlay-chart-card analytics-redesign-breakdown"><div class="card-inner stack compact-dashboard-card">
+        <div class="section-title mini-title">Факторы оценки</div>
         <div class="analytics-chart-list compact-chart-list">
           ${factorRows || '<div class="empty">Недостаточно данных для разбивки.</div>'}
         </div>
         ${emptyBlock}
       </div></div>
+
       ${buildAdviceCard(a)}
-      <div class="card analytics-overlay-chart-card"><div class="card-inner stack compact-dashboard-card">${sparkline}</div></div>
-      <div class="section-desc analytics-overlay-footnote">Период: ${escapeHtml(periodLabel)} · Источник: текущие данные канала</div>
+
+      <div class="card analytics-overlay-chart-card analytics-redesign-activity"><div class="card-inner stack compact-dashboard-card">${sparkline}</div></div>
+      <div class="section-desc analytics-overlay-footnote">Источник: текущие данные активного канала</div>
       <div class="analytics-modal-close-row">
-        <button class="btn primary" data-action="closeModal">Закрыть</button>
+        <button class="btn primary analytics-redesign-close" data-action="closeModal">Закрыть</button>
       </div>
     </div>`;
   analyticsModal(body);
@@ -2495,7 +2511,7 @@ function dashboardView() {
           <div class="dashboard-top-glow"></div>
         </div>
         <button class="dashboard-score-panel" data-action="openAnalyticsDetails" title="Открыть аналитику">
-          ${renderScoreRing(readinessScore, 'score-ring-lg', scoreMeta.label)}
+          ${renderScoreRing(readinessScore, 'score-ring-lg', '')}
         </button>
       </div></div>
 

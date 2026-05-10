@@ -1644,7 +1644,7 @@ body.modal-open {
 }
 
 .welcome-logo {
-  font-size: 32px;
+  font-size: 20px;
   font-weight: 900;
   color: var(--text);
   letter-spacing: -1px;
@@ -2522,7 +2522,7 @@ body.modal-open {
 }
 
 .hero-focus-main {
-  font-size: 32px;
+  font-size: 20px;
   font-weight: 900;
   color: var(--text);
   letter-spacing: -0.8px;
@@ -4156,7 +4156,7 @@ body.modal-open {
 @media (max-width: 720px) {
   .section-title { font-size: 24px; }
 
-  .stat-number { font-size: 32px; }
+  .stat-number { font-size: 20px; }
 
   .dashboard-top-card { padding: 18px 16px; }
   .dashboard-top-inner { grid-template-columns: 1fr auto; gap: 12px; }
@@ -6016,7 +6016,7 @@ body.modal-open {
   margin-bottom: 8px;
 }
 .web-login-logo {
-  font-size: 32px;
+  font-size: 20px;
   font-weight: 800;
   color: var(--text);
   letter-spacing: -0.02em;
@@ -6472,4 +6472,78 @@ body {
   width: 100% !important;
   box-sizing: border-box !important;
   line-height: 1 !important;
+}
+
+/* Analytics modal full redesign */
+.analytics-modal-redesign {
+  gap: 14px;
+}
+.analytics-redesign-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.analytics-redesign-title {
+  font-size: 28px;
+  line-height: 1.1;
+  font-weight: 800;
+  color: #f3f7ff;
+  margin-top: 4px;
+}
+.analytics-redesign-hero,
+.analytics-redesign-breakdown,
+.analytics-redesign-activity {
+  border: 1px solid rgba(126, 146, 255, 0.26);
+  background:
+    radial-gradient(120% 130% at 0% 0%, rgba(46, 198, 255, 0.18) 0%, rgba(13, 20, 46, 0.9) 46%, rgba(8, 13, 34, 0.96) 100%),
+    linear-gradient(150deg, rgba(120, 95, 255, 0.14) 0%, rgba(33, 222, 194, 0.08) 100%);
+  box-shadow: 0 14px 30px rgba(3, 10, 28, 0.45);
+}
+.analytics-redesign-score-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+.analytics-redesign-kpi-caption {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #90a5d9;
+}
+.analytics-redesign-kpi-meta {
+  font-size: 13px;
+  color: #9bb3e5;
+}
+.analytics-redesign-close {
+  min-height: 52px;
+  font-size: 20px;
+  font-weight: 700;
+}
+
+/* Header pills: same visual height */
+.subscription-badge,
+.top-status-pill.mini-channel-pill {
+  min-height: 34px;
+  padding-top: 0;
+  padding-bottom: 0;
+}
+.subscription-badge {
+  justify-content: center;
+}
+.top-status-pill.mini-channel-pill {
+  gap: 6px;
+  padding-left: 12px;
+  padding-right: 12px;
+}
+
+@media (max-width: 720px) {
+  .analytics-redesign-head {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .analytics-period-row {
+    justify-content: flex-start;
+  }
 }
