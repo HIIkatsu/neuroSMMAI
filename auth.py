@@ -272,8 +272,18 @@ async def get_current_telegram_user(
     try:
         init_data = _extract_init_data_from_request(request, x_telegram_init_data, authorization, tg_web_app_data)
         return verify_telegram_webapp_init_data(init_data)
-    except HTTPException:
-        pass
+    except HTTPException as exc:
+        if exc.status_code == 401 and exc.detail == "Missing Telegram init data":
+            # No Telegram auth material in request: may be regular web-cookie flow.
+            pass
+        else:
+            logger.warning(
+                "Telegram initData auth rejected: path=%s method=%s reason=%s",
+                request.url.path,
+                request.method,
+                exc.detail,
+            )
+            raise
 
     # --- Path 2: JWT web session via HttpOnly cookie -----------------------
     cfg = load_config()
