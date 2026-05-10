@@ -529,21 +529,12 @@ function parseLaunchParams(raw) {
 
 function extractTelegramInitData() {
   const direct = tg?.initData || window.Telegram?.WebApp?.initData || '';
-  if (direct) {
-    try { sessionStorage.setItem('tg_init_data', direct); } catch {}
-    return direct;
-  }
+  if (direct) return direct;
   const fromHash = parseLaunchParams(window.location.hash).get('tgWebAppData') || '';
-  if (fromHash) {
-    try { sessionStorage.setItem('tg_init_data', fromHash); } catch {}
-    return fromHash;
-  }
+  if (fromHash) return fromHash;
   const fromSearch = new URLSearchParams(window.location.search).get('tgWebAppData') || '';
-  if (fromSearch) {
-    try { sessionStorage.setItem('tg_init_data', fromSearch); } catch {}
-    return fromSearch;
-  }
-  try { return sessionStorage.getItem('tg_init_data') || ''; } catch { return ''; }
+  if (fromSearch) return fromSearch;
+  return '';
 }
 
 function escapeHtml(str = '') {
@@ -569,7 +560,6 @@ async function api(path, options = {}) {
   const initData = extractTelegramInitData();
   if (initData) {
     headers['X-Telegram-Init-Data'] = initData;
-    headers['Authorization'] = `tma ${initData}`;
   } else if (_isWebMode && _webHasSession) {
     // Cookie is sent automatically by fetch with credentials: 'same-origin'
   } else {
