@@ -2398,7 +2398,7 @@ function openAnalyticsDetails() {
           ${factorRows || '<div class="empty">Недостаточно данных для разбивки.</div>'}
         </div>
         ${emptyBlock}
-      </div>
+      </div></div>
       ${buildAdviceCard(a)}
       <div class="card analytics-overlay-chart-card"><div class="card-inner stack compact-dashboard-card">${sparkline}</div></div>
       <div class="section-desc analytics-overlay-footnote">Период: ${escapeHtml(periodLabel)} · Источник: текущие данные канала</div>
