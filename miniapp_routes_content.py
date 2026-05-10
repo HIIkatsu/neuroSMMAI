@@ -118,8 +118,8 @@ async def _require_pro_tier(owner_id: int, feature: str = "функция") -> N
         try:
             if datetime.fromisoformat(trial_ends) > datetime.utcnow():
                 return
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("invalid trial_ends_at format owner_id=%s value=%r: %s", owner_id, trial_ends, exc)
     if tier in (db.TIER_PRO, db.TIER_MAX):
         return
     raise HTTPException(
@@ -210,8 +210,8 @@ async def create_draft(
     draft = await db.get_draft(draft_id, owner_id=telegram_user_id)
     try:
         await db.mark_generation_history_draft_saved(owner_id=telegram_user_id, draft_id=draft_id, text=str(data.text or ""))
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("mark_generation_history_draft_saved failed owner_id=%s draft_id=%s: %s", telegram_user_id, draft_id, exc)
     if str(data.media_meta_json or "").strip():
         await trigger_unsplash_download(data.media_meta_json)
     cache_invalidate(telegram_user_id, 'bootstrap', 'drafts', 'core', 'media_inbox')
@@ -599,8 +599,8 @@ async def ai_generate_post(
                 short=str(payload.get("short") or ""),
                 safety_status=str(payload.get("safety_status") or "ok"),
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("add_generation_history failed owner_id=%s source=generate-post: %s", telegram_user_id, exc)
         await db.increment_generations_used(telegram_user_id)
         await db.increment_feature_used(telegram_user_id, "generate")
     except HTTPException:
