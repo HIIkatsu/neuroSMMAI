@@ -54,8 +54,8 @@ async def _require_pro_tier(owner_id: int, feature: str = "функция") -> N
         try:
             if datetime.fromisoformat(trial_ends) > datetime.utcnow():
                 return
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("invalid trial_ends_at format owner_id=%s value=%r: %s", owner_id, trial_ends, exc)
     if tier in (db.TIER_PRO, db.TIER_MAX):
         return
     raise HTTPException(
@@ -344,8 +344,8 @@ async def assistant_chat(
             )
             if family_rules:
                 family_ctx += f"Правила ниши: {family_rules}. "
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("assistant policy resolution failed owner_id=%s: %s", telegram_user_id, exc)
 
     summary = analytics.get('summary') or {}
     signals = analytics.get('signals') or []
