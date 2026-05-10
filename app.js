@@ -262,6 +262,21 @@ function parseNewsSource(draft) {
   return safeJsonParse(draft.news_source_json, null);
 }
 
+function debugPreview(messageFactory) {
+  if (!window._PREVIEW_DEBUG) return;
+  try {
+    const message = typeof messageFactory === 'function' ? messageFactory() : String(messageFactory || '');
+    if (message) console.log(message);
+  } catch {}
+}
+
+document.addEventListener('error', function(e) {
+  const target = e.target;
+  if (!(target instanceof HTMLImageElement)) return;
+  if (!target.matches('[data-media-preview="true"]')) return;
+  handleMediaLoadError(target);
+}, true);
+
 function saveUiState() {
   try {
     const payload = {
@@ -953,7 +968,7 @@ function normalizeMediaRef(ref = '') {
   if (!raw) return '';
   // Log resolution path for debugging
   const logPath = (path, src) => {
-    if (window._PREVIEW_DEBUG) console.log(`PREVIEW_MEDIA_RENDER_PATH=${path} src=${src.substring(0, 60)}`);
+    debugPreview(() => `PREVIEW_MEDIA_RENDER_PATH=${path} src=${src.substring(0, 60)}`);
   };
   if (raw.startsWith('tgfile:')) {
     const parts = raw.split(':');
@@ -1013,7 +1028,7 @@ function renderMediaNode(ref = '', explicitType = '') {
   const type = explicitType || guessMediaType(mediaRef);
   if (!mediaRef || type === 'none') return '<div class="editor-media-empty">Медиа не выбрано</div>';
   if (type === 'video') return `<video controls playsinline preload="metadata" src="${escapeHtml(mediaRef)}"></video>`;
-  return `<img src="${escapeHtml(mediaRef)}" alt="preview" loading="lazy" onerror="handleMediaLoadError(this)">`;
+  return `<img src="${escapeHtml(mediaRef)}" alt="preview" loading="lazy" data-media-preview="true">`;
 }
 
 function handleMediaLoadError(img) {
@@ -1023,7 +1038,7 @@ function handleMediaLoadError(img) {
   if (retryCount >= maxRetries) {
     img.closest('.editor-media-preview,.preview-media')?.classList.add('is-broken');
     img.outerHTML = '<div class="editor-media-empty">Не удалось загрузить медиа</div>';
-    if (window._PREVIEW_DEBUG) console.log('PREVIEW_MEDIA_RESOLVE_FAIL reason=max_retries_exceeded');
+    debugPreview('PREVIEW_MEDIA_RESOLVE_FAIL reason=max_retries_exceeded');
     return;
   }
 
@@ -1044,11 +1059,11 @@ function handleMediaLoadError(img) {
     const freshAuth = initData || (fullSrc.match(/tgWebAppData=([^&]*)/) || [])[1] || '';
     if (freshAuth) {
       img.src = `${normalizedBase}?tgWebAppData=${encodeURIComponent(freshAuth)}&t=${Date.now()}`;
-      if (window._PREVIEW_DEBUG) console.log(`PREVIEW_MEDIA_RESOLVE_OK retry=${retryCount + 1} path=${normalizedBase.substring(0, 60)}`);
+      debugPreview(() => `PREVIEW_MEDIA_RESOLVE_OK retry=${retryCount + 1} path=${normalizedBase.substring(0, 60)}`);
     } else {
       // No auth available — try bare URL with cache bust
       img.src = `${normalizedBase}?t=${Date.now()}`;
-      if (window._PREVIEW_DEBUG) console.log(`PREVIEW_MEDIA_AUTH_FAIL retry=${retryCount + 1} path=${normalizedBase.substring(0, 60)}`);
+      debugPreview(() => `PREVIEW_MEDIA_AUTH_FAIL retry=${retryCount + 1} path=${normalizedBase.substring(0, 60)}`);
     }
   } else {
     // External URL: preserve original query params, only append cache bust
@@ -4126,7 +4141,7 @@ async function runEditorAIGeneration() {
       mediaEl.value = newMediaRef;
     } else if (mediaEl && previousMediaRef && !newMediaRef) {
       // Detect stale ref reset: server returned empty media but we had one before
-      if (window._PREVIEW_DEBUG) console.log(`PREVIEW_SRC_RESET_AFTER_REFRESH prev=${previousMediaRef.slice(0, 80)} new=empty`);
+      debugPreview(() => `PREVIEW_SRC_RESET_AFTER_REFRESH prev=${previousMediaRef.slice(0, 80)} new=empty`);
       // Keep existing media ref — don't wipe it if generation didn't produce a new one
       // This prevents broken preview after regenerate when image search fails
     }
@@ -4150,7 +4165,7 @@ async function runEditorAIGeneration() {
     if (e.status === 429) {
       toast(e.message || 'Подожди перед следующей генерацией');
       // Restore previous media state: don't wipe media on rate limit
-      if (window._PREVIEW_DEBUG) console.log('PREVIEW_RATE_LIMIT_429 state_preserved=true');
+      debugPreview('PREVIEW_RATE_LIMIT_429 state_preserved=true');
       return;
     }
     // Handle structured generation_failed error with retry UI
@@ -4313,10 +4328,10 @@ function refreshEditorMediaPreview() {
   const attr = document.getElementById('dr-media-attribution');
 
   // PREVIEW_RESOLVE_START — track the raw ref entering preview
-  if (window._PREVIEW_DEBUG) console.log(`PREVIEW_RESOLVE_START raw=${(rawRef || '').substring(0, 80)}`);
+  debugPreview(() => `PREVIEW_RESOLVE_START raw=${(rawRef || '').substring(0, 80)}`);
 
   if (!rawRef) {
-    if (window._PREVIEW_DEBUG) console.log('PREVIEW_SRC_EMPTY reason=empty_ref_in_form');
+    debugPreview('PREVIEW_SRC_EMPTY reason=empty_ref_in_form');
   }
 
   if (status) status.textContent = mediaRef ? 'Медиа выбрано' : 'Медиа не выбрано';
@@ -4325,7 +4340,7 @@ function refreshEditorMediaPreview() {
   box.innerHTML = renderMediaNode(mediaRef, mediaType);
 
   if (mediaRef) {
-    if (window._PREVIEW_DEBUG) console.log(`PREVIEW_RESOLVE_OK path=${mediaRef.substring(0, 80)}`);
+    debugPreview(() => `PREVIEW_RESOLVE_OK path=${mediaRef.substring(0, 80)}`);
   }
 
   let meta = null;
