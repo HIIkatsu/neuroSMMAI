@@ -6390,31 +6390,6 @@ body {
   border: 1px solid rgba(0, 212, 170, 0.3) !important;
 }
 
-/* 2. ПИЛЛЫ В ПРАВОМ ВЕРХНЕМ УГЛУ */
-.header-pills-container, .top-right-actions, .dashboard-top-right {
-  display: flex !important;
-  flex-direction: column !important;
-  align-items: stretch !important;
-  width: 140px !important;
-  gap: 6px !important;
-}
-
-.header-pill, .status-pill, .channel-pill, .top-right-pill, .pro-badge {
-  display: flex !important;
-  align-items: center !important;
-  justify-content: center !important;
-  height: 28px !important;
-  padding: 0 8px !important;
-  font-size: 11px !important;
-  font-weight: 600 !important;
-  border-radius: 14px !important;
-  white-space: nowrap !important;
-  overflow: hidden !important;
-  text-overflow: ellipsis !important;
-  width: 100% !important;
-  box-sizing: border-box !important;
-  line-height: 1 !important;
-}
 
 /* ============================================================
    ЭТАП 1 - ЧАСТЬ 1: ОБЩИЙ ДИЗАЙН И ВЕРХНИЕ ПИЛЛЫ
@@ -6448,102 +6423,99 @@ body {
   border: 1px solid rgba(0, 212, 170, 0.3) !important;
 }
 
-/* 2. ПИЛЛЫ В ПРАВОМ ВЕРХНЕМ УГЛУ */
-.header-pills-container, .top-right-actions, .dashboard-top-right {
-  display: flex !important;
-  flex-direction: column !important;
-  align-items: stretch !important;
-  width: 140px !important;
-  gap: 6px !important;
-}
 
-.header-pill, .status-pill, .channel-pill, .top-right-pill, .pro-badge {
-  display: flex !important;
-  align-items: center !important;
-  justify-content: center !important;
-  height: 28px !important;
-  padding: 0 8px !important;
-  font-size: 11px !important;
-  font-weight: 600 !important;
-  border-radius: 14px !important;
-  white-space: nowrap !important;
-  overflow: hidden !important;
-  text-overflow: ellipsis !important;
-  width: 100% !important;
-  box-sizing: border-box !important;
-  line-height: 1 !important;
-}
-
-/* Analytics modal full redesign */
-.analytics-modal-redesign {
-  gap: 14px;
-}
-.analytics-redesign-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-}
-.analytics-redesign-title {
-  font-size: 28px;
-  line-height: 1.1;
-  font-weight: 800;
-  color: #f3f7ff;
-  margin-top: 4px;
-}
-.analytics-redesign-hero,
-.analytics-redesign-breakdown,
-.analytics-redesign-activity {
-  border: 1px solid rgba(126, 146, 255, 0.26);
-  background:
-    radial-gradient(120% 130% at 0% 0%, rgba(46, 198, 255, 0.18) 0%, rgba(13, 20, 46, 0.9) 46%, rgba(8, 13, 34, 0.96) 100%),
-    linear-gradient(150deg, rgba(120, 95, 255, 0.14) 0%, rgba(33, 222, 194, 0.08) 100%);
-  box-shadow: 0 14px 30px rgba(3, 10, 28, 0.45);
-}
-.analytics-redesign-score-row {
+/* Header pills (tariff + active channel): unified height */
+.mini-header-right {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 14px;
-}
-.analytics-redesign-kpi-caption {
-  font-size: 12px;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: #90a5d9;
-}
-.analytics-redesign-kpi-meta {
-  font-size: 13px;
-  color: #9bb3e5;
-}
-.analytics-redesign-close {
-  min-height: 52px;
-  font-size: 20px;
-  font-weight: 700;
+  gap: 8px;
+  margin-left: auto;
 }
 
-/* Header pills: same visual height */
 .subscription-badge,
 .top-status-pill.mini-channel-pill {
-  min-height: 34px;
-  padding-top: 0;
-  padding-bottom: 0;
+  min-height: 40px;
+  height: 40px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  box-sizing: border-box;
 }
+
 .subscription-badge {
   justify-content: center;
+  padding: 0 14px;
 }
+
 .top-status-pill.mini-channel-pill {
   gap: 6px;
-  padding-left: 12px;
-  padding-right: 12px;
+  padding: 0 12px;
+  max-width: 310px;
+}
+
+/* Analytics modal: stable mobile scale + readable layout */
+.analytics-clean-modal .modal {
+  width: min(640px, calc(100vw - 20px));
+  max-height: min(92vh, var(--app-height, 92vh));
+}
+
+.analytics-clean-modal .modal-body-stack.analytics-clean-body {
+  padding: 16px;
+  overflow-x: hidden;
+}
+
+.analytics-modal-redesign {
+  gap: 12px;
+}
+
+.analytics-redesign-title {
+  font-size: clamp(32px, 6.5vw, 56px);
+  line-height: 1.04;
+}
+
+.analytics-overlay-kpi-value {
+  font-size: clamp(44px, 10vw, 84px);
+  line-height: 0.95;
+}
+
+.analytics-redesign-hero .card-inner,
+.analytics-redesign-breakdown .card-inner,
+.analytics-redesign-activity .card-inner {
+  padding: 16px;
+}
+
+.analytics-redesign-close {
+  min-height: 56px;
+  font-size: 20px;
 }
 
 @media (max-width: 720px) {
   .analytics-redesign-head {
     flex-direction: column;
     align-items: stretch;
+    gap: 10px;
   }
+
+  .analytics-redesign-score-row {
+    gap: 10px;
+  }
+
   .analytics-period-row {
     justify-content: flex-start;
   }
+
+  .analytics-period-switch {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .analytics-period-btn {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+
+  .analytics-overlay-kpi-value {
+    font-size: clamp(44px, 16vw, 74px);
+  }
 }
+
