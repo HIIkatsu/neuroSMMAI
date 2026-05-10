@@ -2402,7 +2402,6 @@ function openAnalyticsDetails() {
             <div class="analytics-overlay-kpi-value">${Number.isFinite(Number(scoreDisplay)) ? `${Math.round(Number(scoreDisplay))}%` : '—'}</div>
             <div class="analytics-redesign-kpi-meta">${escapeHtml(scoreMeta.label)} · ${escapeHtml(periodLabel)}</div>
           </div>
-          ${renderScoreRing(scoreDisplay, 'score-ring-lg', '')}
         </div>
       </div></div>
 
@@ -2413,8 +2412,6 @@ function openAnalyticsDetails() {
         </div>
         ${emptyBlock}
       </div></div>
-
-      ${buildAdviceCard(a)}
 
       <div class="card analytics-overlay-chart-card analytics-redesign-activity"><div class="card-inner stack compact-dashboard-card">${sparkline}</div></div>
       <div class="section-desc analytics-overlay-footnote">Источник: текущие данные активного канала</div>
@@ -2462,8 +2459,6 @@ function analyticsBlock() {
           ${buildAnalyticsChartRows(a.signals)}
         </div>
       </div>
-      ${buildAdviceCard(a)}
-      <button class="btn ghost analytics-inline-link-btn" data-action="openAnalyticsDetails">Открыть детали</button>
     </div></div>
   `;
 }
