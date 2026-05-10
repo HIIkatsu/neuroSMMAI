@@ -1,110 +1,130 @@
-
 from __future__ import annotations
 
 import asyncio
 import re
+import asyncpg
 import aiosqlite
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Optional
 
-DB_PATH = Path(__file__).resolve().parent / "bot.db"
+DB_DSN = "postgresql://neuro:neuro_pass_123@127.0.0.1:5432/neurosmm"
 
-# ---------------------------------------------------------------------------
-# Connection pool
-# ---------------------------------------------------------------------------
-# A small pool of pre-configured aiosqlite connections avoids re-opening and
-# re-configuring a new SQLite connection (WAL, pragmas) on every DB call.
-# Pool size is intentionally small: SQLite is single-writer, so large pools
-# only help for concurrent reads. 5 connections is a safe, tested default.
-# ---------------------------------------------------------------------------
-_DB_POOL_SIZE = 5
-_db_pool: asyncio.Queue | None = None
-
+_pool: asyncpg.Pool | None = None
 
 async def _init_pool() -> None:
-    """Pre-fill the connection pool. Must be called once from init_db()."""
-    global _db_pool
-    new_pool: asyncio.Queue = asyncio.Queue(maxsize=_DB_POOL_SIZE)
-    for _ in range(_DB_POOL_SIZE):
-        conn = await _connect()
-        new_pool.put_nowait(conn)
-    _db_pool = new_pool
-
+    global _pool
+    _pool = await asyncpg.create_pool(DB_DSN, min_size=5, max_size=20)
 
 async def close_pool() -> None:
-    """Drain and close all pooled connections. Call on application shutdown."""
-    global _db_pool
-    pool = _db_pool
-    _db_pool = None
-    if pool is None:
-        return
-    while not pool.empty():
-        try:
-            conn = pool.get_nowait()
-            await conn.close()
-        except Exception:
-            pass
+    global _pool
+    if _pool is not None:
+        await _pool.close()
 
+def _pg_query(query: str) -> str:
+    parts = query.split('?')
+    res = parts[0]
+    for i, part in enumerate(parts[1:], 1):
+        res += f"${i}" + part
+        
+    res = res.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY")
+    res = res.replace("datetime('now')", "to_char(CURRENT_TIMESTAMP, 'YYYY-MM-DD\"T\"HH24:MI:SS')")
+    res = res.replace("datetime('now', '-7 day')", "to_char(CURRENT_TIMESTAMP - INTERVAL '7 days', 'YYYY-MM-DD\"T\"HH24:MI:SS')")
+    
+    if "INSERT OR IGNORE" in res:
+        res = res.replace("INSERT OR IGNORE", "INSERT")
+        if "ON CONFLICT" not in res:
+            res += " ON CONFLICT DO NOTHING"
+            
+    if "INSERT OR REPLACE" in res:
+        res = res.replace("INSERT OR REPLACE", "INSERT")
+        if "INTO settings" in res:
+            res += " ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value"
+            
+    return res
+
+class PGCursor:
+    def __init__(self, records, lastrowid=0):
+        self._records = records
+        self.lastrowid = lastrowid
+        self.rowcount = len(records) if records else 0
+        
+    async def fetchone(self):
+        return self._records[0] if self._records else None
+        
+    async def fetchall(self):
+        return self._records or []
+
+class PGConnWrapper:
+    def __init__(self, conn):
+        self.conn = conn
+        self.row_factory = None
+
+    async def execute(self, query: str, parameters: tuple = ()):
+        q = _pg_query(query)
+        
+        has_id_tables = [
+            "schedules", "plan_items", "post_logs", "draft_posts", "generation_history", 
+            "user_media_inbox", "news_logs", "channel_profiles", "payment_events", 
+            "scheduler_dedup", "dm_memory"
+        ]
+        needs_returning = False
+        if q.strip().upper().startswith("INSERT") and "RETURNING" not in q.upper():
+            for t in has_id_tables:
+                if f"INTO {t}" in q or f"into {t}" in q:
+                    needs_returning = True
+                    break
+        
+        if needs_returning:
+            q += " RETURNING id"
+            
+        try:
+            if q.strip().upper().startswith("SELECT") or "RETURNING" in q.upper() or "PRAGMA" in q.upper():
+                if "PRAGMA table_info" in q:
+                    table = re.search(r'table_info\((.*?)\)', query).group(1)
+                    res = await self.conn.fetch("SELECT column_name FROM information_schema.columns WHERE table_name=$1", table)
+                    records = [(0, r['column_name']) for r in res]
+                    return PGCursor(records)
+                elif "PRAGMA" in q.upper():
+                    return PGCursor([])
+                    
+                res = await self.conn.fetch(q, *parameters)
+                last_id = res[0]['id'] if needs_returning and res and 'id' in res[0].keys() else 0
+                return PGCursor(res, lastrowid=last_id)
+            else:
+                status = await self.conn.execute(q, *parameters)
+                rowcount = int(status.split()[-1]) if status and status.split()[-1].isdigit() else 0
+                cur = PGCursor([])
+                cur.rowcount = rowcount
+                return cur
+        except Exception as e:
+            if "ALTER TABLE" not in q:
+                print(f"[DB ERROR] Q: {q} | Params: {parameters}")
+            raise e
+
+    async def commit(self):
+        pass
+        
+    async def rollback(self):
+        pass
+        
+    async def close(self):
+        await self.conn.close()
 
 class _db_ctx:
-    """Async context manager that acquires a connection from the pool.
+    async def __aenter__(self):
+        if _pool is None:
+            await _init_pool()
+        self.raw_conn = await _pool.acquire()
+        return PGConnWrapper(self.raw_conn)
 
-    If the pool is empty or not yet initialized, falls back to creating a
-    fresh connection so callers never block indefinitely.
-
-    Usage::
-
-        async with _db_ctx() as db:
-            cur = await db.execute(...)
-    """
-
-    _conn: aiosqlite.Connection | None = None
-    _from_pool: bool = False
-
-    async def __aenter__(self) -> aiosqlite.Connection:
-        if _db_pool is not None:
-            try:
-                self._conn = _db_pool.get_nowait()
-                self._from_pool = True
-                return self._conn
-            except asyncio.QueueEmpty:
-                pass
-        self._conn = await _connect()
-        self._from_pool = False
-        return self._conn
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
-        conn = self._conn
-        self._conn = None
-        if conn is None:
-            return
-        if exc_type is not None:
-            # Roll back any open transaction so the connection stays clean
-            try:
-                await conn.rollback()
-            except Exception:
-                pass
-        if self._from_pool and _db_pool is not None:
-            try:
-                _db_pool.put_nowait(conn)
-                return
-            except asyncio.QueueFull:
-                pass
-        try:
-            await conn.close()
-        except Exception:
-            pass
-
-
-async def _connect() -> aiosqlite.Connection:
-    db = await aiosqlite.connect(DB_PATH)
-    await db.execute("PRAGMA journal_mode=WAL")
-    await db.execute("PRAGMA synchronous=NORMAL")
-    await db.execute("PRAGMA temp_store=MEMORY")
-    await db.execute("PRAGMA cache_size=-20000")
-    return db
-
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        if self.raw_conn:
+            await _pool.release(self.raw_conn)
+            
+async def _connect():
+    conn = await asyncpg.connect(DB_DSN)
+    return PGConnWrapper(conn)
 
 def _scope_key(key: str, owner_id: int | None = None) -> str:
     if owner_id in (None, 0):
