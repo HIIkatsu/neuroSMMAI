@@ -6533,14 +6533,14 @@ body {
 
 /* 6. Локальные фиксы модалки расширенной аналитики */
 .analytics-overlay-sheet {
-    max-height: calc(100vh - 120px) !important;
-    overflow-y: auto !important;
+    max-height: none !important;
+    overflow: visible !important;
     padding-bottom: 16px !important;
 }
 
 .analytics-overlay-sheet .analytics-overlay-chart-card,
 .analytics-overlay-sheet .analytics-modal-chart-card {
-    overflow: hidden !important;
+    overflow: visible !important;
 }
 
 .analytics-overlay-sheet .sparkline-card {
