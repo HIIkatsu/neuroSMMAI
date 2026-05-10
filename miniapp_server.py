@@ -4,6 +4,7 @@ import json
 import logging
 import time
 from collections import defaultdict, deque
+import hashlib
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -195,13 +196,28 @@ class SimpleRateLimitMiddleware(BaseHTTPMiddleware):
         # configure the proxy to set REMOTE_ADDR correctly (e.g. via proxy_protocol
         # or real_ip_from in nginx) rather than trusting X-Forwarded-For here.
         ip = request.client.host or 'unknown'
-        key = (ip, 'w' if request.method.upper() in {'POST', 'PATCH', 'PUT', 'DELETE'} else 'r')
+        tg_init_data = (
+            request.headers.get("x-telegram-init-data")
+            or request.headers.get("tg-webapp-data")
+            or ""
+        ).strip()
+        auth_fingerprint = "anon"
+        if tg_init_data:
+            auth_fingerprint = hashlib.sha256(tg_init_data.encode("utf-8")).hexdigest()[:16]
+        key = (
+            f"{ip}:{auth_fingerprint}",
+            'w' if request.method.upper() in {'POST', 'PATCH', 'PUT', 'DELETE'} else 'r',
+        )
         now = time.monotonic()
         q = self._hits[key]
         while q and now - q[0] > 60.0:
             q.popleft()
         if len(q) >= limit:
-            return JSONResponse(status_code=429, content={'detail': 'Too many requests'})
+            return JSONResponse(
+                status_code=429,
+                content={'detail': 'Too many requests'},
+                headers={"Retry-After": "60"},
+            )
         q.append(now)
         return await call_next(request)
 
