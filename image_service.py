@@ -1,549 +1,89 @@
-"""
-image_service.py — Single public entry point for all image generation requests.
-
-Generation flow:
-  caller → image_service → prompt build → image generation → validation → dedup check → storage → result
-
-Fallback flow (only if generation fails):
-  caller → image_service → generation failed → fallback search → validation → storage → result
-
-This module is the ONLY module external callers should import for image operations.
-"""
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 import re
+import httpx
 from dataclasses import dataclass
-
-from image_prompts import build_generation_prompt
-from image_generation import generate_image
-from image_validation import (
-    validate_image_bytes,
-    validate_image_url,
-    validate_media_ref,
-    validate_image_candidate,
-)
-from image_storage import save_generated_image
-from image_history import get_image_history
-from image_fallback import search_stock_photo, search_stock_candidates
 
 logger = logging.getLogger(__name__)
 
-# Mode constants — callers use these
 MODE_AUTOPOST = "autopost"
 MODE_EDITOR = "editor"
+_LATIN_TOKEN_RE = re.compile(r'^[A-Za-z0-9][\w.+-]*$')
 
-# Latin token regex — used by actions.py for query cleaning
-_LATIN_TOKEN_RE = re.compile(r"^[A-Za-z0-9][\w.+-]*$")
-
-# Generation timeout
-_GENERATION_TIMEOUT = float(30.0)
-_FALLBACK_TIMEOUT = float(15.0)
-_IMAGE_SEARCH_ONLY = (os.getenv("IMAGE_SEARCH_ONLY", "").strip().lower() in {"1", "true", "yes", "on"})
-_SIMPLE_QUERY_STOPWORDS = {
-    "и", "в", "во", "на", "по", "для", "с", "со", "к", "о", "об", "про", "или",
-    "the", "a", "an", "and", "or", "for", "to", "of", "in", "on", "with", "about",
-}
-_TOPIC_NOISE_TOKENS = {
-    "город", "городе", "новый", "новые", "спрос", "рынок", "аналитики", "обсуждают",
-    "как", "почему", "советы", "гайд", "обзор", "новость", "новости",
-}
-_REJECT_TOKENS = (
-    "watermark", "logo", "vector", "illustration", "infographic", "poster",
-    "flyer", "banner", "text", "caption", "typography",
-)
-
+PEXELS_API_KEY = (os.getenv("PEXELS_API_KEY") or "").strip()
+PIXABAY_API_KEY = (os.getenv("PIXABAY_API_KEY") or "").strip()
+_SEARCH_TIMEOUT = 10.0
 
 @dataclass
 class ImageResult:
-    """Result of an image generation/search request."""
-    media_ref: str = ""           # The usable media reference (URL or local path)
-    source: str = ""              # "generation", "fallback", "none"
-    prompt_used: str = ""         # The prompt that was used
-    family: str = ""              # Detected topic family
-    failure_reason: str = ""      # Why it failed (if it did)
-    is_generated: bool = False    # True if AI-generated, False if stock/fallback
+    media_ref: str = ""
+    source: str = "stock"
+    prompt_used: str = ""
+    family: str = "generic"
+    failure_reason: str = ""
+    is_generated: bool = False
 
-
-async def get_image(
-    *,
-    title: str = "",
-    body: str = "",
-    channel_topic: str = "",
-    llm_image_prompt: str = "",
-    api_key: str = "",
-    model: str = "",
-    base_url: str | None = None,
-    owner_id: int | None = None,
-    mode: str = MODE_EDITOR,
-    used_refs: set[str] | None = None,
-    text_quality_flagged: bool = False,
-    content_mode: str = "",
-    channel_style: str = "",
-    channel_audience: str = "",
-    channel_subniche: str = "",
-    onboarding_summary: str = "",
-    content_constraints: str = "",
-    content_exclusions: str = "",
-    visual_style: str = "",
-    forbidden_visuals: str = "",
-    post_intent: str = "",
-) -> ImageResult:
-    """Generate or find an image for a post.
-
-    This is the SINGLE entry point for all image operations.
-    Generation-first: tries AI generation, falls back to stock search only on failure.
-
-    Args:
-        title: Post title
-        body: Post body text
-        channel_topic: Channel topic for context
-        llm_image_prompt: Pre-built LLM prompt for image generation
-        api_key: API key for the image generation provider
-        model: Model name override
-        base_url: API base URL override
-        owner_id: Owner ID for storage and access control
-        mode: "editor" or "autopost"
-        used_refs: Set of recently used image refs to avoid
-        content_mode: Detected content mode for mode-aware prompt building
-
-    Returns:
-        ImageResult with media_ref, source, and metadata
-    """
-    normalized_mode = _normalize_mode(mode)
-    history = get_image_history()
-
-    # 1. Build prompt
-    prompt_data = build_generation_prompt(
-        title=title,
-        body=body,
-        channel_topic=channel_topic,
-        llm_image_prompt=llm_image_prompt,
-        content_mode=content_mode,
-        channel_style=channel_style,
-        channel_audience=channel_audience,
-        channel_subniche=channel_subniche,
-        onboarding_summary=onboarding_summary,
-        content_constraints=content_constraints,
-        content_exclusions=content_exclusions,
-        visual_style=visual_style,
-        forbidden_visuals=forbidden_visuals,
-        post_intent=post_intent,
-        text_quality_flagged=text_quality_flagged,
-    )
-    prompt = prompt_data["prompt"]
-    family = prompt_data["family"]
-    effective_mode = prompt_data["content_mode"]
-
-    logger.info(
-        "IMAGE_SERVICE_START mode=%s owner_id=%s family=%s title=%r",
-        normalized_mode, owner_id, family, (title or "")[:60],
-    )
-
-    prompt_ok, prompt_reason = validate_image_candidate(
-        prompt=prompt,
-        title=title,
-        body=body,
-        channel_topic=channel_topic,
-        content_mode=effective_mode,
-        canonical_family=family,
-    )
-    if not prompt_ok:
-        logger.warning("IMAGE_SERVICE_PROMPT_REJECT reason=%s title=%r", prompt_reason, (title or "")[:60])
-        prompt_data = build_generation_prompt(
-            title=title,
-            body=body,
-            channel_topic=channel_topic,
-            content_mode=content_mode,
-            channel_style=channel_style,
-            channel_audience=channel_audience,
-            channel_subniche=channel_subniche,
-            onboarding_summary=onboarding_summary,
-            content_constraints=content_constraints,
-            content_exclusions=content_exclusions,
-            visual_style=visual_style,
-            forbidden_visuals=forbidden_visuals,
-            post_intent=post_intent,
-            text_quality_flagged=text_quality_flagged,
-        )
-        prompt = prompt_data["prompt"]
-
-    # 2. Check prompt dedup
-    if history.is_duplicate_prompt(prompt):
-        logger.info("IMAGE_SERVICE_PROMPT_DEDUP prompt_sig=duplicate, proceeding with generation anyway")
-        # We still generate — dedup is advisory for prompts, not blocking
-
-    logger.info("IMAGE_SERVICE_SEARCH_FIRST mode=%s image_search_only=%s", normalized_mode, _IMAGE_SEARCH_ONLY)
-
-    # 3. AI Generation First (Точная генерация картинок ИИ)
-    generated_ref = ""
-    # Включаем ИИ-генерацию изображений для всех режимов, включая редактор
-    allow_generation = os.getenv("IMAGE_ALLOW_GENERATION_SECONDARY", "true").strip().lower() in {"1", "true", "yes", "on"}
-    
-    if allow_generation:
-        generated_ref = await _try_generation(
-            prompt=prompt,
-            negative_prompt=prompt_data["negative_prompt"],
-            api_key=api_key,
-            model=model,
-            base_url=base_url,
-            owner_id=owner_id,
-            history=history,
-            used_refs=used_refs,
-        )
-        
-    if generated_ref:
-        logger.info("IMAGE_SERVICE_SUCCESS source=generation ref=%r", generated_ref[:80])
-        return ImageResult(
-            media_ref=generated_ref,
-            source="generation",
-            prompt_used=prompt[:200],
-            family=family,
-            is_generated=True,
-        )
-
-    # 4. Fallback: Stock Photos (Только если ИИ сломался)
-    logger.info("IMAGE_SERVICE_FALLBACK searching stock mode=%s", normalized_mode)
-    fallback_ref = await _try_fallback(
-        title=title,
-        body=body,
-        channel_topic=channel_topic,
-        history=history,
-        used_refs=used_refs,
-        text_quality_flagged=text_quality_flagged,
-        mode=normalized_mode,
-        family_context_hint=" ".join(x for x in [channel_topic, onboarding_summary, post_intent, title] if (x or "").strip()),
-        content_mode=effective_mode,
-        normalized_visual_prompt="" if text_quality_flagged else prompt,
-        resolved_intent=post_intent,
-        canonical_family=family,
-        onboarding_summary=onboarding_summary,
-        content_constraints=content_constraints,
-        llm_image_prompt=llm_image_prompt,
-    )
-
-    if fallback_ref:
-        history.record(media_ref=fallback_ref)
-        return ImageResult(
-            media_ref=fallback_ref,
-            source="fallback",
-            prompt_used=prompt[:200],
-            family=family,
-            is_generated=False,
-        )
-
-    # 5. Complete failure
-    logger.warning(
-        "IMAGE_SERVICE_NO_IMAGE owner_id=%s family=%s mode=%s",
-        owner_id, family, normalized_mode,
-    )
-    return ImageResult(
-        source="none",
-        prompt_used=prompt[:200],
-        family=family,
-        failure_reason="generation_and_fallback_both_failed",
-    )
-
-
-async def validate_image(
-    media_ref: str,
-    *,
-    title: str = "",
-    body: str = "",
-    channel_topic: str = "",
-    mode: str = MODE_AUTOPOST,
-) -> bool:
-    """Validate an existing image reference.
-
-    Simple validation: checks if the ref is plausible and non-empty.
-    Used by scheduler_service.py as a quality gate.
-    """
-    if not media_ref or not media_ref.strip():
-        return True  # Empty ref = no image = valid (caller decides if image is required)
-
-    is_valid, reason = validate_media_ref(media_ref)
-    if not is_valid:
-        logger.info(
-            "IMAGE_VALIDATE_REJECT ref=%r reason=%s mode=%s",
-            media_ref[:80], reason, mode,
-        )
-    return is_valid
-
-
-async def trigger_unsplash_download(download_location: str) -> bool:
-    """No-op stub: Unsplash integration has been removed.
-
-    This stub exists ONLY because miniapp_routes_content.py calls it on
-    draft create/update/publish. Removing it would break those callers.
-    The stub always returns False and logs explicitly.
-    """
-    logger.debug(
-        "IMAGE_UNSPLASH_NOOP download_location=%r reason=unsplash_removed",
-        (download_location or "")[:80],
-    )
-    return False
-
-
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-async def _try_generation(
-    *,
-    prompt: str,
-    negative_prompt: str,
-    api_key: str,
-    model: str,
-    base_url: str | None,
-    owner_id: int | None,
-    history,
-    used_refs: set[str] | None,
-) -> str:
-    """Attempt AI image generation. Returns media ref or empty string."""
-    if not _is_valid_image_model(model):
-        logger.warning(
-            "IMAGE_GENERATION_SKIPPED_INVALID_MODEL model=%r owner_id=%s",
-            (model or "")[:120], owner_id,
-        )
-        return ""
-    try:
-        image_bytes = await asyncio.wait_for(
-            generate_image(
-                api_key=api_key,
-                prompt=prompt,
-                negative_prompt=negative_prompt,
-                model=model,
-                base_url=base_url,
-            ),
-            timeout=_GENERATION_TIMEOUT,
-        )
-    except asyncio.TimeoutError:
-        logger.warning("IMAGE_GENERATION_TIMEOUT owner_id=%s", owner_id)
-        return ""
-    except Exception as exc:
-        logger.error("IMAGE_GENERATION_ERROR owner_id=%s error=%s", owner_id, exc)
-        return ""
-
-    if not image_bytes:
-        return ""
-
-    # Validate generated bytes
-    is_valid, reason = validate_image_bytes(image_bytes)
-    if not is_valid:
-        logger.warning("IMAGE_GENERATION_INVALID reason=%s owner_id=%s", reason, owner_id)
-        return ""
-
-    # Check content dedup
-    if history.is_duplicate_content(image_bytes):
-        logger.info("IMAGE_GENERATION_CONTENT_DEDUP owner_id=%s", owner_id)
-        # Don't reject — duplicates from generation are unlikely but possible
-        # Just log and continue
-
-    # Save to storage
-    media_ref = save_generated_image(image_bytes, owner_id=owner_id, prompt_hint=prompt[:50])
-    if not media_ref:
-        logger.error("IMAGE_STORAGE_FAILED owner_id=%s", owner_id)
-        return ""
-
-    # Check against used_refs
-    if used_refs and media_ref in used_refs:
-        logger.info("IMAGE_GENERATION_ALREADY_USED ref=%r owner_id=%s", media_ref[:80], owner_id)
-        # Still return it — exact hash collision with used refs is extremely unlikely
-        # for generated images
-
-    # Record in history
-    history.record(image_bytes=image_bytes, prompt=prompt, media_ref=media_ref)
-
-    return media_ref
-
-
-async def _try_fallback(
-    *,
-    title: str,
-    body: str,
-    channel_topic: str,
-    history,
-    used_refs: set[str] | None,
-    text_quality_flagged: bool = False,
-    mode: str = MODE_EDITOR,
-    family_context_hint: str = "",
-    content_mode: str = "",
-    normalized_visual_prompt: str = "",
-    resolved_intent: str = "",
-    canonical_family: str = "",
-    onboarding_summary: str = "",
-    content_constraints: str = "",
-    llm_image_prompt: str = "",
-) -> str:
-    """Search-first stock pipeline with simple explicit query/topic extraction."""
-    query = _build_simple_search_query(
-        mode=mode,
-        explicit_query=llm_image_prompt,
-        title=title,
-        body="" if text_quality_flagged else body,
-    )
+async def get_image(*, title: str = "", body: str = "", llm_image_prompt: str = "", **kwargs) -> ImageResult:
+    query = _build_search_query(llm_image_prompt, title, body)
     if not query:
-        logger.info("IMAGE_PIPELINE_DECISION final_decision=no_image reject_reason=empty_query mode=%s", mode)
-        return ""
+        return ImageResult(failure_reason="empty_query")
 
+    if PEXELS_API_KEY:
+        ref = await _search_pexels(query)
+        if ref: return ImageResult(media_ref=ref, prompt_used=query)
+
+    if PIXABAY_API_KEY:
+        ref = await _search_pixabay(query)
+        if ref: return ImageResult(media_ref=ref, prompt_used=query)
+
+    return ImageResult(failure_reason="stock_search_failed")
+
+def _build_search_query(llm_prompt: str, title: str, body: str) -> str:
+    # 1. ПРИОРИТЕТ 1: Вытаскиваем Бренды/Модели (Английские слова) из русского текста.
+    text_to_scan = f"{title} {body[:300]}"
+    text_to_scan = re.sub(r"http\S+", "", text_to_scan) # Удаляем ссылки
+    
+    english_words = re.findall(r'[A-Za-z0-9]+', text_to_scan)
+    ignore_words = {"a", "the", "and", "for", "in", "on", "with", "is", "pro", "max"}
+    valid_brands = [w for w in english_words if len(w) > 1 and not w.isdigit() and w.lower() not in ignore_words]
+    
+    if valid_brands:
+        return " ".join(valid_brands[:3])
+
+    # 2. ПРИОРИТЕТ 2: Если брендов нет, чистим промпт от нейросети
+    if llm_prompt:
+        clean = re.sub(r"(?i)\b(a|the|an|photo|image|picture|stock|professional|high quality|of|illustration|photorealistic|modern|concept|background|style)\b", "", llm_prompt)
+        tokens = [w for w in clean.split() if len(w) > 2]
+        if tokens:
+            return " ".join(tokens[:3])
+            
+    # 3. ФОЛБЭК: Первые слова заголовка
+    return " ".join([w for w in title.split() if len(w) > 3][:2])
+
+async def _search_pexels(query: str) -> str:
     try:
-        candidates = await asyncio.wait_for(
-            search_stock_candidates(query, query_family="primary"),
-            timeout=_FALLBACK_TIMEOUT,
-        )
-    except asyncio.TimeoutError:
-        logger.warning("IMAGE_FALLBACK_TIMEOUT query=%r", query[:40])
-        return ""
-    except Exception as exc:
-        logger.error("IMAGE_FALLBACK_ERROR query=%r error=%s", query[:40], exc)
-        return ""
-
-    if not candidates:
-        logger.info("IMAGE_PIPELINE_DECISION final_decision=no_image reject_reason=no_candidates query=%r", query[:60])
-        return ""
-
-    for candidate in candidates:
-        url = candidate.url
-        is_valid, _ = validate_image_url(url)
-        if not is_valid:
-            continue
-        if history.is_duplicate_ref(url):
-            continue
-        ok, reason = _is_simple_candidate_ok(candidate, query=query, used_refs=used_refs)
-        if ok:
-            logger.info(
-                "IMAGE_PIPELINE_DECISION final_decision=accepted provider=%s query=%r",
-                candidate.provider,
-                query[:60],
-            )
-            return url
-        logger.info(
-            "IMAGE_PIPELINE_DECISION final_decision=rejected reject_reason=%s provider=%s query=%r",
-            reason,
-            candidate.provider,
-            query[:60],
-        )
-
-    logger.info("IMAGE_PIPELINE_DECISION final_decision=no_image reject_reason=all_candidates_rejected query=%r", query[:60])
+        async with httpx.AsyncClient(timeout=_SEARCH_TIMEOUT) as client:
+            r = await client.get("https://api.pexels.com/v1/search", params={"query": query, "per_page": 1, "orientation": "landscape"}, headers={"Authorization": PEXELS_API_KEY})
+            if r.status_code == 200 and r.json().get("photos"):
+                return r.json()["photos"][0].get("src", {}).get("large2x", "")
+    except Exception as e:
+        logger.error(f"Pexels error: {e}")
     return ""
 
+async def _search_pixabay(query: str) -> str:
+    try:
+        async with httpx.AsyncClient(timeout=_SEARCH_TIMEOUT) as client:
+            r = await client.get("https://pixabay.com/api/", params={"key": PIXABAY_API_KEY, "q": query, "image_type": "photo", "orientation": "horizontal", "per_page": 3})
+            if r.status_code == 200 and r.json().get("hits"):
+                return r.json()["hits"][0].get("largeImageURL", "")
+    except Exception as e:
+        logger.error(f"Pixabay error: {e}")
+    return ""
 
-def _build_simple_search_query(*, mode: str, explicit_query: str, title: str, body: str) -> str:
-    # ВСЕГДА используем точный английский запрос от LLM (и для редактора, и для автопоста)
-    if explicit_query and explicit_query.strip():
-        tokens = re.findall(r"[a-zA-Z]+", explicit_query.lower())
-        stopwords = {"a", "an", "the", "photo", "image", "picture", "of", "stock", "editorial", "photorealistic", "professional", "high"}
-        clean_tokens = [t for t in tokens if t not in stopwords]
-        if clean_tokens:
-            return " ".join(clean_tokens[:3])
-            
-    # Крайний запасной вариант (если LLM вдруг не сгенерировала image_prompt)
-    return _extract_main_topic_query(title=title, body=body, max_terms=2)
+async def validate_image(media_ref: str, **kwargs) -> bool:
+    return not media_ref or media_ref.startswith(("http://", "https://", "tgfile:", "/", "./"))
 
-
-def _normalize_query(text: str, *, max_terms: int) -> str:
-    tokens = re.findall(r"[a-zA-Zа-яА-ЯёЁ0-9-]+", (text or "").lower().strip())
-    cleaned: list[str] = []
-    for token in tokens:
-        t = token.strip("-")
-        if len(t) < 2:
-            continue
-        if t in _SIMPLE_QUERY_STOPWORDS:
-            continue
-        if t not in cleaned:
-            cleaned.append(t)
-        if len(cleaned) >= max(1, int(max_terms)):
-            break
-    return " ".join(cleaned)
-
-
-def _extract_main_topic_query(*, title: str, body: str, max_terms: int) -> str:
-    title_tokens = _normalize_query(title, max_terms=12).split()
-    body_tokens = _normalize_query(body, max_terms=20).split()
-    if not title_tokens and not body_tokens:
-        return ""
-
-    scores: dict[str, float] = {}
-    for token in body_tokens:
-        scores[token] = scores.get(token, 0.0) + 1.0
-    for token in title_tokens:
-        scores[token] = scores.get(token, 0.0) + 2.0
-    for token in list(scores.keys()):
-        scores[token] += min(len(token) / 10.0, 1.2)
-        if token in _TOPIC_NOISE_TOKENS:
-            scores[token] -= 2.5
-
-    ranked = sorted(scores.items(), key=lambda it: (-it[1], it[0]))
-    chosen = [token for token, _ in ranked[:max(1, int(max_terms))]]
-    return " ".join(chosen)
-
-
-def _is_simple_candidate_ok(candidate, *, query: str, used_refs: set[str] | None) -> tuple[bool, str]:
-    url = (candidate.url or "").strip()
-    if used_refs and url in used_refs:
-        return False, "already_used_ref"
-    blob = " ".join([
-        url.lower(),
-        str(getattr(candidate, "caption", "") or "").lower(),
-        " ".join((getattr(candidate, "tags", None) or [])).lower(),
-    ])
-    if any(tok in blob for tok in _REJECT_TOKENS):
-        return False, "text_or_logo_heavy"
-    query_tokens = [t for t in query.split() if t]
-    if query_tokens and blob and not any(t in blob for t in query_tokens):
-        return False, "unrelated"
-    return True, "ok"
-
-
-def _rerank_candidate_by_subject(
-    *,
-    media_ref: str,
-    candidate_query: str,
-    positive_tokens: list[str],
-    negative_tokens: list[str],
-) -> tuple[bool, str]:
-    source_url = (media_ref or "").lower()
-    source_query = (candidate_query or "").lower()
-    source_url_words = source_url.replace("-", " ").replace("_", " ")
-    pos_hits_url = sum(1 for tok in positive_tokens[:10] if tok and tok in source_url)
-    pos_hits_query = sum(1 for tok in positive_tokens[:10] if tok and tok in source_query)
-    pos_hits = pos_hits_url + (1 if pos_hits_query > 0 else 0)
-    neg_hits = sum(1 for tok in negative_tokens[:10] if tok and (tok in source_url or tok in source_url_words))
-    score = (pos_hits * 2) - (neg_hits * 3)
-    if not positive_tokens and not negative_tokens:
-        return True, "subject_rerank_skip_no_profile"
-    if neg_hits >= 1 and pos_hits_url == 0:
-        return False, f"subject_rerank_negative_domains pos={pos_hits} neg={neg_hits}"
-    if pos_hits == 0 and neg_hits == 0:
-        return True, "subject_rerank_neutral"
-    if score < 0:
-        return False, f"subject_rerank_low_score pos={pos_hits} neg={neg_hits} score={score}"
-    return True, f"subject_rerank_ok pos={pos_hits} neg={neg_hits} score={score}"
-
-
-def _normalize_mode(mode: str) -> str:
-    m = (mode or "").strip().lower()
-    if m in {MODE_AUTOPOST, "news", "auto"}:
-        return MODE_AUTOPOST
-    return MODE_EDITOR
-
-
-def _is_valid_image_model(model: str) -> bool:
-    m = (model or "").strip().lower()
-    if not m:
-        # Empty model is allowed — generate_image() will use IMAGE_GENERATION_MODEL/default.
-        return True
-    # Conservative allow-list: common image generation families/providers.
-    image_tokens = (
-        "image", "flux", "recraft", "dall", "sd", "stable-diffusion", "midjourney", "imagen",
-    )
-    text_only_tokens = (
-        "mistral", "claude", "llama", "deepseek", "qwen", "gemini", "gpt-4", "gpt-3", "command-r",
-    )
-    if any(tok in m for tok in image_tokens):
-        return True
-    if any(tok in m for tok in text_only_tokens):
-        return False
+async def trigger_unsplash_download(download_location: str) -> bool:
     return False

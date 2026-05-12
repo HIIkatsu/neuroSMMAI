@@ -12,7 +12,7 @@ from openai import APITimeoutError, APIConnectionError, RateLimitError, APIError
 
 DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_IMAGE_SIZE = os.getenv("IMAGE_GENERATION_SIZE", "1024x1024")
-DEFAULT_CHAT_MAX_TOKENS = int(os.getenv("OPENROUTER_MAX_TOKENS", "700"))
+DEFAULT_CHAT_MAX_TOKENS = int(os.getenv("OPENROUTER_MAX_TOKENS", "4096"))
 
 logger = logging.getLogger(__name__)
 
@@ -79,8 +79,8 @@ def _clamp_max_tokens(value: Optional[int]) -> int:
         return DEFAULT_CHAT_MAX_TOKENS
     if n < 32:
         return 32
-    if n > 1200:
-        return 1200
+    if n > 8192:
+        return 8192
     return n
 
 
@@ -152,6 +152,24 @@ async def ai_chat(
     max_tokens: Optional[int] = None,
 ) -> str:
     """Асинхронный вызов chat/completions с retry и exponential backoff."""
+    
+    
+    
+    # --- GLOBAL KNOWLEDGE GATE 2.0 ---
+    # Установка на 2026 год и приоритет внешних данных
+    knowledge_gate = (
+        "CURRENT_DATE: May 2026. \n"
+        "SYSTEM_RULE: Твои знания ограничены 2024 годом. "
+        "Твоя задача — писать интересные посты. "
+        "ГЛАВНОЕ ПРАВИЛО: ИЗБЕГАЙ жесткой технической конкретики. Категорически запрещено выдумывать цифры, мегапиксели, ГГц и версии ПО. "
+        "Делай упор на новости, тренды, общие фишки и интересные факты из предоставленного текста. "
+        "Если точных данных нет — рассказывай о концепции и пользе, а не придумывай характеристики."
+    )
+    if messages and messages[0].get("role") == "system":
+        messages[0]["content"] = f"{knowledge_gate}\n\n{messages[0]['content']}"
+    else:
+        messages.insert(0, {"role": "system", "content": knowledge_gate})
+    # ---------------------------------
     safe_max_tokens = _clamp_max_tokens(max_tokens)
     client = await _get_shared_client(api_key, base_url)
 

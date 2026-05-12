@@ -460,7 +460,7 @@ class SchedulerService:
                         owner_id=owner_id,
                         channel_profile_id=channel_profile_id or None,
                         force_image=auto_image,
-                        generation_path="autopost",
+                        generation_path="editor",
                     )
                     text = payload_data.get("text") or ""
                     if text:
@@ -567,7 +567,7 @@ class SchedulerService:
                 owner_id=owner_id,
                 channel_profile_id=channel_profile_id or None,
                 force_image=auto_image,
-                generation_path="autopost",
+                generation_path="editor",
             )
             text = payload_data.get("text") or ""
             image_ref = payload_data.get("media_ref") or ""
@@ -760,55 +760,29 @@ class SchedulerService:
                             item = await fetch_latest_news(owner_id=owner_id, channel_target=channel, channel_profile_id=int(ch_profile.get("id", 0)))
                             if not item or not cfg or not getattr(cfg, "openrouter_api_key", ""):
                                 continue
-                            text = await build_news_post(cfg, item, owner_id=owner_id)
-                            if not text:
-                                logger.warning("_job_news_tick: empty text owner_id=%s channel=%s", owner_id, channel)
-                                continue
-                            # News text quality gate: reject low-quality news posts before publishing
-                            from content import assess_text_quality, NEWS_MIN_QUALITY_SCORE
-                            _news_q_score, _news_q_reasons, _news_q_dims = assess_text_quality(
-                                "", text, "",
-                                channel_topic=item.get("topic") or "",
-                                requested=item.get("title") or "",
-                            )
-                            if _news_q_score < NEWS_MIN_QUALITY_SCORE:
-                                logger.warning(
-                                    "_job_news_tick: news text quality gate REJECT score=%d min=%d dims=%s reasons=%s owner_id=%s title=%r",
-                                    _news_q_score, NEWS_MIN_QUALITY_SCORE,
-                                    " ".join(f"{k}={v}" for k, v in _news_q_dims.items()),
-                                    "; ".join(_news_q_reasons[:4]),
-                                    owner_id, (item.get("title") or "")[:80],
-                                )
-                                continue
-                            # Enforce single-message budget: AUTOPOST_TEXT_BUDGET is the max
-                            # character count for a text-only Telegram message (under 4096).
-                            from content import AUTOPOST_TEXT_BUDGET
-                            if len(text) > AUTOPOST_TEXT_BUDGET:
-                                text = text[:AUTOPOST_TEXT_BUDGET].rsplit("\n", 1)[0].strip()
-                            # Respect per-channel auto_image setting for news posts
-                            auto_image = (ch_settings.get("auto_image") or "1").strip() not in ("0", "false", "no")
-                            image_ref = ""
-                            if auto_image:
-                                image_ref = await resolve_post_image(
-                                    item.get("title") or item.get("topic") or "",
-                                    owner_id=owner_id,
-                                    ai_prompt=item.get("title") or "",
-                                    topic=item.get("topic") or "",
-                                    post_text=text,
-                                    config=cfg,
-                                    raw_user_query=item.get("title") or item.get("topic") or "",
-                                )
-                                # Autopost quality gate: reject semantically irrelevant images
-                                if image_ref and not validate_image(
-                                    image_ref,
-                                    title=item.get("title") or "",
-                                    body=text,
-                                    channel_topic=item.get("topic") or "",
-                                    mode="autopost",
-                                ):
-                                    logger.warning("_job_news_tick: image rejected by quality gate owner_id=%s url=%r", owner_id, image_ref[:80])
-                                    image_ref = ""
-                            msg, content_type = await self._send_with_optional_photo(channel, text, image_ref, is_autopost=True)
+                            api_key = (await get_setting("openrouter_api_key", owner_id=owner_id)) or getattr(cfg, "openrouter_api_key", "")
+                    model = (await get_setting("openrouter_model", owner_id=owner_id)) or getattr(cfg, "openrouter_model", "gpt-4o-mini")
+                    base_url = getattr(cfg, "openrouter_base_url", None)
+                    auto_image = (ch_settings.get("auto_image") or "1").strip() not in ("0", "false", "no")
+                    
+                    news_prompt = f"НОВОСТЬ: {item.get('title', '')}. Детали: {item.get('summary', '') or item.get('content', '')}"
+                    
+                    payload = await generate_post_payload(
+                        _make_per_owner_cfg(api_key, model, base_url, cfg),
+                        news_prompt,
+                        owner_id=owner_id,
+                        channel_profile_id=int(ch_profile.get("id", 0)),
+                        force_image=auto_image,
+                        generation_path="editor"
+                    )
+                    
+                    text = payload.get("text", "")
+                    image_ref = payload.get("media_ref", "")
+                    
+                    if not text:
+                        continue
+                        
+                    msg, content_type = await self._send_with_optional_photo(channel, text, image_ref, is_autopost=True)
                             await log_post(
                                 owner_id=owner_id,
                                 channel_target=channel,
@@ -903,14 +877,25 @@ class SchedulerService:
                             title = item.get("title", "")
                             topic = item.get("topic", "")
 
-                            # Build post text
-                            text = await build_news_post(cfg, item, owner_id=owner_id)
-                            if not text:
-                                logger.warning("_job_news_sniper_tick: empty text owner_id=%s channel=%s", owner_id, channel_target)
-                                continue
-
-                            # Apply fabrication cleanup — same rules as main generation pipeline
-                            text, _, _ = _remove_fabricated_refs(text)
+                            api_key = (await get_setting("openrouter_api_key", owner_id=owner_id)) or getattr(cfg, "openrouter_api_key", "")
+                    model = (await get_setting("openrouter_model", owner_id=owner_id)) or getattr(cfg, "openrouter_model", "gpt-4o-mini")
+                    base_url = getattr(cfg, "openrouter_base_url", None)
+                    auto_image = (ch_settings.get("auto_image") or "1").strip() not in ("0", "false", "no")
+                    
+                    news_prompt = f"СРОЧНАЯ НОВОСТЬ: {item.get('title', '')}. Детали: {item.get('summary', '') or item.get('content', '')}"
+                    
+                    payload = await generate_post_payload(
+                        _make_per_owner_cfg(api_key, model, base_url, cfg),
+                        news_prompt,
+                        owner_id=owner_id,
+                        channel_profile_id=int(ch_profile.get("id", 0)),
+                        force_image=auto_image,
+                        generation_path="editor"
+                    )
+                    text = payload.get("text", "")
+                    if not text:
+                        logger.warning("_job_news_sniper_tick: empty text owner_id=%s channel=%s", owner_id, channel_target)
+                        continue
 
                             # Build source metadata JSON
                             news_source_json = build_news_source_meta(item)

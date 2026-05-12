@@ -1,4 +1,5 @@
 from __future__ import annotations
+import web_search
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,7 +17,6 @@ from aiogram.types import FSInputFile
 import db
 from content import generate_post_bundle
 from image_service import get_image, validate_image, trigger_unsplash_download, MODE_AUTOPOST, MODE_EDITOR, _LATIN_TOKEN_RE, ImageResult
-from image_prompts import build_generation_prompt
 from runtime_trace import new_trace_id, trace_text_generation, trace_image_selection, TraceTimer, debug_fields, is_debug_trace_enabled
 from safe_send import safe_send, safe_send_document, safe_send_photo, safe_send_video
 from resolved_subject import resolve_post_subject, check_subject_alignment
@@ -540,11 +540,17 @@ async def generate_post_payload(
     except Exception:
         recent_plan = []
 
+    
+    # --- ВЕБ-ПОИСК АКТУАЛЬНОЙ ИНФЫ ---
+    live_facts = await web_search.get_live_context(channel_topic, effective_prompt)
+    if live_facts:
+        effective_prompt = f"{effective_prompt}\n\n{live_facts}\n(ПРАВИЛА: 1. Опирайся на новости. 2. ИЗБЕГАЙ жесткой конкретики. 3. Пиши про тренды и интересные факты без выдумок.)"
+    # ---------------------------------
     bundle = await generate_post_bundle(
         api_key=config.openrouter_api_key,
         model=config.openrouter_model,
         topic=channel_topic,
-        prompt=prompt,
+        prompt=effective_prompt,
         channel_style=(ch_settings.get("channel_style") or ""),
         content_rubrics=(ch_settings.get("content_rubrics") or ""),
         post_scenarios=(ch_settings.get("post_scenarios") or ""),
@@ -568,12 +574,7 @@ async def generate_post_payload(
 
     # image_prompt from LLM — creative metaphorical English prompt for image generation
     llm_image_prompt = str(bundle.get("image_prompt") or "").strip()
-    if not llm_image_prompt:
-        # Build a heuristic prompt from available context
-        prompt_data = build_generation_prompt(
-            title=title, body=body, channel_topic=channel_topic,
-        )
-        llm_image_prompt = prompt_data["prompt"]
+
 
     image_ref = ""
     post_intent = str(bundle.get("post_intent") or "").strip()
@@ -614,31 +615,7 @@ async def generate_post_payload(
                     get_image(
                         title=title,
                         body=body,
-                        channel_topic=channel_topic,
-                        llm_image_prompt=llm_image_prompt,
-                        api_key=(getattr(config, "llm_image_api_key", "") or getattr(config, "openrouter_image_api_key", "") or getattr(config, "openrouter_api_key", "")),
-                        model=(getattr(config, "llm_image_model", "") or getattr(config, "openrouter_image_model", "") or ""),
-                        base_url=(getattr(config, "llm_image_base_url", "") or getattr(config, "openrouter_image_base_url", "") or getattr(config, "openrouter_base_url", None)),
-                        owner_id=owner_id,
-                        mode=generation_path,
-                        used_refs=used_refs,
-                        text_quality_flagged=text_quality_flagged,
-                        content_mode=str(bundle.get("content_mode") or ""),
-                        channel_style=str(ch_settings.get("channel_style") or ""),
-                        channel_audience=str(ch_settings.get("channel_audience") or ""),
-                        channel_subniche=str(ch_settings.get("content_rubrics") or ""),
-                        onboarding_summary="; ".join(
-                            x for x in [
-                                str(ch_settings.get("author_role_type") or "").strip(),
-                                str(ch_settings.get("author_role_description") or "").strip(),
-                                str(ch_settings.get("author_activities") or "").strip(),
-                            ] if x
-                        ),
-                        content_constraints=str(ch_settings.get("content_constraints") or ""),
-                        content_exclusions=str(ch_settings.get("content_exclusions") or ""),
-                        visual_style=str(ch_settings.get("channel_formats") or ""),
-                        forbidden_visuals=str(ch_settings.get("author_forbidden_claims") or ""),
-                        post_intent=visual_brief or post_intent,
+                        llm_image_prompt=llm_image_prompt
                     ),
                     timeout=45.0,
                 )
