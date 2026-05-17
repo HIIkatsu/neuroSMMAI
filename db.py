@@ -113,7 +113,10 @@ class PGConnWrapper:
         pass
         
     async def rollback(self):
-        pass
+        try:
+            await self.conn.execute("ROLLBACK")
+        except:
+            pass
         
     async def close(self):
         await self.conn.close()

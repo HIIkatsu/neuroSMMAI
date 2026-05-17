@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+import redis.asyncio as redis
 from collections import defaultdict, deque
 import hashlib
 from pathlib import Path
@@ -154,73 +155,34 @@ class CSRFMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 class SimpleRateLimitMiddleware(BaseHTTPMiddleware):
-    """In-memory sliding-window rate limiter.
-
-    Note: Rate limits are per-process and reset on restart.  Without an external
-    store (Redis/Memcached), this is the most practical approach for a single-
-    process deployment.  For multi-process or high-availability setups, a Redis-
-    backed limiter should replace this middleware.
-    """
-    _MAX_TRACKED_IPS = 5000  # evict oldest entries when exceeded
-    _STALE_THRESHOLD_SECONDS = 120.0  # entries older than this are considered stale
-
     def __init__(self, app, read_rpm: int, write_rpm: int):
         super().__init__(app)
         self.read_rpm = max(30, int(read_rpm or 240))
         self.write_rpm = max(20, int(write_rpm or 90))
-        self._hits: dict[tuple[str, str], deque[float]] = defaultdict(deque)
-
-    def _evict_stale_entries(self) -> None:
-        """Remove stale entries to prevent unbounded memory growth."""
-        if len(self._hits) <= self._MAX_TRACKED_IPS:
-            return
-        now = time.monotonic()
-        stale_keys = [k for k, q in self._hits.items() if not q or now - q[-1] > self._STALE_THRESHOLD_SECONDS]
-        for k in stale_keys:
-            del self._hits[k]
-        # If still too many, drop oldest half
-        if len(self._hits) > self._MAX_TRACKED_IPS:
-            keys = list(self._hits.keys())
-            for k in keys[: len(keys) // 2]:
-                del self._hits[k]
+        self.redis_client = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
 
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
         if not path.startswith('/api/'):
             return await call_next(request)
-        self._evict_stale_entries()
-        limit = self.write_rpm if request.method.upper() in {'POST', 'PATCH', 'PUT', 'DELETE'} else self.read_rpm
-        # Use the direct connection IP, not X-Forwarded-For, to prevent clients
-        # from spoofing their IP and bypassing rate limits.
-        # If this service runs behind a trusted reverse proxy (nginx/Traefik),
-        # configure the proxy to set REMOTE_ADDR correctly (e.g. via proxy_protocol
-        # or real_ip_from in nginx) rather than trusting X-Forwarded-For here.
+        
         ip = request.client.host or 'unknown'
-        tg_init_data = (
-            request.headers.get("x-telegram-init-data")
-            or request.headers.get("tg-webapp-data")
-            or ""
-        ).strip()
-        auth_fingerprint = "anon"
-        if tg_init_data:
-            auth_fingerprint = hashlib.sha256(tg_init_data.encode("utf-8")).hexdigest()[:16]
-        key = (
-            f"{ip}:{auth_fingerprint}",
-            'w' if request.method.upper() in {'POST', 'PATCH', 'PUT', 'DELETE'} else 'r',
-        )
-        now = time.monotonic()
-        q = self._hits[key]
-        while q and now - q[0] > 60.0:
-            q.popleft()
-        if len(q) >= limit:
-            return JSONResponse(
-                status_code=429,
-                content={'detail': 'Too many requests'},
-                headers={"Retry-After": "60"},
-            )
-        q.append(now)
+        is_write = request.method.upper() in {'POST', 'PATCH', 'PUT', 'DELETE'}
+        limit = self.write_rpm if is_write else self.read_rpm
+        minute = int(time.time() // 60)
+        key = f"rate_limit:{ip}:{'w' if is_write else 'r'}:{minute}"
+        
+        try:
+            current = await self.redis_client.incr(key)
+            if current == 1:
+                await self.redis_client.expire(key, 120)
+            if current > limit:
+                from fastapi.responses import JSONResponse
+                return JSONResponse(status_code=429, content={'detail': 'Too many requests'}, headers={"Retry-After": "60"})
+        except Exception:
+            pass # Если Redis лег, пропускаем запрос (fail-open)
+            
         return await call_next(request)
-
 
 if cfg.trusted_hosts and cfg.trusted_hosts != ('*',):
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(cfg.trusted_hosts))
@@ -830,7 +792,8 @@ _ALLOWED_ROOT_ASSETS = {
     "styles.css": "text/css; charset=utf-8",
 }
 
-# Compute content hashes at import time for cache-busting ETag headers.
+# Compute content hashes at import time
+import redis.asyncio as redis
 # This ensures browsers fetch fresh assets after every deploy without
 # needing to manually update version strings in HTML.
 _ASSET_ETAGS: dict[str, str] = {}
