@@ -724,10 +724,10 @@ async function animateCardRemoval(card) {
   card.style.willChange = 'opacity, transform, max-height';
   await new Promise(resolve => requestAnimationFrame(resolve));
   card.classList.add('draft-removing');
-  await new Promise(resolve => setTimeout(resolve, 90));
+  await new Promise(resolve => setTimeout(resolve, 220));
   card.classList.add('card-collapsing');
   card.style.maxHeight = '0px';
-  await new Promise(resolve => setTimeout(resolve, 160));
+  await new Promise(resolve => setTimeout(resolve, 220));
 }
 
 function showBusy(message = 'Загрузка…') {
@@ -5920,7 +5920,7 @@ async function createSchedule() {
     }
     closeModal();
     toast('Слот добавлен');
-    await refreshSections(['core'], { silent: true });
+    await refreshSections(['core','schedules'], { silent: true });
     if (!patchAutopostScheduleList()) render();
   } catch (e) {
     state.data.schedules = prevSchedules;
@@ -5936,7 +5936,7 @@ async function deleteSchedule(id) {
     const rowEl = document.querySelector(`[data-slot-id="${Number(id)}"]`);
     if (rowEl) {
       rowEl.classList.add('autopost-slot-removing');
-      await new Promise((resolve) => setTimeout(resolve, 220));
+      await new Promise((resolve) => setTimeout(resolve, 340));
     }
     state.data.schedules = (state.data.schedules || []).filter((x) => Number(x.id) !== Number(id));
     if (!patchAutopostScheduleList()) render();

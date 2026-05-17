@@ -3069,9 +3069,75 @@ async def cleanup_scheduler_dedup(max_age_hours: int = 48) -> int:
         await conn.commit()
         return cur.rowcount or 0
 
-# --- ЗАГЛУШКИ ДЛЯ СТАРОГО ФРОНТЕНДА ---
-async def list_schedules(*args, **kwargs): return []
-async def add_schedule(*args, **kwargs): return {"id": 1}
-async def remove_schedule(*args, **kwargs): return True
-async def get_schedule(*args, **kwargs): return None
+# --- Совместимость: API расписания для фронтенда ---
+async def list_schedules(owner_id: int | None = 0, *, channel_profile_id: int | None = None) -> list[dict]:
+    owner = int(owner_id or 0)
+    pid = int(channel_profile_id or 0)
+    if pid <= 0:
+        active = await get_active_channel_profile(owner_id=owner)
+        pid = int(active.get("id", 0)) if active else 0
+    async with _db_ctx() as db:
+        if pid > 0:
+            cur = await db.execute(
+                "SELECT id, time_hhmm, days, enabled, owner_id, channel_profile_id FROM schedules WHERE owner_id=? AND channel_profile_id=? ORDER BY id ASC",
+                (owner, pid),
+            )
+        else:
+            cur = await db.execute(
+                "SELECT id, time_hhmm, days, enabled, owner_id, channel_profile_id FROM schedules WHERE owner_id=? ORDER BY id ASC",
+                (owner,),
+            )
+        rows = await cur.fetchall()
+    return [{
+        "id": int(r[0]),
+        "time_hhmm": str(r[1] or ""),
+        "days": str(r[2] or "*"),
+        "enabled": int(r[3] if r[3] is not None else 1),
+        "owner_id": int(r[4] or owner),
+        "channel_profile_id": int(r[5] or 0),
+    } for r in rows]
+
+
+async def add_schedule(time_hhmm: str, days: str = "*", enabled: int | bool = 1, *, owner_id: int | None = 0, channel_profile_id: int | None = 0) -> dict:
+    owner = int(owner_id or 0)
+    pid = int(channel_profile_id or 0)
+    async with _db_ctx() as db:
+        cur = await db.execute(
+            "INSERT INTO schedules(time_hhmm, days, enabled, owner_id, channel_profile_id) VALUES(?,?,?,?,?)",
+            (str(time_hhmm or "").strip(), str(days or "*").strip() or "*", 1 if int(enabled or 0) != 0 else 0, owner, pid),
+        )
+        await db.commit()
+        sid = int(cur.lastrowid or 0)
+    return {
+        "id": sid,
+        "time_hhmm": str(time_hhmm or "").strip(),
+        "days": str(days or "*").strip() or "*",
+        "enabled": 1 if int(enabled or 0) != 0 else 0,
+        "owner_id": owner,
+        "channel_profile_id": pid,
+    }
+
+
+async def remove_schedule(schedule_id: int, owner_id: int | None = 0) -> bool:
+    await delete_schedule(schedule_id, owner_id=owner_id)
+    return True
+
+
+async def get_schedule(schedule_id: int, owner_id: int | None = 0) -> dict | None:
+    async with _db_ctx() as db:
+        cur = await db.execute(
+            "SELECT id, time_hhmm, days, enabled, owner_id, channel_profile_id FROM schedules WHERE id=? AND owner_id=? LIMIT 1",
+            (int(schedule_id), int(owner_id or 0)),
+        )
+        r = await cur.fetchone()
+    if not r:
+        return None
+    return {
+        "id": int(r[0]),
+        "time_hhmm": str(r[1] or ""),
+        "days": str(r[2] or "*"),
+        "enabled": int(r[3] if r[3] is not None else 1),
+        "owner_id": int(r[4] or 0),
+        "channel_profile_id": int(r[5] or 0),
+    }
 # --------------------------------------
