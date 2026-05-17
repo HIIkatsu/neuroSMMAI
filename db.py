@@ -23,7 +23,39 @@ async def close_pool() -> None:
         await _pool.close()
 
 def _pg_query(query: str) -> str:
-    res = query
+    def _convert_qmark_params(sql: str) -> str:
+        out: list[str] = []
+        i = 0
+        n = len(sql)
+        idx = 1
+        in_single = False
+        in_double = False
+        while i < n:
+            ch = sql[i]
+            if ch == "'" and not in_double:
+                if in_single and i + 1 < n and sql[i + 1] == "'":
+                    out.append("''")
+                    i += 2
+                    continue
+                in_single = not in_single
+                out.append(ch)
+                i += 1
+                continue
+            if ch == '"' and not in_single:
+                in_double = not in_double
+                out.append(ch)
+                i += 1
+                continue
+            if ch == '?' and not in_single and not in_double:
+                out.append(f"${idx}")
+                idx += 1
+                i += 1
+                continue
+            out.append(ch)
+            i += 1
+        return ''.join(out)
+
+    res = _convert_qmark_params(query)
     res = res.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY")
     res = res.replace("datetime('now')", "to_char(CURRENT_TIMESTAMP, 'YYYY-MM-DD\"T\"HH24:MI:SS')")
     res = res.replace("datetime('now', '-7 day')", "to_char(CURRENT_TIMESTAMP - INTERVAL '7 days', 'YYYY-MM-DD\"T\"HH24:MI:SS')")
@@ -1511,7 +1543,7 @@ async def list_recent_generation_history(owner_id: int | None = 0, limit: int = 
         cur = await db.execute(
             "SELECT id, source, prompt, topic, title, body, cta, short, safety_status, draft_id, created_at FROM generation_history WHERE owner_id=? ORDER BY id DESC LIMIT ?",
             (int(owner_id or 0), int(limit)),
-        )
+        ) 
         rows = await cur.fetchall()
     return [
         {
