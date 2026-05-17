@@ -2873,168 +2873,7 @@ function _computeAutopostStatus(postsEnabled, newsEnabled, postingMode, schedule
   return { html };
 }
 
-function autopostView() {
-  const s = state.data?.settings || {};
-  const postsEnabled = s.posts_enabled === '1';
-  const newsEnabled = s.news_enabled === '1';
-  const postingMode = s.posting_mode || 'both';
-  const interval = s.news_interval_hours || '6';
-  const rows = state.data?.schedules || [];
-  const channel = activeChannel();
-  const channels = state.data?.channels || [];
-  const planCount = (state.data?.plan || []).length;
-  const draftsCount = (state.data?.drafts || []).length;
 
-  // Compute real-time autopost status
-  const statusDetails = _computeAutopostStatus(postsEnabled, newsEnabled, postingMode, rows, channel);
-
-  // Build active sources list
-  const sources = [];
-  if (postingMode === 'both' || postingMode === 'posts') {
-    sources.push({icon: '✦', name: 'ИИ-генерация', desc: 'Автоматические посты по теме канала', active: true});
-  }
-  if ((postingMode === 'both' || postingMode === 'news') && newsEnabled) {
-    sources.push({icon: '📰', name: 'Авто-новости', desc: `Каждые ${interval}ч, ночью — пауза`, active: true});
-  }
-  if (s.source_auto_draft !== '0') {
-    sources.push({icon: '📋', name: 'Черновики из источников', desc: 'Новости и конкуренты → черновики', active: true});
-  }
-  sources.push({icon: '▣', name: 'Контент-план', desc: `${planCount} идей в очереди`, active: planCount > 0});
-  sources.push({icon: '✎', name: 'Готовые черновики', desc: `${draftsCount} черновиков`, active: draftsCount > 0});
-
-  const modeLabel = {both: 'Посты и новости', news: 'Только новости', posts: 'Только посты'}[postingMode] || postingMode;
-
-  // Channel switcher for autopost
-  const channelSwitcherHtml = channels.length > 1 ? `
-    <div class="autopost-channel-switcher">
-      <div class="autopost-channel-label">Канал для автопоста</div>
-      <div class="autopost-channel-chips">
-        ${channels.map(ch => `
-          <button class="autopost-channel-chip ${channel && channel.id === ch.id ? 'active' : ''}"
-                  data-action="activateChannel" data-action-arg="${ch.id}">
-            ${escapeHtml(resolveChannelLabel(ch.title || ch.channel_target || ''))}
-          </button>
-        `).join('')}
-      </div>
-    </div>
-  ` : '';
-
-  return `
-    <div class="stack page-stack-tight autopost-page">
-      <div class="section-head">
-        <div>
-          <div class="section-title">Автопост</div>
-          <div class="section-desc">Единая система публикации — ИИ, план, новости и черновики работают вместе.</div>
-        </div>
-      </div>
-
-      <!-- Master toggle + status -->
-      <div class="autopost-status-card card">
-        <div class="card-inner">
-          <div class="autopost-status-row">
-            <div class="autopost-status-info">
-              <div class="autopost-status-indicator ${postsEnabled ? 'on' : 'off'}">
-                <span class="autopost-status-dot"></span>
-                <span>${postsEnabled ? 'Автопост включён' : 'Автопост выключен'}</span>
-              </div>
-              <div class="autopost-status-meta">
-                ${channel ? `<span>Канал: <strong>${escapeHtml(resolveChannelLabel(channel.title || channel.channel_target || ''))}</strong></span>` : '<span class="text-warn" role="status" aria-label="Требуется выбрать канал">Канал не выбран</span>'}
-                <span>Режим: <strong>${modeLabel}</strong></span>
-              </div>
-              ${statusDetails.html}
-            </div>
-            <label class="switch modern-switch autopost-master-toggle">
-              <input type="checkbox" id="autopost-toggle" ${postsEnabled ? 'checked' : ''} data-change-action="toggleAutopost"/>
-              <span class="switch-ui"></span>
-            </label>
-          </div>
-        </div>
-      </div>
-
-      ${channelSwitcherHtml}
-
-      <!-- Content pipeline -->
-      <div class="autopost-pipeline">
-        <div class="autopost-pipeline-title">Источники контента</div>
-        <div class="autopost-pipeline-grid">
-          ${sources.map(src => `
-            <div class="autopost-pipeline-item ${src.active ? 'active' : 'inactive'}">
-              <span class="autopost-pipeline-icon">${src.icon}</span>
-              <div class="autopost-pipeline-info">
-                <strong>${src.name}</strong>
-                <span>${src.desc}</span>
-              </div>
-              <span class="autopost-pipeline-status">${src.active ? '●' : '○'}</span>
-            </div>
-          `).join('')}
-        </div>
-      </div>
-
-      <!-- Publishing settings -->
-      <div class="autopost-section-group">
-        <div class="autopost-section-label">Режим и параметры</div>
-        <div class="autopost-section-desc">Управление типом и ритмом публикаций</div>
-        <div class="card autopost-settings-card">
-          <div class="card-inner stack">
-            <div class="field">
-              <div class="label">Режим публикации</div>
-              <select class="select" id="ap-posting-mode" data-change-action="updateAutopostMode">
-                ${[['both','Посты и новости'],['news','Только новости'],['posts','Только посты']]
-                  .map(([v,l]) => `<option value="${v}" ${postingMode === v ? 'selected' : ''}>${l}</option>`).join('')}
-              </select>
-            </div>
-            <div class="autopost-pacing">
-              <span class="autopost-pacing-icon">⏱</span>
-              <span>Мин. пауза между постами: <strong>45 мин</strong></span>
-            </div>
-            <div class="autopost-news-settings" style="${(postingMode === 'both' || postingMode === 'news') ? '' : 'display:none'}">
-              <label class="switch modern-switch">
-                <input type="checkbox" id="ap-news-enabled" ${newsEnabled ? 'checked' : ''} data-change-action="toggleAutopostNews"/>
-                <span class="switch-ui"></span><span>Авто-новости</span>
-              </label>
-              <div class="field">
-                <div class="label">Интервал новостей, ч</div>
-                <input class="input" id="ap-news-interval" value="${escapeHtml(interval)}" type="number" min="1" max="48"/>
-              </div>
-              <button class="btn primary autopost-save-btn" data-action="saveAutopostInterval">Сохранить интервал</button>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Schedule slots -->
-      <div class="autopost-section-group">
-        <div class="autopost-section-label-row">
-          <div class="autopost-section-label">Расписание</div>
-          <button class="btn primary small" data-action="openScheduleModal">+ Слот</button>
-        </div>
-        <div class="autopost-section-desc">${rows.length ? `${rows.length} слотов настроено` : 'Нет активных слотов'}</div>
-        <div class="autopost-schedule-section">
-          <div class="list">
-            ${rows.length ? rows.map(row => `
-              <div class="autopost-slot-card">
-                <div class="autopost-slot-main">
-                  <div class="autopost-slot-time">${escapeHtml(row.time_hhmm)}</div>
-                  <div class="autopost-slot-days">${escapeHtml(row.days_label || row.days || '*')}</div>
-                </div>
-                <button class="btn small danger" data-action="deleteSchedule" data-action-arg="${row.id}">Удалить</button>
-              </div>`).join('') : '<div class="autopost-empty-state">Добавьте слоты — бот будет публиковать в указанное время.</div>'}
-          </div>
-        </div>
-      </div>
-
-      <!-- Detailed settings -->
-      <div class="autopost-section-group">
-        <div class="autopost-section-label">Расширенные настройки</div>
-        <div class="autopost-section-desc">Тонкая настройка канала и параметров</div>
-        <button class="autopost-full-settings-btn" data-action="openSettingsModal">
-          <span>⚙ Все настройки канала</span>
-          <span class="autopost-full-settings-arrow">›</span>
-        </button>
-      </div>
-    </div>
-  `;
-}
 
 async function toggleAutopost(enabled) {
   try {
@@ -4506,8 +4345,6 @@ async function deleteDraft(id) {
   if (state.pendingDeletedDraftIds.has(draftId)) return;
   removeDraftFromState(draftId);
   state.pendingDeletedDraftIds.add(draftId);
-  const card = document.querySelector(`[data-draft-id="${draftId}"]`);
-  if (card) await animateCardRemoval(card);
   render();
   try {
     await api(`/api/drafts/${draftId}`, { method: 'DELETE' });
@@ -4719,19 +4556,18 @@ async function deleteInboxMedia(itemId) {
 }
 
 function openPlanGenerator() {
-  const today = new Date().toISOString().slice(0, 10);
   modal('Генерация контент-плана', `
-    <div class="pretty-modal-shell"><div class="grid-2">
-      <div class="field"><div class="label">Стартовая дата</div><input class="input pretty-input" id="pg-date" type="date" value="${today}"></div>
-      <div class="field"><div class="label">Время первого поста</div><input class="input pretty-input ios-wheel-input" id="pg-time" type="time" value="10:00"></div>
+    <div class="grid-2">
+      <div class="field"><div class="label">Стартовая дата</div><input class="input" id="pg-date" type="date"></div>
+      <div class="field"><div class="label">Время первого поста</div><input class="input" id="pg-time" type="time" value="10:00"></div>
     </div>
     <div class="grid-2">
-      <div class="field"><div class="label">Сколько дней</div><select class="select pretty-input" id="pg-days">${[7,14,30,60].map(v => `<option value="${v}">${v}</option>`).join('')}</select></div>
-      <div class="field"><div class="label">Постов в день</div><select class="select pretty-input" id="pg-ppd">${[1,2,3].map(v => `<option value="${v}">${v}</option>`).join('')}</select></div>
+      <div class="field"><div class="label">Сколько дней</div><select class="select" id="pg-days">${[7,14,30,60].map(v => `<option value="${v}">${v}</option>`).join('')}</select></div>
+      <div class="field"><div class="label">Постов в день</div><select class="select" id="pg-ppd">${[1,2,3].map(v => `<option value="${v}">${v}</option>`).join('')}</select></div>
     </div>
-    <div class="field"><div class="label">Тема</div><textarea class="textarea pretty-input" id="pg-topic">${escapeHtml(state.data?.settings?.topic || '')}</textarea></div>
+    <div class="field"><div class="label">Тема</div><textarea class="textarea" id="pg-topic">${escapeHtml(state.data?.settings?.topic || '')}</textarea></div>
     <div class="note">План теперь опирается на onboarding: аудиторию, стиль, режим, форматы и ограничения. Здесь лучше менять только тему, если нужен отдельный цикл публикаций.</div>
-    <label class="switch pretty-switch"><input type="checkbox" id="pg-clear" checked> <span>Очистить старый непубликованный план</span></label></div>
+    <label class="switch"><input type="checkbox" id="pg-clear" checked> <span>Очистить старый непубликованный план</span></label>
   `, `<button class="btn primary" data-action="generatePlan">Создать план</button>`);
 }
 
@@ -4764,9 +4600,9 @@ async function generatePlan() {
 function openPlanEditor(itemId = null) {
   const item = itemId ? (state.data?.plan || []).find(p => Number(p.id) === Number(itemId)) : null;
   modal(item ? 'Редактировать элемент плана' : 'Новый элемент плана', `
-    <div class="pretty-modal-shell"><div class="field"><div class="label">Дата и время</div><input class="input pretty-input" id="pl-dt" type="datetime-local" value="${escapeHtml(item?.dt ? String(item.dt).replace(' ', 'T').slice(0,16) : '')}"></div>
-    <div class="field"><div class="label">Текст / идея публикации</div><textarea class="textarea pretty-input" id="pl-prompt">${escapeHtml(item?.prompt || item?.topic || '')}</textarea></div>
-    <div class="note">Достаточно заполнить поле идеи. Бот сам сгенерирует полноценный пост к нужной дате.</div></div>
+    <div class="field"><div class="label">Дата и время</div><input class="input" id="pl-dt" type="datetime-local" value="${escapeHtml(item?.dt ? String(item.dt).replace(' ', 'T').slice(0,16) : '')}"></div>
+    <div class="field"><div class="label">Текст / идея публикации</div><textarea class="textarea" id="pl-prompt">${escapeHtml(item?.prompt || item?.topic || '')}</textarea></div>
+    <div class="note">Достаточно заполнить поле идеи. Бот сам сгенерирует полноценный пост к нужной дате.</div>
   `, item ? `<button class="btn primary" data-action="savePlanItem" data-action-arg="${item.id}">Сохранить</button>` : `<button class="btn primary" data-action="createPlanItem">Создать</button>`);
 }
 
@@ -4831,54 +4667,20 @@ async function deletePlanItem(id) {
     await api(`/api/plan/${itemId}`, { method: 'DELETE' });
     state.pendingDeletedPlanIds.delete(itemId);
     toast('Элемент плана удалён окончательно');
-    await refreshSections(['core','plan'], { silent: true });
+    await refreshSections(['core','plan'], { silent: false });
   } catch (e) {
     state.pendingDeletedPlanIds.delete(itemId);
     restorePlanToState(removed);
     toast(e.message || 'Не удалось удалить элемент плана');
-    await refreshSections(['core','plan'], { silent: true });
+    await refreshSections(['core','plan'], { silent: false });
   }
 }
 
-function openScheduleModal() {
-  const dayOptions = [['mon','Пн'],['tue','Вт'],['wed','Ср'],['thu','Чт'],['fri','Пт'],['sat','Сб'],['sun','Вс']];
-  modal('Новый слот расписания', `
-    <div class="pretty-modal-shell"><div class="field"><div class="label">Время публикации</div><input class="input pretty-input ios-wheel-input" id="sc-time" type="time" value="10:00"></div>
-    <div class="field"><div class="label">Дни публикации</div><div class="weekday-picker">${dayOptions.map(([id, title]) => `<label class="weekday-chip"><input type="checkbox" value="${id}" data-schedule-day checked><span>${title}</span></label>`).join('')}</div></div>
-    <div class="note">Выбери дни недели и время. Слот сохранится в автопостинг.</div></div>
-  `, `<button class="btn primary" data-action="createSchedule">Сохранить</button>`);
-}
 
-async function createSchedule() {
-  try {
-    const selectedDays = [...document.querySelectorAll('[data-schedule-day]:checked')].map(el => String(el.value || '').trim()).filter(Boolean);
-    const days = selectedDays.length === 7 ? '*' : selectedDays.join(',');
-    await api('/api/schedules', {
-      method: 'POST',
-      body: JSON.stringify({
-        time_hhmm: document.getElementById('sc-time').value,
-        days,
-      })
-    });
-    closeModal();
-    toast('Слот добавлен');
-    await refreshSections(['core','schedules'], { silent: false });
-    switchTab('autopost');
-  } catch (e) {
-    if (e.status !== 402) toast(e.message);
-  }
-}
 
-async function deleteSchedule(id) {
-  if (!confirmAction('Удалить слот?')) return;
-  try {
-    await api(`/api/schedules/${id}`, { method: 'DELETE' });
-    toast('Слот удалён');
-    await refreshSections(['schedules','core'], { silent: false });
-  } catch (e) {
-    toast(e.message);
-  }
-}
+
+
+
 
 
 
@@ -5584,6 +5386,121 @@ async function runNewsSniperNow() {
   }
 }
 
+
+function autopostView() {
+  const s = state.data?.settings || {};
+  const postsEnabled = s.posts_enabled === '1';
+  const newsEnabled = s.news_enabled === '1';
+  const postingMode = s.posting_mode || 'both';
+  const interval = s.news_interval_hours || '6';
+  const channel = activeChannel();
+  const channels = state.data?.channels || [];
+  const planCount = (state.data?.plan || []).length;
+
+  let slots = [];
+  try { slots = JSON.parse(s.autopost_slots || '[]'); } catch(e){}
+  slots.sort();
+
+  const sources = [];
+  if (postingMode === 'both' || postingMode === 'posts') sources.push({icon: '✦', name: 'ИИ-генерация', desc: 'Автоматические посты по теме канала', active: true});
+  if ((postingMode === 'both' || postingMode === 'news') && newsEnabled) sources.push({icon: '📰', name: 'Авто-новости', desc: `Каждые ${interval}ч`, active: true});
+  if (s.source_auto_draft !== '0') sources.push({icon: '📋', name: 'Черновики из источников', desc: 'Новости и конкуренты → черновики', active: true});
+  sources.push({icon: '▣', name: 'Контент-план', desc: `${planCount} идей в очереди`, active: planCount > 0});
+
+  const modeLabel = {both: 'Посты и новости', news: 'Только новости', posts: 'Только посты'}[postingMode] || postingMode;
+
+  const channelSwitcherHtml = channels.length > 1 ? `
+    <div class="autopost-channel-switcher">
+      <div class="autopost-channel-label">Канал для автопоста</div>
+      <div class="autopost-channel-chips">
+        ${channels.map(ch => `
+          <button class="autopost-channel-chip ${channel && channel.id === ch.id ? 'active' : ''}"
+                  data-action="activateChannel" data-action-arg="${ch.id}">
+            ${escapeHtml(resolveChannelLabel(ch.title || ch.channel_target || ''))}
+          </button>
+        `).join('')}
+      </div>
+    </div>
+  ` : '';
+
+  return `
+    <div class="stack page-stack-tight autopost-page">
+      <div class="section-head">
+        <div>
+          <div class="section-title">Автопостинг</div>
+          <div class="section-desc">Единая система публикации контента.</div>
+        </div>
+      </div>
+      
+      <div class="autopost-status-card card">
+        <div class="card-inner">
+          <div class="autopost-status-row">
+            <div class="autopost-status-info">
+              <div class="autopost-status-indicator ${postsEnabled ? 'on' : 'off'}">
+                <span class="autopost-status-dot"></span>
+                <span>${postsEnabled ? 'Автопост включён' : 'Автопост выключен'}</span>
+              </div>
+              <div class="autopost-status-meta">
+                ${channel ? `<span>Канал: <strong>${escapeHtml(resolveChannelLabel(channel.title || channel.channel_target || ''))}</strong></span>` : '<span class="text-warn">Канал не выбран</span>'}
+                <span>Режим: <strong>${modeLabel}</strong></span>
+              </div>
+            </div>
+            <label class="switch modern-switch autopost-master-toggle">
+              <input type="checkbox" id="autopost-toggle" ${postsEnabled ? 'checked' : ''} data-change-action="toggleAutopost"/>
+              <span class="switch-ui"></span>
+            </label>
+          </div>
+        </div>
+      </div>
+
+      ${channelSwitcherHtml}
+
+      <div class="card">
+        <div class="card-inner stack">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+            <div>
+              <div style="font-weight: 600; font-size: 1.05em;">Время выхода постов</div>
+              <div style="font-size: 0.85em; color: var(--text-muted);">Каждый день в указанное время бот публикует пост</div>
+            </div>
+            <button class="btn primary small" data-action="openScheduleModal">+ Добавить время</button>
+          </div>
+          <div class="list" style="margin-top: 8px;">
+            ${slots.length ? slots.map(t => `
+              <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px; background: var(--bg-sec); border-radius: 8px; margin-bottom: 6px;">
+                <div style="font-size: 1.2em; font-weight: 600;">${escapeHtml(t)}</div>
+                <button class="btn small danger" data-action="deleteSchedule" data-action-arg="${escapeHtml(t)}">Удалить</button>
+              </div>`).join('') : '<div style="padding: 12px; text-align: center; color: var(--text-muted); font-size: 0.9em; border: 1px dashed var(--border); border-radius: 8px;">Время не добавлено.</div>'}
+          </div>
+        </div>
+      </div>
+
+      <div class="autopost-pipeline">
+        <div class="autopost-pipeline-title">Источники контента</div>
+        <div class="autopost-pipeline-grid">
+          ${sources.map(src => `
+            <div class="autopost-pipeline-item ${src.active ? 'active' : 'inactive'}">
+              <span class="autopost-pipeline-icon">${src.icon}</span>
+              <div class="autopost-pipeline-info">
+                <strong>${src.name}</strong>
+                <span>${src.desc}</span>
+              </div>
+              <span class="autopost-pipeline-status">${src.active ? '●' : '○'}</span>
+            </div>
+          `).join('')}
+        </div>
+      </div>
+      
+    </div>
+  `;
+}
+
+
+
+
+
+
+
+
 window.switchTab = switchTab;
 window.openDraftEditor = openDraftEditor;
 window.openGenerateDraftModal = openGenerateDraftModal;
@@ -5877,3 +5794,116 @@ window.addEventListener("load", ()=>{
         };
     }
 })();
+
+function openScheduleModal() {
+  window._tempHour = '12';
+  window._tempMin = '00';
+  
+  const hours = [8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23].map(h => {
+    const hs = h.toString().padStart(2, '0');
+    return `<button class="btn small ${hs==='12'?'primary':'ghost'} sc-hour-btn" data-val="${hs}" onclick="window.setCustomTimeHour('${hs}')" style="flex: 1; min-width: 45px; padding: 10px 0; font-weight: 600; border-radius: 10px; font-size: 1.1em;">${hs}</button>`;
+  }).join('');
+  
+  const mins = ['00','15','30','45'].map(m => {
+    return `<button class="btn small ${m==='00'?'primary':'ghost'} sc-min-btn" data-val="${m}" onclick="window.setCustomTimeMin('${m}')" style="flex: 1; min-width: 60px; padding: 10px 0; font-weight: 600; border-radius: 10px; font-size: 1.1em;">${m}</button>`;
+  }).join('');
+
+  const body = `
+    <div class="stack" style="margin-bottom: 8px;">
+      <div class="field">
+        <div class="label" style="font-size: 1.05em; font-weight: 600; margin-bottom: 12px; color: var(--text-main);">1. Выберите час</div>
+        <div style="display:flex; flex-wrap:wrap; gap:8px;">${hours}</div>
+      </div>
+      <div class="field" style="margin-top:16px;">
+        <div class="label" style="font-size: 1.05em; font-weight: 600; margin-bottom: 12px; color: var(--text-main);">2. Выберите минуты</div>
+        <div style="display:flex; flex-wrap:wrap; gap:8px;">${mins}</div>
+      </div>
+      <div class="note" style="margin-top:20px; font-size: 0.95em; color: var(--text-muted); text-align: center; background: var(--bg-sec); padding: 12px; border-radius: 12px;">
+        Время выхода поста: <b id="sc-preview-time" style="font-size: 1.3em; color: var(--text-main); margin-left: 8px;">12:00</b>
+      </div>
+    </div>
+  `;
+
+  modal('Добавить время', body, `<button class="btn primary" style="width: 100%; border-radius: 12px; padding: 14px; font-size: 1.1em; font-weight: 600;" data-action="createSchedule">Сохранить расписание</button>`);
+}
+
+window.setCustomTimeHour = function(h) {
+  window._tempHour = h;
+  document.querySelectorAll('.sc-hour-btn').forEach(b => {
+    b.className = b.dataset.val === h ? 'btn small primary sc-hour-btn' : 'btn small ghost sc-hour-btn';
+    b.style.fontWeight = '600'; b.style.borderRadius = '10px'; b.style.fontSize = '1.1em'; b.style.padding = '10px 0';
+  });
+  window._updateCustomTimePreview();
+};
+
+window.setCustomTimeMin = function(m) {
+  window._tempMin = m;
+  document.querySelectorAll('.sc-min-btn').forEach(b => {
+    b.className = b.dataset.val === m ? 'btn small primary sc-min-btn' : 'btn small ghost sc-min-btn';
+    b.style.fontWeight = '600'; b.style.borderRadius = '10px'; b.style.fontSize = '1.1em'; b.style.padding = '10px 0';
+  });
+  window._updateCustomTimePreview();
+};
+
+window._updateCustomTimePreview = function() {
+  const el = document.getElementById('sc-preview-time');
+  if (el) el.textContent = `${window._tempHour}:${window._tempMin}`;
+};
+
+async function createSchedule() {
+  const timeVal = `${window._tempHour || '12'}:${window._tempMin || '00'}`;
+  const s = state.data?.settings || {};
+  let slots = [];
+  try { slots = JSON.parse(s.autopost_slots || '[]'); } catch(e){}
+  if (slots.includes(timeVal)) {
+      closeModal();
+      return toast('Это время уже добавлено');
+  }
+  slots.push(timeVal);
+  slots.sort();
+
+  // МОМЕНТАЛЬНОЕ ОБНОВЛЕНИЕ ИНТЕРФЕЙСА (Оптимистичный UI)
+  if (!state.data.settings) state.data.settings = {};
+  state.data.settings.autopost_slots = JSON.stringify(slots);
+  
+  closeModal();
+  toast('Время ' + timeVal + ' добавлено');
+  
+  const surface = document.querySelector('.main-surface');
+  if (surface && state.activeTab === 'autopost') {
+    surface.innerHTML = `<div class="tab-enter">${renderBody()}</div>`;
+  }
+
+  // Фоновая отправка на сервер
+  try {
+    await api('/api/settings', {
+      method: 'PATCH',
+      body: JSON.stringify({ autopost_slots: JSON.stringify(slots) })
+    });
+  } catch (e) { toast('Ошибка сервера: ' + e.message); }
+}
+
+async function deleteSchedule(timeStr) {
+  if (!confirmAction(`Удалить публикацию в ${timeStr}?`)) return;
+  const s = state.data?.settings || {};
+  let slots = [];
+  try { slots = JSON.parse(s.autopost_slots || '[]'); } catch(e){}
+  slots = slots.filter(t => t !== timeStr);
+
+  // МОМЕНТАЛЬНОЕ ОБНОВЛЕНИЕ ИНТЕРФЕЙСА
+  if (!state.data.settings) state.data.settings = {};
+  state.data.settings.autopost_slots = JSON.stringify(slots);
+
+  const surface = document.querySelector('.main-surface');
+  if (surface && state.activeTab === 'autopost') {
+    surface.innerHTML = `<div class="tab-enter">${renderBody()}</div>`;
+  }
+
+  try {
+    await api('/api/settings', {
+      method: 'PATCH',
+      body: JSON.stringify({ autopost_slots: JSON.stringify(slots) })
+    });
+    toast('Время удалено');
+  } catch (e) { toast('Ошибка сервера: ' + e.message); }
+}
