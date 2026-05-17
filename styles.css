@@ -5440,13 +5440,13 @@ body.modal-open {
   font-weight: 600;
 }
 .autopost-slot-removing {
-  opacity: 0;
-  transform: translateY(-4px) scale(.985);
-  max-height: 0;
-  margin: 0;
-  padding-top: 0;
-  padding-bottom: 0;
+  animation: slot-remove-fade .34s cubic-bezier(.18,.74,.2,1) forwards;
   overflow: hidden;
+}
+@keyframes slot-remove-fade {
+  0% { opacity: 1; transform: translateY(0) scale(1); max-height: 64px; margin-bottom: 6px; }
+  45% { opacity: .82; transform: translateY(-3px) scale(.992); }
+  100% { opacity: 0; transform: translateY(-12px) scale(.96); max-height: 0; margin-bottom: 0; padding-top: 0; padding-bottom: 0; border-width: 0; }
 }
 .autopost-empty-state {
   font-size: 12px;
@@ -6553,8 +6553,8 @@ body {
 .editor-footer-pair .btn { flex: 1 1 50% !important; margin: 0 !important; width: 100% !important; }
 
 /* 5. TOAST (Генерация) */
-#gen-toast { position: fixed !important; top: -100px; left: 50% !important; transform: translateX(-50%) !important; width: calc(100% - 32px) !important; max-width: 400px !important; background: rgba(17, 24, 42, 0.98) !important; border: 1px solid rgba(0, 212, 170, 0.2) !important; border-left: 4px solid #00d4aa !important; border-radius: 16px !important; padding: 16px 20px !important; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.6), 0 0 24px rgba(0, 212, 170, 0.08) !important; z-index: 2147483647 !important; display: flex !important; flex-direction: column !important; gap: 8px !important; transition: top 0.4s cubic-bezier(0.32, 0.72, 0, 1) !important; pointer-events: none !important; }
-#gen-toast.show { top: 20px !important; }
+#gen-toast { position: fixed !important; top: -100px; left: 50% !important; width: calc(100% - 32px) !important; max-width: 420px !important; background: linear-gradient(160deg, rgba(17,24,42,.97), rgba(23,32,54,.96)) !important; border: 1px solid rgba(255, 255, 255, 0.14) !important; border-radius: 16px !important; padding: 16px 20px !important; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.6), 0 0 24px rgba(0, 212, 170, 0.08) !important; z-index: 2147483647 !important; display: flex !important; flex-direction: column !important; gap: 8px !important; transition: top 0.42s cubic-bezier(0.22, 0.79, 0.2, 1), opacity 0.28s ease, transform 0.42s cubic-bezier(0.22, 0.79, 0.2, 1) !important; opacity: 0 !important; transform: translateX(-50%) translateY(-10px) scale(0.98) !important; pointer-events: none !important; backdrop-filter: blur(10px) saturate(1.2) !important; }
+#gen-toast.show { top: 20px !important; opacity: 1 !important; transform: translateX(-50%) translateY(0) scale(1) !important; box-shadow: 0 18px 42px rgba(0, 0, 0, 0.62), 0 0 0 1px rgba(77,124,255,.12), 0 0 34px rgba(77,124,255,0.24), 0 0 18px rgba(0, 212, 170, 0.18) !important; }
 #gen-toast-header { display: flex !important; align-items: center !important; justify-content: space-between !important; width: 100% !important;}
 #gen-toast-title { font-size: 14px !important; font-weight: 700 !important; color: #fff !important; margin: 0 !important; }
 #gen-toast-percent { font-size: 13px !important; font-weight: 800 !important; color: #00d4aa !important; margin: 0 !important; }
@@ -6633,5 +6633,6 @@ body {
 .day-chip-row{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:8px}
 .day-chip{border:1px solid var(--border);background:var(--bg-sec);color:var(--text-main);border-radius:12px;padding:8px 6px;font-weight:700}
 .day-chip.active{background:linear-gradient(135deg,#6d5efc,#31d0ff);color:#fff;border-color:transparent;box-shadow:0 8px 18px rgba(75,99,255,.28)}
-.draft-removing{opacity:0;transform:translateY(-6px) scale(.98);transition:opacity .18s ease,transform .18s ease}
+.draft-removing{animation:draft-remove-fade .28s cubic-bezier(.2,.74,.2,1) forwards}
+@keyframes draft-remove-fade{0%{opacity:1;transform:translateY(0) scale(1)}55%{opacity:.72;transform:translateY(-4px) scale(.992)}100%{opacity:0;transform:translateY(-14px) scale(.965)}}
 .card-collapsing{transition:max-height .34s cubic-bezier(.2,.7,.25,1),margin .34s ease,padding .34s ease;border-width:0!important;margin:0!important;padding-top:0!important;padding-bottom:0!important}
