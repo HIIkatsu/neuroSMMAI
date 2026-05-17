@@ -4506,6 +4506,8 @@ async function deleteDraft(id) {
   if (state.pendingDeletedDraftIds.has(draftId)) return;
   removeDraftFromState(draftId);
   state.pendingDeletedDraftIds.add(draftId);
+  const card = document.querySelector(`[data-draft-id="${draftId}"]`);
+  if (card) await animateCardRemoval(card);
   render();
   try {
     await api(`/api/drafts/${draftId}`, { method: 'DELETE' });
@@ -4717,18 +4719,19 @@ async function deleteInboxMedia(itemId) {
 }
 
 function openPlanGenerator() {
+  const today = new Date().toISOString().slice(0, 10);
   modal('Генерация контент-плана', `
-    <div class="grid-2">
-      <div class="field"><div class="label">Стартовая дата</div><input class="input" id="pg-date" type="date"></div>
-      <div class="field"><div class="label">Время первого поста</div><input class="input" id="pg-time" type="time" value="10:00"></div>
+    <div class="pretty-modal-shell"><div class="grid-2">
+      <div class="field"><div class="label">Стартовая дата</div><input class="input pretty-input" id="pg-date" type="date" value="${today}"></div>
+      <div class="field"><div class="label">Время первого поста</div><input class="input pretty-input ios-wheel-input" id="pg-time" type="time" value="10:00"></div>
     </div>
     <div class="grid-2">
-      <div class="field"><div class="label">Сколько дней</div><select class="select" id="pg-days">${[7,14,30,60].map(v => `<option value="${v}">${v}</option>`).join('')}</select></div>
-      <div class="field"><div class="label">Постов в день</div><select class="select" id="pg-ppd">${[1,2,3].map(v => `<option value="${v}">${v}</option>`).join('')}</select></div>
+      <div class="field"><div class="label">Сколько дней</div><select class="select pretty-input" id="pg-days">${[7,14,30,60].map(v => `<option value="${v}">${v}</option>`).join('')}</select></div>
+      <div class="field"><div class="label">Постов в день</div><select class="select pretty-input" id="pg-ppd">${[1,2,3].map(v => `<option value="${v}">${v}</option>`).join('')}</select></div>
     </div>
-    <div class="field"><div class="label">Тема</div><textarea class="textarea" id="pg-topic">${escapeHtml(state.data?.settings?.topic || '')}</textarea></div>
+    <div class="field"><div class="label">Тема</div><textarea class="textarea pretty-input" id="pg-topic">${escapeHtml(state.data?.settings?.topic || '')}</textarea></div>
     <div class="note">План теперь опирается на onboarding: аудиторию, стиль, режим, форматы и ограничения. Здесь лучше менять только тему, если нужен отдельный цикл публикаций.</div>
-    <label class="switch"><input type="checkbox" id="pg-clear" checked> <span>Очистить старый непубликованный план</span></label>
+    <label class="switch pretty-switch"><input type="checkbox" id="pg-clear" checked> <span>Очистить старый непубликованный план</span></label></div>
   `, `<button class="btn primary" data-action="generatePlan">Создать план</button>`);
 }
 
@@ -4761,9 +4764,9 @@ async function generatePlan() {
 function openPlanEditor(itemId = null) {
   const item = itemId ? (state.data?.plan || []).find(p => Number(p.id) === Number(itemId)) : null;
   modal(item ? 'Редактировать элемент плана' : 'Новый элемент плана', `
-    <div class="field"><div class="label">Дата и время</div><input class="input" id="pl-dt" type="datetime-local" value="${escapeHtml(item?.dt ? String(item.dt).replace(' ', 'T').slice(0,16) : '')}"></div>
-    <div class="field"><div class="label">Текст / идея публикации</div><textarea class="textarea" id="pl-prompt">${escapeHtml(item?.prompt || item?.topic || '')}</textarea></div>
-    <div class="note">Достаточно заполнить поле идеи. Бот сам сгенерирует полноценный пост к нужной дате.</div>
+    <div class="pretty-modal-shell"><div class="field"><div class="label">Дата и время</div><input class="input pretty-input" id="pl-dt" type="datetime-local" value="${escapeHtml(item?.dt ? String(item.dt).replace(' ', 'T').slice(0,16) : '')}"></div>
+    <div class="field"><div class="label">Текст / идея публикации</div><textarea class="textarea pretty-input" id="pl-prompt">${escapeHtml(item?.prompt || item?.topic || '')}</textarea></div>
+    <div class="note">Достаточно заполнить поле идеи. Бот сам сгенерирует полноценный пост к нужной дате.</div></div>
   `, item ? `<button class="btn primary" data-action="savePlanItem" data-action-arg="${item.id}">Сохранить</button>` : `<button class="btn primary" data-action="createPlanItem">Создать</button>`);
 }
 
@@ -4828,30 +4831,33 @@ async function deletePlanItem(id) {
     await api(`/api/plan/${itemId}`, { method: 'DELETE' });
     state.pendingDeletedPlanIds.delete(itemId);
     toast('Элемент плана удалён окончательно');
-    await refreshSections(['core','plan'], { silent: false });
+    await refreshSections(['core','plan'], { silent: true });
   } catch (e) {
     state.pendingDeletedPlanIds.delete(itemId);
     restorePlanToState(removed);
     toast(e.message || 'Не удалось удалить элемент плана');
-    await refreshSections(['core','plan'], { silent: false });
+    await refreshSections(['core','plan'], { silent: true });
   }
 }
 
 function openScheduleModal() {
+  const dayOptions = [['mon','Пн'],['tue','Вт'],['wed','Ср'],['thu','Чт'],['fri','Пт'],['sat','Сб'],['sun','Вс']];
   modal('Новый слот расписания', `
-    <div class="field"><div class="label">Время</div><input class="input" id="sc-time" type="time"></div>
-    <div class="field"><div class="label">Дни</div><input class="input" id="sc-days" value="*" placeholder="* или mon,tue,fri"></div>
-    <div class="note">Укажи <b>*</b> для каждого дня или список через запятую: mon,tue,wed...</div>
+    <div class="pretty-modal-shell"><div class="field"><div class="label">Время публикации</div><input class="input pretty-input ios-wheel-input" id="sc-time" type="time" value="10:00"></div>
+    <div class="field"><div class="label">Дни публикации</div><div class="weekday-picker">${dayOptions.map(([id, title]) => `<label class="weekday-chip"><input type="checkbox" value="${id}" data-schedule-day checked><span>${title}</span></label>`).join('')}</div></div>
+    <div class="note">Выбери дни недели и время. Слот сохранится в автопостинг.</div></div>
   `, `<button class="btn primary" data-action="createSchedule">Сохранить</button>`);
 }
 
 async function createSchedule() {
   try {
+    const selectedDays = [...document.querySelectorAll('[data-schedule-day]:checked')].map(el => String(el.value || '').trim()).filter(Boolean);
+    const days = selectedDays.length === 7 ? '*' : selectedDays.join(',');
     await api('/api/schedules', {
       method: 'POST',
       body: JSON.stringify({
         time_hhmm: document.getElementById('sc-time').value,
-        days: document.getElementById('sc-days').value,
+        days,
       })
     });
     closeModal();
