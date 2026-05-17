@@ -214,6 +214,7 @@ const state = {
   editorHistory: { undo: [], redo: [], lastCapturedHash: '' },
   pendingDeletedDraftIds: new Set(),
   pendingDeletedPlanIds: new Set(),
+  pendingDeletedScheduleIds: new Set(),
   analyticsPeriod: '7d',
 };
 
@@ -5468,7 +5469,7 @@ function autopostView() {
           </div>
           <div class="list" style="margin-top: 8px;">
             ${slots.length ? slots.map(slt => `
-              <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px; background: var(--bg-sec); border-radius: 8px; margin-bottom: 6px;">
+              <div class="autopost-slot-row ${state.pendingDeletedScheduleIds.has(Number(slt.id)) ? 'is-removing' : ''}" style="display: flex; justify-content: space-between; align-items: center; padding: 10px; background: var(--bg-sec); border-radius: 8px; margin-bottom: 6px;">
                 <div style="font-size: 1.1em; font-weight: 600;">${escapeHtml(slt.time)} <span style="font-size:.75em;color:var(--text-muted);font-weight:500;">· ${escapeHtml((slt.days || 'all').toUpperCase())}</span></div>
                 <button class="btn small danger" data-action="deleteSchedule" data-action-arg="${slt.id}">Удалить</button>
               </div>`).join('') : '<div style="padding: 12px; text-align: center; color: var(--text-muted); font-size: 0.9em; border: 1px dashed var(--border); border-radius: 8px;">Время не добавлено.</div>'}
@@ -5800,58 +5801,67 @@ window.addEventListener("load", ()=>{
 function openScheduleModal() {
   window._tempHour = '12';
   window._tempMin = '00';
-  window._tempDays = ['mon','tue','wed','thu','fri'];
-  
-  const hours = [8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23].map(h => {
-    const hs = h.toString().padStart(2, '0');
-    return `<button class="btn small ${hs==='12'?'primary':'ghost'} sc-hour-btn" data-val="${hs}" onclick="window.setCustomTimeHour('${hs}')" style="flex: 1; min-width: 45px; padding: 10px 0; font-weight: 600; border-radius: 10px; font-size: 1.1em;">${hs}</button>`;
-  }).join('');
-  
-  const mins = ['00','15','30','45'].map(m => {
-    return `<button class="btn small ${m==='00'?'primary':'ghost'} sc-min-btn" data-val="${m}" onclick="window.setCustomTimeMin('${m}')" style="flex: 1; min-width: 60px; padding: 10px 0; font-weight: 600; border-radius: 10px; font-size: 1.1em;">${m}</button>`;
-  }).join('');
-
+  window._tempDays = ['mon', 'tue', 'wed', 'thu', 'fri'];
+  const hourValues = Array.from({ length: 24 }, (_, i) => String(i).padStart(2, '0'));
+  const minValues = Array.from({ length: 60 }, (_, i) => String(i).padStart(2, '0'));
   const dayItems = [
-    ['mon','Пн'],['tue','Вт'],['wed','Ср'],['thu','Чт'],['fri','Пт'],['sat','Сб'],['sun','Вс']
-  ].map(([key,label]) => `<button class="day-chip ${window._tempDays.includes(key) ? 'active' : ''}" type="button" data-day="${key}" onclick="window.toggleScheduleDay('${key}')">${label}</button>`).join('');
+    ['mon', 'Пн'], ['tue', 'Вт'], ['wed', 'Ср'], ['thu', 'Чт'], ['fri', 'Пт'], ['sat', 'Сб'], ['sun', 'Вс']
+  ].map(([key, label]) => `<button class="day-chip ${window._tempDays.includes(key) ? 'active' : ''}" type="button" data-day="${key}">${label}</button>`).join('');
+
   const body = `
-    <div class="stack schedule-modal-content" style="margin-bottom: 8px;">
+    <div class="stack schedule-modal-content schedule-modal-modern">
       <div class="field">
-        <div class="label" style="font-size: 1.05em; font-weight: 600; margin-bottom: 12px; color: var(--text-main);">1. Выберите час</div>
-        <div style="display:flex; flex-wrap:wrap; gap:8px;">${hours}</div>
+        <div class="label schedule-title">Выберите время публикации</div>
+        <div class="schedule-wheel-wrap">
+          <div class="schedule-wheel-column">
+            <div class="schedule-wheel-label">Часы</div>
+            <div id="sc-hours-wheel" class="schedule-wheel" role="listbox">${hourValues.map((h) => `<button type="button" class="schedule-wheel-item ${h === '12' ? 'active' : ''}" data-type="hour" data-val="${h}">${h}</button>`).join('')}</div>
+          </div>
+          <div class="schedule-wheel-separator">:</div>
+          <div class="schedule-wheel-column">
+            <div class="schedule-wheel-label">Минуты</div>
+            <div id="sc-mins-wheel" class="schedule-wheel" role="listbox">${minValues.map((m) => `<button type="button" class="schedule-wheel-item ${m === '00' ? 'active' : ''}" data-type="min" data-val="${m}">${m}</button>`).join('')}</div>
+          </div>
+        </div>
       </div>
-      <div class="field" style="margin-top:16px;">
-        <div class="label" style="font-size: 1.05em; font-weight: 600; margin-bottom: 12px; color: var(--text-main);">2. Выберите минуты</div>
-        <div style="display:flex; flex-wrap:wrap; gap:8px;">${mins}</div>
+      <div class="note schedule-preview">
+        Время выхода поста: <b id="sc-preview-time">12:00</b>
       </div>
-      <div class="note" style="margin-top:20px; font-size: 0.95em; color: var(--text-muted); text-align: center; background: var(--bg-sec); padding: 12px; border-radius: 12px;">
-        Время выхода поста: <b id="sc-preview-time" style="font-size: 1.3em; color: var(--text-main); margin-left: 8px;">12:00</b>
-      </div>
-      <div class="field" style="margin-top:8px;">
+      <div class="field">
         <div class="label">Дни публикации</div>
         <div class="day-chip-row">${dayItems}</div>
       </div>
     </div>
   `;
-
-  modal('Добавить время', body, `<button class="btn primary" style="width: 100%; border-radius: 12px; padding: 14px; font-size: 1.1em; font-weight: 600;" data-action="createSchedule">Сохранить расписание</button>`);
+  modal('Добавить время', body, `<button class="btn primary schedule-save-btn" data-action="createSchedule">Сохранить расписание</button>`);
+  document.querySelectorAll('.schedule-wheel-item').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      if (btn.dataset.type === 'hour') window.setCustomTimeHour(btn.dataset.val || '12');
+      else window.setCustomTimeMin(btn.dataset.val || '00');
+    });
+  });
+  document.querySelectorAll('.day-chip').forEach((btn) => {
+    btn.addEventListener('click', () => window.toggleScheduleDay(btn.dataset.day));
+  });
+  window.setCustomTimeHour('12', true);
+  window.setCustomTimeMin('00', true);
 }
 
-window.setCustomTimeHour = function(h) {
+window.setCustomTimeHour = function(h, forceScroll = false) {
   window._tempHour = h;
-  document.querySelectorAll('.sc-hour-btn').forEach(b => {
-    b.className = b.dataset.val === h ? 'btn small primary sc-hour-btn' : 'btn small ghost sc-hour-btn';
-    b.style.fontWeight = '600'; b.style.borderRadius = '10px'; b.style.fontSize = '1.1em'; b.style.padding = '10px 0';
+  document.querySelectorAll('.schedule-wheel-item[data-type="hour"]').forEach((b) => {
+    b.classList.toggle('active', b.dataset.val === h);
   });
+  if (forceScroll) document.querySelector('.schedule-wheel-item[data-type="hour"].active')?.scrollIntoView({ block: 'center' });
   window._updateCustomTimePreview();
 };
 
-window.setCustomTimeMin = function(m) {
+window.setCustomTimeMin = function(m, forceScroll = false) {
   window._tempMin = m;
-  document.querySelectorAll('.sc-min-btn').forEach(b => {
-    b.className = b.dataset.val === m ? 'btn small primary sc-min-btn' : 'btn small ghost sc-min-btn';
-    b.style.fontWeight = '600'; b.style.borderRadius = '10px'; b.style.fontSize = '1.1em'; b.style.padding = '10px 0';
+  document.querySelectorAll('.schedule-wheel-item[data-type="min"]').forEach((b) => {
+    b.classList.toggle('active', b.dataset.val === m);
   });
+  if (forceScroll) document.querySelector('.schedule-wheel-item[data-type="min"].active')?.scrollIntoView({ block: 'center' });
   window._updateCustomTimePreview();
 };
 
@@ -5869,24 +5879,43 @@ async function createSchedule() {
   const timeVal = `${window._tempHour || '12'}:${window._tempMin || '00'}`;
   const days = (window._tempDays || []).join(',');
   if (!days) return toast('Выбери хотя бы один день');
+  const prevSchedules = [...(state.data.schedules || [])];
   try {
-    await api('/api/schedule', {
+    const created = { id: Date.now() * -1, time_hhmm: timeVal, days, enabled: 1 };
+    state.data.schedules = [created, ...(state.data.schedules || [])];
+    render();
+    await api('/api/schedules', {
       method: 'POST',
       body: JSON.stringify({ time_hhmm: timeVal, days, enabled: 1 })
     });
     closeModal();
     toast('Слот добавлен');
-    await refreshSections(['core','schedules'], { silent: true });
+    refreshSections(['core'], { silent: true }).catch(() => {});
+  } catch (e) {
+    state.data.schedules = prevSchedules;
     render();
-  } catch (e) { toast('Ошибка сервера: ' + e.message); }
+    toast('Ошибка сервера: ' + e.message);
+  }
 }
 
 async function deleteSchedule(id) {
   if (!confirmAction(`Удалить слот публикации?`)) return;
+  const numericId = Number(id);
+  const prevSchedules = [...(state.data.schedules || [])];
   try {
-    await api(`/api/schedule/${Number(id)}`, { method: 'DELETE' });
-    toast('Слот удалён');
-    await refreshSections(['core','schedules'], { silent: true });
+    state.pendingDeletedScheduleIds.add(numericId);
     render();
-  } catch (e) { toast('Ошибка сервера: ' + e.message); }
+    await new Promise((resolve) => setTimeout(resolve, 220));
+    state.data.schedules = (state.data.schedules || []).filter((x) => Number(x.id) !== numericId);
+    state.pendingDeletedScheduleIds.delete(numericId);
+    render();
+    await api(`/api/schedules/${numericId}`, { method: 'DELETE' });
+    toast('Слот удалён');
+    refreshSections(['core'], { silent: true }).catch(() => {});
+  } catch (e) {
+    state.pendingDeletedScheduleIds.delete(numericId);
+    state.data.schedules = prevSchedules;
+    render();
+    toast('Ошибка сервера: ' + e.message);
+  }
 }
