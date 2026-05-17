@@ -11,13 +11,12 @@ from aiogram import Bot
 from aiogram.types import FSInputFile
 
 from db import (
-    list_schedules,
+    get_active_schedules_for_time,
     list_plan_items_active_not_posted,
     get_setting,
     get_posts_enabled,
     mark_plan_posted,
     log_post,
-    list_owner_ids,
     log_news,
     set_setting,
     get_draft,
@@ -598,37 +597,30 @@ class SchedulerService:
             current_hhmm = now.strftime("%H:%M")
             weekday = now.weekday()
             self._trim_dedup_caches()
-            for owner_id in await list_owner_ids():
+            schedules = await get_active_schedules_for_time(current_hhmm)
+            for row in schedules:
                 try:
-                    schedules = await list_schedules(owner_id=owner_id)
-                    for row in schedules:
-                        if not int(row.get("enabled", 1)):
-                            continue
-                        if str(row.get("time_hhmm", "")) != current_hhmm:
-                            continue
-                        days = str(row.get("days", "*")).strip().lower()
-                        allowed = set(DAY_MAP[p] for p in days.split(",") if p in DAY_MAP) if days != "*" else set(range(7))
-                        if weekday not in allowed:
-                            continue
-                        schedule_id = int(row.get("id", 0))
-                        minute_key = now.strftime("%Y-%m-%d %H:%M")
-                        # In-memory fast-path (still useful within a single process lifetime)
-                        dedupe_key = (int(owner_id), schedule_id)
-                        if self._last_schedule_run.get(dedupe_key) == minute_key:
-                            continue
-                        # Durable dedup — survives restart
-                        durable_key = f"schedule:{owner_id}:{schedule_id}:{minute_key}"
-                        if await check_scheduler_dedup(durable_key):
-                            self._last_schedule_run[dedupe_key] = minute_key
-                            continue
-                        if not await set_scheduler_dedup(durable_key, trigger_type="schedule", owner_id=owner_id):
-                            continue  # DB write failed — skip to avoid inconsistent state
+                    owner_id = int(row.get("owner_id", 0) or 0)
+                    days = str(row.get("days", "*")).strip().lower()
+                    allowed = set(DAY_MAP[p] for p in days.split(",") if p in DAY_MAP) if days != "*" else set(range(7))
+                    if weekday not in allowed:
+                        continue
+                    schedule_id = int(row.get("id", 0))
+                    minute_key = now.strftime("%Y-%m-%d %H:%M")
+                    dedupe_key = (owner_id, schedule_id)
+                    if self._last_schedule_run.get(dedupe_key) == minute_key:
+                        continue
+                    durable_key = f"schedule:{owner_id}:{schedule_id}:{minute_key}"
+                    if await check_scheduler_dedup(durable_key):
                         self._last_schedule_run[dedupe_key] = minute_key
-                        # Pass channel_profile_id so the post uses channel-specific settings
-                        cpid = int(row.get("channel_profile_id", 0))
-                        await self._job_post_regular(owner_id=owner_id, channel_profile_id=cpid)
+                        continue
+                    if not await set_scheduler_dedup(durable_key, trigger_type="schedule", owner_id=owner_id):
+                        continue
+                    self._last_schedule_run[dedupe_key] = minute_key
+                    cpid = int(row.get("channel_profile_id", 0))
+                    await self._job_post_regular(owner_id=owner_id, channel_profile_id=cpid)
                 except Exception:
-                    logger.exception("_job_schedule_tick inner error owner_id=%s", owner_id)
+                    logger.exception("_job_schedule_tick inner error owner_id=%s", row.get("owner_id"))
         except Exception:
             logger.exception("_job_schedule_tick outer error")
 

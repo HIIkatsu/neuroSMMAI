@@ -23,11 +23,7 @@ async def close_pool() -> None:
         await _pool.close()
 
 def _pg_query(query: str) -> str:
-    parts = query.split('?')
-    res = parts[0]
-    for i, part in enumerate(parts[1:], 1):
-        res += f"${i}" + part
-        
+    res = query
     res = res.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY")
     res = res.replace("datetime('now')", "to_char(CURRENT_TIMESTAMP, 'YYYY-MM-DD\"T\"HH24:MI:SS')")
     res = res.replace("datetime('now', '-7 day')", "to_char(CURRENT_TIMESTAMP - INTERVAL '7 days', 'YYYY-MM-DD\"T\"HH24:MI:SS')")
@@ -1946,6 +1942,36 @@ async def assign_empty_drafts_channel(owner_id: int, channel_target: str) -> Non
         )
         await db.commit()
 
+
+
+
+async def get_active_schedules_for_time(time_hhmm: str) -> list[dict]:
+    """Return enabled schedules for exact HH:MM with active channel context in one query."""
+    hhmm = str(time_hhmm or "").strip()
+    if not hhmm:
+        return []
+    async with _db_ctx() as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            """
+            SELECT
+                s.id,
+                s.owner_id,
+                s.channel_profile_id,
+                s.time_hhmm,
+                s.days,
+                s.enabled,
+                cp.channel_target,
+                cp.is_active
+            FROM schedules s
+            LEFT JOIN channel_profiles cp ON cp.id = s.channel_profile_id AND cp.owner_id = s.owner_id
+            WHERE s.enabled = 1 AND s.time_hhmm = ?
+            ORDER BY s.owner_id ASC, s.id ASC
+            """,
+            (hhmm,),
+        )
+        rows = await cur.fetchall()
+        return [dict(r) for r in rows]
 
 # ---------- owner discovery ----------
 async def list_owner_ids() -> list[int]:
