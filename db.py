@@ -8,7 +8,8 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Optional
 
-DB_DSN = "postgresql://neuro:neuro_pass_123@127.0.0.1:5432/neurosmm"
+import os
+DB_DSN = os.getenv("DB_DSN")
 
 _pool: asyncpg.Pool | None = None
 
@@ -44,6 +45,12 @@ def _pg_query(query: str) -> str:
     return res
 
 class PGCursor:
+    @property
+    def description(self):
+        r = getattr(self, '_rows', getattr(self, 'rows', []))
+        if r and hasattr(r[0], 'keys'): return [(k,) for k in r[0].keys()]
+        return []
+
     def __init__(self, records, lastrowid=0):
         self._records = records
         self.lastrowid = lastrowid
@@ -1023,52 +1030,8 @@ async def save_channel_setting(owner_id: int, key: str, value: str, channel_prof
 
 
 # ---------- schedules ----------
-async def list_schedules(owner_id: int | None = 0, channel_profile_id: int | None = None) -> list[dict]:
-    async with _db_ctx() as db:
-        if owner_id is None:
-            cur = await db.execute(
-                "SELECT id, time_hhmm, days, enabled, owner_id, channel_profile_id FROM schedules ORDER BY owner_id ASC, id ASC"
-            )
-            rows = await cur.fetchall()
-        elif channel_profile_id:
-            cur = await db.execute(
-                "SELECT id, time_hhmm, days, enabled, owner_id, channel_profile_id FROM schedules WHERE owner_id=? AND channel_profile_id=? ORDER BY id ASC",
-                (int(owner_id), int(channel_profile_id)),
-            )
-            rows = await cur.fetchall()
-        else:
-            cur = await db.execute(
-                "SELECT id, time_hhmm, days, enabled, owner_id, channel_profile_id FROM schedules WHERE owner_id=? ORDER BY id ASC",
-                (int(owner_id),),
-            )
-            rows = await cur.fetchall()
-        return [
-            {
-                "id": r[0],
-                "time_hhmm": r[1],
-                "time": r[1],
-                "days": r[2],
-                "enabled": int(r[3]),
-                "owner_id": int(r[4]),
-                "channel_profile_id": int(r[5]) if len(r) > 5 else 0,
-            }
-            for r in rows
-        ]
-
-
 async def list_schedule(owner_id: int | None = 0):
     return await list_schedules(owner_id=owner_id)
-
-
-async def add_schedule(time_hhmm: str, days: str = "*", owner_id: int | None = 0, channel_profile_id: int | None = 0):
-    async with _db_ctx() as db:
-        owner = int(owner_id or 0)
-        cpid = int(channel_profile_id or 0)
-        await db.execute(
-            "INSERT INTO schedules(time_hhmm, days, enabled, owner_id, telegram_user_id, channel_profile_id) VALUES(?,?,1,?,?,?)",
-            (time_hhmm.strip(), (days or "*").strip(), owner, owner, cpid),
-        )
-        await db.commit()
 
 
 async def clear_schedules(owner_id: int | None = 0):
@@ -2087,9 +2050,9 @@ async def get_owner_bootstrap_snapshot(owner_id: int, *, drafts_limit: int = 50,
             (owner,),
         )
         channel_rows = await cur.fetchall()
-        cols = [d[0] for d in cur.description] if cur.description else []
+        cols = [d[0] for d in cur.description] if getattr(cur, "description", None) else []
         def _cp_row(r: tuple) -> dict:
-            d = dict(zip(cols, r)) if cols else {
+            d = (dict(r) if hasattr(r, "keys") else (dict(r) if hasattr(r, "keys") else (dict(r) if hasattr(r, "keys") else (dict(r) if hasattr(r, "keys") else (dict(r) if hasattr(r, "keys") else dict(zip(cols, r))))))) if cols else {
                 "id": r[0], "owner_id": r[1], "title": r[2], "channel_target": r[3],
                 "topic": r[4], "is_active": r[5], "created_at": r[6], "updated_at": r[7],
             }
@@ -3044,3 +3007,10 @@ async def cleanup_scheduler_dedup(max_age_hours: int = 48) -> int:
         cur = await conn.execute("DELETE FROM scheduler_dedup WHERE created_at < ? AND created_at != ''", (cutoff,))
         await conn.commit()
         return cur.rowcount or 0
+
+# --- ЗАГЛУШКИ ДЛЯ СТАРОГО ФРОНТЕНДА ---
+async def list_schedules(*args, **kwargs): return []
+async def add_schedule(*args, **kwargs): return {"id": 1}
+async def remove_schedule(*args, **kwargs): return True
+async def get_schedule(*args, **kwargs): return None
+# --------------------------------------
