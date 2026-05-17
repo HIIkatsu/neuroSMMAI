@@ -724,10 +724,10 @@ async function animateCardRemoval(card) {
   card.style.willChange = 'opacity, transform, max-height';
   await new Promise(resolve => requestAnimationFrame(resolve));
   card.classList.add('draft-removing');
-  await new Promise(resolve => setTimeout(resolve, 180));
+  await new Promise(resolve => setTimeout(resolve, 90));
   card.classList.add('card-collapsing');
   card.style.maxHeight = '0px';
-  await new Promise(resolve => setTimeout(resolve, 360));
+  await new Promise(resolve => setTimeout(resolve, 160));
 }
 
 function showBusy(message = 'Загрузка…') {
@@ -4588,7 +4588,7 @@ async function generatePlan() {
     });
     closeModal();
     toast('Контент-план создан');
-    await refreshSections(['core','plan'], { silent: false });
+    await refreshSections(['core','plan'], { silent: true });
     switchTab('plan');
   } catch (e) {
     toast(e.message || 'Не удалось создать контент-план');
@@ -4618,7 +4618,7 @@ async function createPlanItem() {
     });
     closeModal();
     toast('Элемент добавлен');
-    await refreshSections(['core','plan'], { silent: false });
+    await refreshSections(['core','plan'], { silent: true });
     switchTab('plan');
   } catch (e) {
     toast(e.message);
@@ -4636,7 +4636,7 @@ async function savePlanItem(id) {
     });
     closeModal();
     toast('Элемент обновлён');
-    await refreshSections(['core','plan'], { silent: false });
+    await refreshSections(['core','plan'], { silent: true });
     switchTab('plan');
   } catch (e) {
     toast(e.message);
@@ -4667,12 +4667,12 @@ async function deletePlanItem(id) {
     await api(`/api/plan/${itemId}`, { method: 'DELETE' });
     state.pendingDeletedPlanIds.delete(itemId);
     toast('Элемент плана удалён окончательно');
-    await refreshSections(['core','plan'], { silent: false });
+    await refreshSections(['core','plan'], { silent: true });
   } catch (e) {
     state.pendingDeletedPlanIds.delete(itemId);
     restorePlanToState(removed);
     toast(e.message || 'Не удалось удалить элемент плана');
-    await refreshSections(['core','plan'], { silent: false });
+    await refreshSections(['core','plan'], { silent: true });
   }
   render();
 }
@@ -5905,13 +5905,22 @@ async function createSchedule() {
     const created = { id: Date.now() * -1, time_hhmm: timeVal, days, enabled: 1 };
     state.data.schedules = [created, ...(state.data.schedules || [])];
     if (!patchAutopostScheduleList()) render();
-    await api('/api/schedules', {
+    const createdFromServer = await api('/api/schedules', {
       method: 'POST',
       body: JSON.stringify({ time_hhmm: timeVal, days, enabled: 1 })
     });
+    if (createdFromServer && typeof createdFromServer === 'object') {
+      const normalized = {
+        id: Number(createdFromServer.id || created.id),
+        time_hhmm: String(createdFromServer.time_hhmm || timeVal),
+        days: String(createdFromServer.days || days),
+        enabled: Number(createdFromServer.enabled ?? 1)
+      };
+      state.data.schedules = (state.data.schedules || []).map((slot) => Number(slot.id) === Number(created.id) ? normalized : slot);
+    }
     closeModal();
     toast('Слот добавлен');
-    await refreshSections(['core','schedules'], { silent: true });
+    await refreshSections(['core'], { silent: true });
     if (!patchAutopostScheduleList()) render();
   } catch (e) {
     state.data.schedules = prevSchedules;
