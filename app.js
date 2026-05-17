@@ -5388,6 +5388,36 @@ async function runNewsSniperNow() {
 }
 
 
+function _getVisibleAutopostSlots() {
+  const schedules = Array.isArray(state.data?.schedules)
+    ? state.data.schedules.filter(x => Number(x?.enabled ?? 1) !== 0)
+    : [];
+  return schedules
+    .map(x => ({ id: Number(x.id), time: String(x.time_hhmm || ''), days: String(x.days || 'all') }))
+    .filter(x => x.time)
+    .sort((a, b) => String(a.time).localeCompare(String(b.time)));
+}
+
+function renderAutopostScheduleRows() {
+  const slots = _getVisibleAutopostSlots();
+  if (!slots.length) {
+    return '<div class="autopost-empty-state" id="autopost-empty-state">Время не добавлено.</div>';
+  }
+  return slots.map(slt => `
+    <div class="autopost-slot-row" data-slot-id="${slt.id}">
+      <div class="autopost-slot-title">${escapeHtml(slt.time)} <span class="autopost-slot-days">· ${escapeHtml((slt.days || 'all').toUpperCase())}</span></div>
+      <button class="btn small danger" data-action="deleteSchedule" data-action-arg="${slt.id}">Удалить</button>
+    </div>
+  `).join('');
+}
+
+function patchAutopostScheduleList() {
+  const listEl = document.getElementById('autopost-schedule-list');
+  if (!listEl) return false;
+  listEl.innerHTML = renderAutopostScheduleRows();
+  return true;
+}
+
 function autopostView() {
   const s = state.data?.settings || {};
   const postsEnabled = s.posts_enabled === '1';
@@ -5398,10 +5428,6 @@ function autopostView() {
   const channels = state.data?.channels || [];
   const planCount = (state.data?.plan || []).length;
 
-  const schedules = Array.isArray(state.data?.schedules) ? state.data.schedules.filter(x => Number(x?.enabled ?? 1) !== 0) : [];
-  const slots = schedules.map(x => ({ id: Number(x.id), time: String(x.time_hhmm || ''), days: String(x.days || 'all') }))
-    .filter(x => x.time)
-    .sort((a, b) => String(a.time).localeCompare(String(b.time)));
 
   const sources = [];
   if (postingMode === 'both' || postingMode === 'posts') sources.push({icon: '✦', name: 'ИИ-генерация', desc: 'Автоматические посты по теме канала', active: true});
@@ -5466,12 +5492,8 @@ function autopostView() {
             </div>
             <button class="btn primary small" data-action="openScheduleModal">+ Добавить время</button>
           </div>
-          <div class="list" style="margin-top: 8px;">
-            ${slots.length ? slots.map(slt => `
-              <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px; background: var(--bg-sec); border-radius: 8px; margin-bottom: 6px;">
-                <div style="font-size: 1.1em; font-weight: 600;">${escapeHtml(slt.time)} <span style="font-size:.75em;color:var(--text-muted);font-weight:500;">· ${escapeHtml((slt.days || 'all').toUpperCase())}</span></div>
-                <button class="btn small danger" data-action="deleteSchedule" data-action-arg="${slt.id}">Удалить</button>
-              </div>`).join('') : '<div style="padding: 12px; text-align: center; color: var(--text-muted); font-size: 0.9em; border: 1px dashed var(--border); border-radius: 8px;">Время не добавлено.</div>'}
+          <div class="list autopost-schedule-list" id="autopost-schedule-list" style="margin-top: 8px;">
+            ${renderAutopostScheduleRows()}
           </div>
         </div>
       </div>
@@ -5882,7 +5904,7 @@ async function createSchedule() {
   try {
     const created = { id: Date.now() * -1, time_hhmm: timeVal, days, enabled: 1 };
     state.data.schedules = [created, ...(state.data.schedules || [])];
-    render();
+    if (!patchAutopostScheduleList()) render();
     await api('/api/schedules', {
       method: 'POST',
       body: JSON.stringify({ time_hhmm: timeVal, days, enabled: 1 })
@@ -5890,10 +5912,10 @@ async function createSchedule() {
     closeModal();
     toast('Слот добавлен');
     await refreshSections(['core','schedules'], { silent: true });
-    render();
+    if (!patchAutopostScheduleList()) render();
   } catch (e) {
     state.data.schedules = prevSchedules;
-    render();
+    if (!patchAutopostScheduleList()) render();
     toast('Ошибка сервера: ' + e.message);
   }
 }
@@ -5902,15 +5924,20 @@ async function deleteSchedule(id) {
   if (!confirmAction(`Удалить слот публикации?`)) return;
   const prevSchedules = [...(state.data.schedules || [])];
   try {
+    const rowEl = document.querySelector(`[data-slot-id="${Number(id)}"]`);
+    if (rowEl) {
+      rowEl.classList.add('autopost-slot-removing');
+      await new Promise((resolve) => setTimeout(resolve, 220));
+    }
     state.data.schedules = (state.data.schedules || []).filter((x) => Number(x.id) !== Number(id));
-    render();
+    if (!patchAutopostScheduleList()) render();
     await api(`/api/schedules/${Number(id)}`, { method: 'DELETE' });
     toast('Слот удалён');
     await refreshSections(['core','schedules'], { silent: true });
-    render();
+    if (!patchAutopostScheduleList()) render();
   } catch (e) {
     state.data.schedules = prevSchedules;
-    render();
+    if (!patchAutopostScheduleList()) render();
     toast('Ошибка сервера: ' + e.message);
   }
 }

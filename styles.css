@@ -5418,6 +5418,36 @@ body.modal-open {
   font-size: 11px;
   color: var(--text-muted);
 }
+.autopost-schedule-list {
+  contain: layout paint;
+}
+.autopost-slot-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  padding: 10px;
+  background: var(--bg-sec);
+  border: 1px solid rgba(255,255,255,.05);
+  border-radius: 8px;
+  margin-bottom: 6px;
+  will-change: transform, opacity;
+  transition: opacity .22s ease, transform .22s ease, max-height .22s ease, margin .22s ease, padding .22s ease;
+  max-height: 64px;
+}
+.autopost-slot-title {
+  font-size: 1.1em;
+  font-weight: 600;
+}
+.autopost-slot-removing {
+  opacity: 0;
+  transform: translateY(-4px) scale(.985);
+  max-height: 0;
+  margin: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+  overflow: hidden;
+}
 .autopost-empty-state {
   font-size: 12px;
   color: var(--text-muted);
