@@ -6586,3 +6586,9 @@ body {
 .weekday-chip span{display:block;padding:9px 8px;border-radius:12px;text-align:center;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.14);font-weight:600}
 .weekday-chip input:checked+span{background:linear-gradient(135deg,#6d5efc,#31d0ff);border-color:transparent;color:#fff;box-shadow:0 8px 20px rgba(75,99,255,.3)}
 .ios-wheel-input{font-variant-numeric:tabular-nums;letter-spacing:.06em}
+.schedule-modal-content{background:linear-gradient(180deg,rgba(109,94,252,.08),rgba(49,208,255,.04));border:1px solid rgba(255,255,255,.08);padding:12px;border-radius:16px}
+.day-chip-row{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:8px}
+.day-chip{border:1px solid var(--border);background:var(--bg-sec);color:var(--text-main);border-radius:12px;padding:8px 6px;font-weight:700}
+.day-chip.active{background:linear-gradient(135deg,#6d5efc,#31d0ff);color:#fff;border-color:transparent;box-shadow:0 8px 18px rgba(75,99,255,.28)}
+.draft-removing{opacity:0;transform:translateY(-6px) scale(.98);transition:opacity .18s ease,transform .18s ease}
+.card-collapsing{transition:max-height .34s cubic-bezier(.2,.7,.25,1),margin .34s ease,padding .34s ease;border-width:0!important;margin:0!important;padding-top:0!important;padding-bottom:0!important}
