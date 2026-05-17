@@ -1543,7 +1543,7 @@ async def list_recent_generation_history(owner_id: int | None = 0, limit: int = 
         cur = await db.execute(
             "SELECT id, source, prompt, topic, title, body, cta, short, safety_status, draft_id, created_at FROM generation_history WHERE owner_id=? ORDER BY id DESC LIMIT ?",
             (int(owner_id or 0), int(limit)),
-        )
+        ) 
         rows = await cur.fetchall()
     return [
         {
